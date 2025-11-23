@@ -1,0 +1,89 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+// GPU-accelerated vector operations (replacing NumPy)
+// Local workgroup size
+layout(local_size_x = 256) in;
+
+// Operation type
+layout(constant_id = 0) const uint OPERATION = 0;
+
+// Operations
+const uint OP_ADD = 0;
+const uint OP_SUB = 1;
+const uint OP_MUL = 2;
+const uint OP_SCALE = 3;
+const uint OP_DOT = 4;
+const uint OP_CROSS = 5;
+const uint OP_NORMALIZE = 6;
+const uint OP_LENGTH = 7;
+
+// Input/Output buffers
+layout(std430, binding = 0) readonly buffer InputA {
+    vec3 input_a[];
+};
+
+layout(std430, binding = 1) readonly buffer InputB {
+    vec3 input_b[];
+};
+
+layout(std430, binding = 2) writeonly buffer Output {
+    vec3 output_vec3[];
+};
+
+layout(std430, binding = 3) writeonly buffer OutputScalar {
+    float output_float[];
+};
+
+// Push constants
+layout(push_constant) uniform Constants {
+    uint num_elements;
+    float scalar_value;
+} constants;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= constants.num_elements) {
+        return;
+    }
+
+    vec3 a = input_a[idx];
+    vec3 b = (OPERATION == OP_SCALE) ? vec3(0.0) : input_b[idx];
+
+    switch (OPERATION) {
+        case OP_ADD:
+            output_vec3[idx] = a + b;
+            break;
+
+        case OP_SUB:
+            output_vec3[idx] = a - b;
+            break;
+
+        case OP_MUL:
+            output_vec3[idx] = a * b;  // Element-wise multiplication
+            break;
+
+        case OP_SCALE:
+            output_vec3[idx] = a * constants.scalar_value;
+            break;
+
+        case OP_DOT:
+            output_float[idx] = dot(a, b);
+            break;
+
+        case OP_CROSS:
+            output_vec3[idx] = cross(a, b);
+            break;
+
+        case OP_NORMALIZE: {
+            float len = length(a);
+            output_vec3[idx] = (len > 0.0001) ? (a / len) : vec3(0.0);
+            break;
+        }
+
+        case OP_LENGTH:
+            output_float[idx] = length(a);
+            break;
+    }
+}

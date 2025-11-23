@@ -1,0 +1,178 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Ray generation shader for ray-traced shadows
+// Casts shadow rays from surface points to light sources
+
+layout(binding = 0, set = 0) uniform accelerationStructureEXT top_level_as;
+layout(binding = 1, set = 0, rgba16f) uniform image2D shadow_output;
+
+// G-Buffer inputs
+layout(binding = 2, set = 0) uniform sampler2D g_position;
+layout(binding = 3, set = 0) uniform sampler2D g_normal;
+
+// Camera and light data
+layout(std140, binding = 4, set = 0) uniform CameraUBO {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec3 position;
+} camera;
+
+const int MAX_LIGHTS = 16;
+
+struct Light {
+    vec4 position;      // w: type (0=directional, 1=point, 2=spot)
+    vec4 direction;     // w: spot angle
+    vec4 color;         // w: intensity
+    vec4 params;        // x: range, y: attenuation
+};
+
+layout(std140, binding = 5, set = 0) uniform LightsUBO {
+    Light lights[MAX_LIGHTS];
+    int num_lights;
+} lights_data;
+
+// Ray payload
+layout(location = 0) rayPayloadEXT struct {
+    float shadow_factor;  // 0 = fully shadowed, 1 = fully lit
+    float distance;       // Distance to occluder
+} shadow_payload;
+
+// Push constants
+layout(push_constant) uniform Constants {
+    uint samples_per_light;  // Number of shadow rays per light
+    float bias;              // Shadow bias
+    float shadow_sharpness;  // For soft shadows
+} constants;
+
+// Random number generation (PCG)
+uint pcg_hash(uint seed) {
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float random(inout uint seed) {
+    seed = pcg_hash(seed);
+    return float(seed) / 4294967296.0;
+}
+
+// Sample cone for soft shadows
+vec3 sample_cone(vec3 direction, float angle, inout uint rng_state) {
+    float u1 = random(rng_state);
+    float u2 = random(rng_state);
+
+    float cos_angle = cos(angle);
+    float z = u1 * (1.0 - cos_angle) + cos_angle;
+    float phi = u2 * 2.0 * 3.14159265359;
+
+    float sin_theta = sqrt(1.0 - z * z);
+    float x = sin_theta * cos(phi);
+    float y = sin_theta * sin(phi);
+
+    // Create orthonormal basis
+    vec3 up = abs(direction.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, direction));
+    vec3 bitangent = cross(direction, tangent);
+
+    return normalize(x * tangent + y * bitangent + z * direction);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+
+    // Load G-buffer
+    vec4 g_pos = texture(g_position, uv);
+    vec3 position = g_pos.xyz;
+    vec3 normal = normalize(texture(g_normal, uv).xyz * 2.0 - 1.0);
+
+    // Skip skybox
+    if (g_pos.w >= 0.9999) {
+        imageStore(shadow_output, pixel, vec4(1.0));
+        return;
+    }
+
+    // Initialize RNG
+    uint rng_state = pixel.x + pixel.y * size.x + uint(gl_LaunchIDEXT.z) * size.x * size.y;
+
+    // Accumulate shadows from all lights
+    float total_shadow = 0.0;
+    int shadow_casting_lights = 0;
+
+    for (int i = 0; i < lights_data.num_lights; ++i) {
+        Light light = lights_data.lights[i];
+
+        // Determine light direction and distance
+        vec3 light_dir;
+        float max_distance;
+        float light_size = 0.01;  // Light source size for soft shadows
+
+        if (light.position.w == 0.0) {
+            // Directional light
+            light_dir = normalize(-light.direction.xyz);
+            max_distance = 10000.0;
+            light_size = 0.005;  // Smaller for directional
+        } else {
+            // Point/spot light
+            vec3 to_light = light.position.xyz - position;
+            max_distance = length(to_light);
+            light_dir = to_light / max_distance;
+            light_size = light.params.x * 0.1;  // Based on light range
+
+            // Skip if out of range
+            if (max_distance > light.params.x) continue;
+        }
+
+        shadow_casting_lights++;
+
+        // Cast multiple shadow rays for soft shadows
+        float light_shadow = 0.0;
+
+        for (uint sample = 0; sample < constants.samples_per_light; ++sample) {
+            // Sample direction (with jitter for soft shadows)
+            vec3 ray_dir = light_dir;
+            if (constants.samples_per_light > 1) {
+                float cone_angle = light_size / max(max_distance, 0.001);
+                ray_dir = sample_cone(light_dir, cone_angle, rng_state);
+            }
+
+            // Offset origin to avoid self-intersection
+            vec3 ray_origin = position + normal * constants.bias;
+
+            // Trace shadow ray
+            shadow_payload.shadow_factor = 1.0;
+            shadow_payload.distance = max_distance;
+
+            traceRayEXT(
+                top_level_as,           // Acceleration structure
+                gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                0xFF,                   // Cull mask
+                0,                      // SBT ray type offset
+                0,                      // SBT ray type stride
+                0,                      // Miss shader index
+                ray_origin,             // Ray origin
+                0.001,                  // Ray Tmin
+                ray_dir,                // Ray direction
+                max_distance - 0.001,   // Ray Tmax
+                0                       // Payload location
+            );
+
+            light_shadow += shadow_payload.shadow_factor;
+        }
+
+        light_shadow /= float(constants.samples_per_light);
+        total_shadow += light_shadow;
+    }
+
+    // Average shadow factor
+    float shadow_factor = shadow_casting_lights > 0
+        ? total_shadow / float(shadow_casting_lights)
+        : 1.0;
+
+    // Sharpen shadows if needed
+    shadow_factor = pow(shadow_factor, constants.shadow_sharpness);
+
+    imageStore(shadow_output, pixel, vec4(vec3(shadow_factor), 1.0));
+}

@@ -1,0 +1,55 @@
+#version 450
+
+// GPU-accelerated point transformation
+// Massively parallel transform of thousands of points
+
+layout(local_size_x = 256) in;
+
+// Input points
+layout(std430, binding = 0) readonly buffer InputPoints {
+    vec3 points_in[];
+};
+
+// Output transformed points
+layout(std430, binding = 1) writeonly buffer OutputPoints {
+    vec3 points_out[];
+};
+
+// Transformation matrix
+layout(std140, binding = 2) uniform TransformUBO {
+    mat4 transform;
+} ubo;
+
+// For batch transforms (different matrix per object)
+layout(std430, binding = 3) readonly buffer TransformMatrices {
+    mat4 matrices[];
+};
+
+// Push constants
+layout(push_constant) uniform Constants {
+    uint num_points;
+    uint batch_mode;  // 0 = single transform, 1 = batch transform
+    uint points_per_object;
+} constants;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= constants.num_points) {
+        return;
+    }
+
+    vec3 point = points_in[idx];
+
+    if (constants.batch_mode == 0) {
+        // Single transform for all points
+        vec4 transformed = ubo.transform * vec4(point, 1.0);
+        points_out[idx] = transformed.xyz;
+    } else {
+        // Batch mode: different matrix per object
+        uint object_idx = idx / constants.points_per_object;
+        mat4 transform = matrices[object_idx];
+        vec4 transformed = transform * vec4(point, 1.0);
+        points_out[idx] = transformed.xyz;
+    }
+}
