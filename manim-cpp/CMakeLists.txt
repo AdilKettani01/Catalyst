@@ -320,8 +320,31 @@ if(MANIM_BUILD_PYTHON_BINDINGS)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
     find_package(pybind11 REQUIRED)
 
-    pybind11_add_module(pymanim bindings/python/bindings.cpp)
-    target_link_libraries(pymanim PRIVATE manim)
+    # Create Python module named 'manim_cpp'
+    pybind11_add_module(manim_cpp bindings/python/bindings.cpp)
+    target_link_libraries(manim_cpp PRIVATE manim)
+
+    # Set output directory to match Python package structure
+    set_target_properties(manim_cpp PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/manim_cpp"
+        OUTPUT_NAME "manim_cpp"
+    )
+
+    # Copy __init__.py to output directory
+    add_custom_command(TARGET manim_cpp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/__init__.py
+            ${CMAKE_BINARY_DIR}/python/manim_cpp/__init__.py
+        COMMENT "Copying Python __init__.py"
+    )
+
+    # Install Python module
+    install(TARGETS manim_cpp
+        LIBRARY DESTINATION ${Python3_SITELIB}/manim_cpp
+    )
+    install(FILES bindings/python/__init__.py
+        DESTINATION ${Python3_SITELIB}/manim_cpp
+    )
 endif()
 
 # ==============================================================================
