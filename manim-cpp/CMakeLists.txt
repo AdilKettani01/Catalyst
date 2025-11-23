@@ -292,6 +292,46 @@ if(MANIM_BUILD_TESTS)
     )
 
     add_test(NAME manim_tests COMMAND manim_tests)
+
+    # Validation tests
+    file(GLOB VALIDATION_SOURCES "tests/validation/*.cpp")
+
+    # System verification test
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation/system_verification.cpp")
+        add_executable(system_verification tests/validation/system_verification.cpp)
+        target_link_libraries(system_verification
+            PRIVATE
+                manim
+                GTest::gtest
+                GTest::gtest_main
+        )
+        add_test(NAME system_verification COMMAND system_verification)
+    endif()
+
+    # GPU 3D integration tests
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation/gpu_3d_integration_tests.cpp")
+        add_executable(gpu_3d_integration_tests tests/validation/gpu_3d_integration_tests.cpp)
+        target_link_libraries(gpu_3d_integration_tests
+            PRIVATE
+                manim
+                GTest::gtest
+                GTest::gtest_main
+        )
+        add_test(NAME gpu_3d_integration_tests COMMAND gpu_3d_integration_tests)
+    endif()
+
+    # Performance benchmarks (validation version)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation/performance_benchmarks.cpp")
+        find_package(benchmark QUIET)
+        if(benchmark_FOUND)
+            add_executable(performance_benchmarks tests/validation/performance_benchmarks.cpp)
+            target_link_libraries(performance_benchmarks
+                PRIVATE
+                    manim
+                    benchmark::benchmark
+            )
+        endif()
+    endif()
 endif()
 
 # ==============================================================================
