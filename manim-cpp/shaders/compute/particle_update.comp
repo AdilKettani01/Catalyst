@@ -1,0 +1,249 @@
+#version 450
+
+// GPU particle system update
+// Updates millions of particles in parallel
+
+layout(local_size_x = 256) in;
+
+// Particle structure (64 bytes - cache friendly)
+struct Particle {
+    vec3 position;    // 12 bytes
+    float lifetime;   // 4 bytes
+    vec3 velocity;    // 12 bytes
+    float size;       // 4 bytes
+    vec4 color;       // 16 bytes
+    vec3 acceleration;// 12 bytes
+    float mass;       // 4 bytes
+};  // Total: 64 bytes
+
+// Particle buffers
+layout(std430, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+// Emitter configuration
+struct Emitter {
+    vec3 position;
+    float rate;
+    vec3 direction;
+    float spread;
+    vec3 velocity_min;
+    float lifetime_min;
+    vec3 velocity_max;
+    float lifetime_max;
+    vec4 color_start;
+    vec4 color_end;
+    float size_start;
+    float size_end;
+};
+
+layout(std140, binding = 1) uniform EmitterUBO {
+    Emitter emitter;
+};
+
+// Force fields
+const int MAX_FORCE_FIELDS = 8;
+
+struct ForceField {
+    vec4 position;     // w: type (0=gravity, 1=point, 2=vortex, 3=wind)
+    vec4 direction;    // w: strength
+    vec4 params;       // x: radius, y: falloff, z,w: unused
+};
+
+layout(std140, binding = 2) uniform ForceFieldsUBO {
+    ForceField force_fields[MAX_FORCE_FIELDS];
+    int num_force_fields;
+} forces;
+
+// SPH (Smoothed Particle Hydrodynamics) parameters
+layout(std140, binding = 3) uniform SPHParams {
+    bool enabled;
+    float rest_density;
+    float gas_constant;
+    float viscosity;
+    float smoothing_radius;
+    float particle_mass;
+} sph;
+
+// Spatial hash grid for neighbor search (SPH)
+layout(std430, binding = 4) readonly buffer SpatialHashGrid {
+    uint grid_data[];
+};
+
+// Push constants
+layout(push_constant) uniform Constants {
+    uint num_particles;
+    uint num_alive;
+    float delta_time;
+    uint emit_count;
+    uint random_seed;
+} constants;
+
+// Random number generation
+uint pcg_hash(uint seed) {
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float random(inout uint seed) {
+    seed = pcg_hash(seed);
+    return float(seed) / 4294967296.0;
+}
+
+vec3 random_in_cone(vec3 direction, float spread, inout uint seed) {
+    float u1 = random(seed);
+    float u2 = random(seed);
+
+    float cos_spread = cos(spread);
+    float z = u1 * (1.0 - cos_spread) + cos_spread;
+    float phi = u2 * 2.0 * 3.14159265359;
+
+    float sin_theta = sqrt(1.0 - z * z);
+    float x = sin_theta * cos(phi);
+    float y = sin_theta * sin(phi);
+
+    vec3 up = abs(direction.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, direction));
+    vec3 bitangent = cross(direction, tangent);
+
+    return normalize(x * tangent + y * bitangent + z * direction);
+}
+
+// Apply force fields
+vec3 compute_forces(vec3 position, vec3 velocity, float mass) {
+    vec3 total_force = vec3(0.0);
+
+    for (int i = 0; i < forces.num_force_fields; ++i) {
+        ForceField field = forces.force_fields[i];
+
+        if (field.position.w == 0.0) {
+            // Gravity
+            total_force += field.direction.xyz * field.direction.w;
+
+        } else if (field.position.w == 1.0) {
+            // Point attractor/repulsor
+            vec3 to_field = field.position.xyz - position;
+            float dist = length(to_field);
+
+            if (dist < field.params.x) {  // Within radius
+                float strength = field.direction.w;
+                float falloff = 1.0 - pow(dist / field.params.x, field.params.y);
+                total_force += normalize(to_field) * strength * falloff;
+            }
+
+        } else if (field.position.w == 2.0) {
+            // Vortex
+            vec3 to_field = field.position.xyz - position;
+            float dist = length(to_field);
+
+            if (dist < field.params.x && dist > 0.001) {
+                vec3 axis = normalize(field.direction.xyz);
+                vec3 tangent = cross(axis, to_field);
+                float strength = field.direction.w * (1.0 - dist / field.params.x);
+                total_force += normalize(tangent) * strength;
+            }
+
+        } else if (field.position.w == 3.0) {
+            // Wind
+            total_force += field.direction.xyz * field.direction.w;
+        }
+    }
+
+    return total_force / mass;
+}
+
+// SPH fluid simulation (simplified)
+vec3 compute_sph_forces(uint particle_idx, vec3 position, vec3 velocity) {
+    if (!sph.enabled) return vec3(0.0);
+
+    // This is a simplified version - full SPH requires spatial hashing
+    vec3 pressure_force = vec3(0.0);
+    vec3 viscosity_force = vec3(0.0);
+
+    float h = sph.smoothing_radius;
+    float h2 = h * h;
+
+    // Find neighbors (brute force for now - optimize with spatial hash)
+    for (uint i = 0; i < min(constants.num_alive, 512u); ++i) {
+        if (i == particle_idx) continue;
+
+        vec3 neighbor_pos = particles[i].position;
+        vec3 diff = position - neighbor_pos;
+        float r2 = dot(diff, diff);
+
+        if (r2 < h2 && r2 > 0.0001) {
+            float r = sqrt(r2);
+
+            // Poly6 kernel for density
+            float poly6 = 315.0 / (64.0 * 3.14159265359 * pow(h, 9.0));
+            float w = poly6 * pow(h2 - r2, 3.0);
+
+            // Pressure (simplified)
+            pressure_force += diff * w * sph.gas_constant;
+
+            // Viscosity
+            vec3 velocity_diff = particles[i].velocity - velocity;
+            viscosity_force += velocity_diff * w * sph.viscosity;
+        }
+    }
+
+    return (pressure_force + viscosity_force) / sph.particle_mass;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= constants.num_particles) {
+        return;
+    }
+
+    Particle p = particles[idx];
+
+    // Check if particle is dead
+    if (p.lifetime <= 0.0) {
+        // Emit new particle if needed
+        if (idx < constants.emit_count) {
+            uint seed = constants.random_seed + idx;
+
+            // Initialize new particle
+            p.position = emitter.position;
+
+            vec3 emit_dir = random_in_cone(emitter.direction, emitter.spread, seed);
+            float vel_mag = mix(length(emitter.velocity_min), length(emitter.velocity_max), random(seed));
+            p.velocity = emit_dir * vel_mag;
+
+            p.lifetime = mix(emitter.lifetime_min, emitter.lifetime_max, random(seed));
+            p.size = emitter.size_start;
+            p.color = emitter.color_start;
+            p.acceleration = vec3(0.0);
+            p.mass = sph.particle_mass;
+        }
+
+        particles[idx] = p;
+        return;
+    }
+
+    // Update existing particle
+    float dt = constants.delta_time;
+
+    // Compute forces
+    vec3 forces_accel = compute_forces(p.position, p.velocity, p.mass);
+    vec3 sph_accel = compute_sph_forces(idx, p.position, p.velocity);
+
+    // Update physics
+    p.acceleration = forces_accel + sph_accel;
+    p.velocity += p.acceleration * dt;
+    p.position += p.velocity * dt;
+
+    // Update lifetime
+    p.lifetime -= dt;
+    float life_ratio = p.lifetime / emitter.lifetime_max;
+
+    // Interpolate size and color
+    p.size = mix(emitter.size_end, emitter.size_start, life_ratio);
+    p.color = mix(emitter.color_end, emitter.color_start, life_ratio);
+
+    // Write back
+    particles[idx] = p;
+}

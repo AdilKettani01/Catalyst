@@ -1,0 +1,61 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Any-hit shader for shadow rays
+// Called on every potential intersection - used for alpha testing
+
+layout(location = 0) rayPayloadInEXT struct {
+    float shadow_factor;  // 0 = fully shadowed, 1 = fully lit
+    float distance;       // Distance to occluder
+} shadow_payload;
+
+// Material data
+layout(binding = 6, set = 0) uniform sampler2D material_textures[];
+
+hitAttributeEXT vec2 hit_attribs;  // Barycentric coordinates
+
+struct Vertex {
+    vec3 position;
+    vec3 normal;
+    vec2 uv;
+    vec4 color;
+};
+
+// Vertex buffer
+layout(binding = 7, set = 0) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+// Index buffer
+layout(binding = 8, set = 0) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+void main() {
+    // Get triangle indices
+    uint base_index = gl_PrimitiveID * 3;
+    uint i0 = indices[base_index + 0];
+    uint i1 = indices[base_index + 1];
+    uint i2 = indices[base_index + 2];
+
+    // Get vertices
+    Vertex v0 = vertices[i0];
+    Vertex v1 = vertices[i1];
+    Vertex v2 = vertices[i2];
+
+    // Interpolate UV coordinates
+    vec3 barycentrics = vec3(1.0 - hit_attribs.x - hit_attribs.y, hit_attribs.x, hit_attribs.y);
+    vec2 uv = v0.uv * barycentrics.x + v1.uv * barycentrics.y + v2.uv * barycentrics.z;
+
+    // Alpha test (if material has alpha texture)
+    // For now, we'll assume material index 0 has alpha
+    // In real implementation, you'd query material properties
+    // float alpha = texture(material_textures[0], uv).a;
+    // if (alpha < 0.5) {
+    //     ignoreIntersectionEXT();
+    // }
+
+    // For opaque shadow, set shadow factor and terminate
+    shadow_payload.shadow_factor = 0.0;
+    shadow_payload.distance = gl_HitTEXT;
+}
