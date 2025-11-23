@@ -175,7 +175,7 @@ function(compile_shader TARGET SHADER)
     add_custom_command(
         OUTPUT ${SPIRV_OUTPUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/shaders
-        COMMAND ${GLSLANG_VALIDATOR} -V -S ${STAGE} ${SHADER} -o ${SPIRV_OUTPUT}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.2 -S ${STAGE} ${SHADER} -o ${SPIRV_OUTPUT}
         DEPENDS ${SHADER}
         COMMENT "Compiling shader: ${SHADER_NAME}"
     )

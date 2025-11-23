@@ -10,8 +10,8 @@
 #include <optional>
 
 #include "manim/core/types.h"
-#include "manim/mobject/mobject.h"
-#include "manim/animation/animation.h"
+#include "manim/mobject/mobject.hpp"
+#include "manim/animation/animation.hpp"
 
 namespace manim {
 

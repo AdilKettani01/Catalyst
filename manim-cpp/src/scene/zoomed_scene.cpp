@@ -1,4 +1,4 @@
-#include "manim/scene/zoomed_scene.h"
+#include "manim/scene/zoomed_scene.hpp"
 #include <iostream>
 
 namespace manim {

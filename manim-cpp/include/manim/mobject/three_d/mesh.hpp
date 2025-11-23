@@ -225,9 +225,20 @@ public:
     size_t get_num_triangles() const { return indices_.size() / 3; }
 
     /**
+     * @brief Copy this mesh
+     */
+    Ptr copy() const override {
+        auto copied = std::make_shared<GPUMesh>();
+        copied->vertices_ = vertices_;
+        copied->indices_ = indices_;
+        copied->mesh_dirty_ = true;
+        return copied;
+    }
+
+    /**
      * @brief Compute mesh bounding box
      */
-    std::pair<math::Vec3, math::Vec3> get_bounding_box() const override;
+    std::pair<math::Vec3, math::Vec3> get_bounding_box() const;
 
     /**
      * @brief Recalculate normals (CPU)

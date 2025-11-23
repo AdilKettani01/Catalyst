@@ -1,7 +1,7 @@
-#include "manim/scene/hybrid_scene_manager.h"
-#include "manim/scene/scene.h"
-#include "manim/mobject/mobject.h"
-#include "manim/animation/animation.h"
+#include "manim/scene/hybrid_scene_manager.hpp"
+#include "manim/scene/scene.hpp"
+#include "manim/mobject/mobject.hpp"
+#include "manim/animation/animation.hpp"
 #include <iostream>
 #include <chrono>
 #include <algorithm>

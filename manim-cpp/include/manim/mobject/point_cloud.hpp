@@ -3,6 +3,7 @@
 #include "manim/mobject/mobject.hpp"
 #include "manim/core/math.hpp"
 #include <vector>
+#include <optional>
 
 namespace manim {
 
@@ -123,11 +124,22 @@ public:
     // Utilities
     // ========================================================================
 
-    size_t get_num_points() const override { return positions_.size(); }
+    size_t get_num_points() const { return positions_.size(); }
 
     const std::vector<math::Vec3>& get_positions() const { return positions_; }
     const std::vector<math::Vec4>& get_colors() const { return colors_; }
     const std::vector<float>& get_sizes() const { return sizes_; }
+
+    Ptr copy() const override {
+        auto copied = std::make_shared<PointCloudMobject>();
+        copied->positions_ = positions_;
+        copied->colors_ = colors_;
+        copied->sizes_ = sizes_;
+        copied->default_point_size_ = default_point_size_;
+        copied->billboard_mode_ = billboard_mode_;
+        copied->gpu_dirty_ = true;
+        return copied;
+    }
 
 protected:
     void generate_points() override;

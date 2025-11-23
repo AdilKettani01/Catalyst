@@ -12,5 +12,5 @@ layout(location = 0) rayPayloadInEXT struct {
 void main() {
     // No occlusion - fully lit
     shadow_payload.shadow_factor = 1.0;
-    shadow_payload.distance = gl_HitTEXT;
+    shadow_payload.distance = gl_RayTmaxEXT;
 }

@@ -122,6 +122,21 @@ public:
      */
     void reload();
 
+    /**
+     * @brief Get Vulkan shader module
+     */
+    VkShaderModule get_module() const;
+
+    /**
+     * @brief Get shader stage info for pipeline creation
+     */
+    VkPipelineShaderStageCreateInfo get_stage_info() const;
+
+    /**
+     * @brief Get Vulkan shader stage flag
+     */
+    VkShaderStageFlagBits get_vulkan_stage() const;
+
 private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkShaderModule module_ = VK_NULL_HANDLE;
@@ -343,6 +358,120 @@ public:
 
 private:
     std::filesystem::path cache_dir_;
+};
+
+/**
+ * @brief Pipeline configuration structures
+ */
+struct ComputePipelineConfig {
+    std::vector<VkDescriptorSetLayout> descriptor_layouts;
+    std::vector<VkPushConstantRange> push_constants;
+};
+
+struct GraphicsPipelineConfig {
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+    VkPipelineColorBlendStateCreateInfo color_blending{};
+    VkPipelineDynamicStateCreateInfo dynamic_state{};
+    std::vector<VkDescriptorSetLayout> descriptor_layouts;
+    std::vector<VkPushConstantRange> push_constants;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    uint32_t subpass = 0;
+};
+
+struct RayTracingPipelineConfig {
+    std::vector<VkDescriptorSetLayout> descriptor_layouts;
+    std::vector<VkPushConstantRange> push_constants;
+};
+
+struct MeshPipelineConfig {
+    std::vector<VkDescriptorSetLayout> descriptor_layouts;
+    std::vector<VkPushConstantRange> push_constants;
+};
+
+/**
+ * @brief Shader pipeline wrapper
+ */
+class ShaderPipeline {
+public:
+    ShaderPipeline() = default;
+    ~ShaderPipeline();
+
+    void add_shader(std::shared_ptr<ShaderModule> shader);
+
+    void create_compute_pipeline(VkDevice device, const ComputePipelineConfig& config);
+    void create_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig& config);
+    void create_ray_tracing_pipeline(VkDevice device, const RayTracingPipelineConfig& config);
+    void create_mesh_pipeline(VkDevice device, const MeshPipelineConfig& config);
+
+    void bind(VkCommandBuffer cmd);
+    void bind_descriptor_sets(VkCommandBuffer cmd,
+                            const std::vector<VkDescriptorSet>& sets,
+                            const std::vector<uint32_t>& dynamic_offsets = {});
+    void push_constants(VkCommandBuffer cmd, VkShaderStageFlags stages,
+                       uint32_t offset, uint32_t size, const void* data);
+
+    VkPipeline get_handle() const { return pipeline_; }
+    VkPipelineLayout get_layout() const { return layout_; }
+
+private:
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout layout_ = VK_NULL_HANDLE;
+    VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    std::vector<std::shared_ptr<ShaderModule>> shaders_;
+};
+
+// Update ShaderManager class
+class ShaderManager {
+public:
+    explicit ShaderManager(VkDevice device);
+    ~ShaderManager();
+
+    std::shared_ptr<ShaderModule> load_shader(
+        const std::filesystem::path& path,
+        ShaderStage stage,
+        const ShaderCompileOptions& options = {}
+    );
+
+    std::shared_ptr<ShaderModule> create_shader(
+        const std::string& source,
+        ShaderStage stage,
+        const ShaderCompileOptions& options = {}
+    );
+
+    std::shared_ptr<ShaderPipeline> create_compute_pipeline(
+        std::shared_ptr<ShaderModule> compute_shader,
+        const ComputePipelineConfig& config
+    );
+
+    std::shared_ptr<ShaderPipeline> create_graphics_pipeline(
+        const std::vector<std::shared_ptr<ShaderModule>>& shaders,
+        const GraphicsPipelineConfig& config
+    );
+
+    void reload_all();
+    void clear();
+
+private:
+    VkDevice device_;
+    std::vector<std::shared_ptr<ShaderModule>> shaders_;
+    std::vector<std::shared_ptr<ShaderPipeline>> pipelines_;
+};
+
+// Update BuiltInShaders class
+class BuiltInShaders {
+public:
+    static void initialize(VkDevice device);
+    static std::shared_ptr<ShaderPipeline> get_pbr_pipeline();
+    static std::shared_ptr<ShaderPipeline> get_unlit_pipeline();
+    static std::shared_ptr<ShaderPipeline> get_wireframe_pipeline();
+    static std::shared_ptr<ShaderPipeline> get_shadow_pipeline();
+    static std::shared_ptr<ShaderPipeline> get_post_process_pipeline(const std::string& effect);
 };
 
 } // namespace manim

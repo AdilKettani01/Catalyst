@@ -1,4 +1,4 @@
-#include "manim/cli/config.h"
+#include "manim/cli/config.hpp"
 #include <iostream>
 #include <fstream>
 

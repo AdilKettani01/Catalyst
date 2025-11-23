@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <span>
+#include <cstring>
 #include <glm/glm.hpp>
 
 namespace manim {

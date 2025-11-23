@@ -1,5 +1,5 @@
-#include "manim/scene/enhanced_camera.h"
-#include "manim/scene/scene.h"
+#include "manim/scene/enhanced_camera.hpp"
+#include "manim/scene/scene.hpp"
 #include <iostream>
 #include <cmath>
 

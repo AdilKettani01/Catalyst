@@ -29,9 +29,9 @@ void VMobject::init_colors() {
 // ============================================================================
 
 void VMobject::set_points(const std::vector<math::Vec3>& points) {
-    cpu_points_ = points;
+    points_cpu_ = points;
     ensure_valid_points();
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
@@ -40,30 +40,30 @@ void VMobject::add_cubic_bezier_curve(
     const std::array<math::Vec3, 2>& handles
 ) {
     // Add 4 control points: anchor0, handle0, handle1, anchor1
-    if (!cpu_points_.empty() && has_new_path_started_) {
+    if (!points_cpu_.empty() && has_new_path_started_) {
         // Continue from last anchor
-        cpu_points_.push_back(handles[0]);
-        cpu_points_.push_back(handles[1]);
-        cpu_points_.push_back(anchors[1]);
+        points_cpu_.push_back(handles[0]);
+        points_cpu_.push_back(handles[1]);
+        points_cpu_.push_back(anchors[1]);
     } else {
         // New curve
-        cpu_points_.push_back(anchors[0]);
-        cpu_points_.push_back(handles[0]);
-        cpu_points_.push_back(handles[1]);
-        cpu_points_.push_back(anchors[1]);
+        points_cpu_.push_back(anchors[0]);
+        points_cpu_.push_back(handles[0]);
+        points_cpu_.push_back(handles[1]);
+        points_cpu_.push_back(anchors[1]);
         has_new_path_started_ = true;
     }
 
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
 void VMobject::add_line_to(const math::Vec3& point) {
-    if (cpu_points_.empty()) {
-        cpu_points_.push_back(math::Vec3{0.0f});
+    if (points_cpu_.empty()) {
+        points_cpu_.push_back(math::Vec3{0.0f});
     }
 
-    math::Vec3 start = cpu_points_.back();
+    math::Vec3 start = points_cpu_.back();
     math::Vec3 handle1 = start + (point - start) * 0.333f;
     math::Vec3 handle2 = start + (point - start) * 0.667f;
 
@@ -71,17 +71,17 @@ void VMobject::add_line_to(const math::Vec3& point) {
 }
 
 void VMobject::start_new_path(const math::Vec3& point) {
-    cpu_points_.push_back(point);
+    points_cpu_.push_back(point);
     has_new_path_started_ = false;
 }
 
 void VMobject::close_path() {
-    if (cpu_points_.size() < 4) {
+    if (points_cpu_.size() < 4) {
         return;
     }
 
-    math::Vec3 first = cpu_points_[0];
-    math::Vec3 last = cpu_points_.back();
+    math::Vec3 first = points_cpu_[0];
+    math::Vec3 last = points_cpu_.back();
 
     if (glm::length(first - last) > tolerance_for_point_equality_) {
         add_line_to(first);
@@ -96,7 +96,7 @@ void VMobject::make_smooth() {
 void VMobject::make_jagged() {
     // Convert to straight lines between anchors
     auto anchors = get_anchors();
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     for (size_t i = 0; i < anchors.size() - 1; ++i) {
         math::Vec3 start = anchors[i];
@@ -117,7 +117,7 @@ void VMobject::compute_smooth_handles() {
         return;
     }
 
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     for (size_t i = 0; i < anchors.size() - 1; ++i) {
         math::Vec3 p0 = (i > 0) ? anchors[i - 1] : anchors[i];
@@ -135,15 +135,15 @@ void VMobject::compute_smooth_handles() {
 
 void VMobject::ensure_valid_points() {
     // Points array must have size 0 or 1 mod 4
-    size_t remainder = cpu_points_.size() % 4;
+    size_t remainder = points_cpu_.size() % 4;
 
     if (remainder != 0 && remainder != 1) {
         // Invalid size, truncate
-        size_t new_size = (cpu_points_.size() / 4) * 4;
-        if (cpu_points_.size() > 0) {
+        size_t new_size = (points_cpu_.size() / 4) * 4;
+        if (points_cpu_.size() > 0) {
             new_size++;  // Keep at least the first anchor
         }
-        cpu_points_.resize(new_size);
+        points_cpu_.resize(new_size);
         spdlog::warn("VMobject points resized to valid size: {}", new_size);
     }
 }
@@ -220,7 +220,7 @@ void VMobject::update_bezier_gpu_buffers(MemoryPool& pool) {
     }
 
     if (!bezier_control_points_buffer_ ||
-        bezier_control_points_buffer_->size() < buffer_size) {
+        bezier_control_points_buffer_->get_size() < buffer_size) {
         bezier_control_points_buffer_ = pool.allocate_buffer(
             buffer_size,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -292,40 +292,40 @@ VMobject& VMobject::set_cap_style(CapStyleType style) {
 // ============================================================================
 
 size_t VMobject::get_num_curves() const {
-    if (cpu_points_.size() < 4) {
+    if (points_cpu_.size() < 4) {
         return 0;
     }
 
     // Each curve has 4 points, but they share endpoints
     // Formula: (n - 1) / 3 where n is number of points (excluding first anchor)
-    return (cpu_points_.size() - 1) / 3;
+    return (points_cpu_.size() - 1) / 3;
 }
 
 std::array<math::Vec3, 4> VMobject::get_curve_points(size_t index) const {
     size_t start_idx = index * 3;
 
-    if (start_idx + 3 >= cpu_points_.size()) {
+    if (start_idx + 3 >= points_cpu_.size()) {
         throw std::out_of_range("Curve index out of range");
     }
 
     return {
-        cpu_points_[start_idx],
-        cpu_points_[start_idx + 1],
-        cpu_points_[start_idx + 2],
-        cpu_points_[start_idx + 3]
+        points_cpu_[start_idx],
+        points_cpu_[start_idx + 1],
+        points_cpu_[start_idx + 2],
+        points_cpu_[start_idx + 3]
     };
 }
 
 std::vector<math::Vec3> VMobject::get_anchors() const {
     std::vector<math::Vec3> anchors;
 
-    if (cpu_points_.empty()) {
+    if (points_cpu_.empty()) {
         return anchors;
     }
 
     // Anchors are at indices 0, 3, 6, 9, ...
-    for (size_t i = 0; i < cpu_points_.size(); i += 3) {
-        anchors.push_back(cpu_points_[i]);
+    for (size_t i = 0; i < points_cpu_.size(); i += 3) {
+        anchors.push_back(points_cpu_[i]);
     }
 
     return anchors;
@@ -428,8 +428,8 @@ void VMobject::insert_n_curves(size_t n) {
         }
     }
 
-    cpu_points_ = new_points;
-    points_dirty_ = true;
+    points_cpu_ = new_points;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
@@ -444,12 +444,12 @@ void VMobject::align_points(const VMobject& other) {
 }
 
 bool VMobject::is_closed() const {
-    if (cpu_points_.size() < 4) {
+    if (points_cpu_.size() < 4) {
         return false;
     }
 
-    math::Vec3 first = cpu_points_[0];
-    math::Vec3 last = cpu_points_.back();
+    math::Vec3 first = points_cpu_[0];
+    math::Vec3 last = points_cpu_.back();
 
     return glm::length(first - last) < tolerance_for_point_equality_;
 }
@@ -475,6 +475,45 @@ VMobject::GPUFillData VMobject::get_gpu_fill_data() const {
     data.sheen_factor = sheen_factor_;
     data.sheen_direction = sheen_direction_;
     return data;
+}
+
+VMobject::Ptr VMobject::copy() const {
+    auto copied = std::make_shared<VMobject>();
+
+    // Copy base class data
+    copied->points_cpu_ = points_cpu_;
+    copied->submobjects_ = submobjects_;
+    copied->color_ = color_;
+    copied->opacity_ = opacity_;
+    copied->z_index_ = z_index_;
+
+    // Copy VMobject specific data
+    copied->fill_color_ = fill_color_;
+    copied->fill_opacity_ = fill_opacity_;
+    copied->stroke_color_ = stroke_color_;
+    copied->stroke_width_ = stroke_width_;
+    copied->stroke_opacity_ = stroke_opacity_;
+    copied->background_stroke_color_ = background_stroke_color_;
+    copied->background_stroke_width_ = background_stroke_width_;
+    copied->background_stroke_opacity_ = background_stroke_opacity_;
+    copied->sheen_factor_ = sheen_factor_;
+    copied->sheen_direction_ = sheen_direction_;
+    copied->joint_type_ = joint_type_;
+    copied->cap_style_ = cap_style_;
+    copied->has_new_path_started_ = has_new_path_started_;
+    copied->shade_in_3d_ = shade_in_3d_;
+    copied->close_new_points_ = close_new_points_;
+    copied->n_points_per_cubic_curve_ = n_points_per_cubic_curve_;
+    copied->tolerance_for_point_equality_ = tolerance_for_point_equality_;
+    copied->tessellated_points_ = tessellated_points_;
+
+    // Mark as needing GPU update
+    copied->gpu_dirty_ = true;
+    copied->tessellation_dirty_ = true;
+
+    // Don't copy GPU buffers - they'll be recreated when needed
+
+    return copied;
 }
 
 // ============================================================================

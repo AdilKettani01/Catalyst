@@ -1,4 +1,4 @@
-#include "manim/cli/gpu_detector.h"
+#include "manim/cli/gpu_detector.hpp"
 #include <iostream>
 #include <iomanip>
 #include <sstream>

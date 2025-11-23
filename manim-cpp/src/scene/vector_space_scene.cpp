@@ -1,4 +1,4 @@
-#include "manim/scene/vector_space_scene.h"
+#include "manim/scene/vector_space_scene.hpp"
 #include <iostream>
 
 namespace manim {

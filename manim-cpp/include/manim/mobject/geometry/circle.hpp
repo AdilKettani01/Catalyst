@@ -27,6 +27,17 @@ public:
      */
     Circle& surround(const Mobject& mobject, float buffer = 0.2f);
 
+    /**
+     * @brief Copy this circle
+     */
+    Ptr copy() const override {
+        auto copied = std::make_shared<Circle>(radius_, num_segments_);
+        // Copy properties using public methods
+        copied->set_fill(get_fill_color(), get_fill_opacity());
+        copied->set_stroke(get_stroke_color(), get_stroke_width(), get_stroke_opacity());
+        return copied;
+    }
+
 protected:
     void generate_points() override;
 
@@ -42,6 +53,12 @@ class Dot : public Circle {
 public:
     explicit Dot(const math::Vec3& position = math::Vec3{0.0f}, float radius = 0.08f);
 
+    Ptr copy() const override {
+        auto dot_pos = get_center();
+        auto copied = std::make_shared<Dot>(dot_pos, get_radius());
+        return copied;
+    }
+
     static constexpr float DEFAULT_DOT_RADIUS = 0.08f;
 };
 
@@ -54,6 +71,11 @@ public:
 
     Ellipse& set_width(float width);
     Ellipse& set_height(float height);
+
+    Ptr copy() const override {
+        auto copied = std::make_shared<Ellipse>(width_, height_, num_segments_);
+        return copied;
+    }
 
 protected:
     void generate_points() override;
@@ -79,6 +101,11 @@ public:
     Arc& set_angle(float angle);
     float get_angle() const { return angle_; }
 
+    Ptr copy() const override {
+        auto copied = std::make_shared<Arc>(radius_, start_angle_, angle_, num_segments_);
+        return copied;
+    }
+
 protected:
     void generate_points() override;
 
@@ -99,6 +126,13 @@ public:
         float outer_radius = 1.0f,
         uint32_t num_segments = 64
     );
+
+    Ptr copy() const override {
+        auto copied = std::make_shared<Annulus>(inner_radius_, outer_radius_, num_segments_);
+        copied->points_cpu_ = points_cpu_;
+        copied->gpu_dirty_ = true;
+        return copied;
+    }
 
 protected:
     void generate_points() override;

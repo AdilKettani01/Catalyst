@@ -1,5 +1,5 @@
-#include "manim/scene/three_d_scene.h"
-#include "manim/renderer/renderer.h"
+#include "manim/scene/three_d_scene.hpp"
+#include "manim/renderer/renderer.hpp"
 #include <iostream>
 #include <cmath>
 

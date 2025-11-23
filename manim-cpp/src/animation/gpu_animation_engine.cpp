@@ -1,5 +1,6 @@
 // GPU Animation Engine implementation
 #include "manim/animation/gpu_animation_engine.hpp"
+#include "manim/animation/transform.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 
@@ -183,7 +184,7 @@ void GPUAnimationEngine::precompute_rate_function_lut(
     // lut.upload(lut_data.data(), buffer_size);
 
     size_t func_hash = std::hash<void*>{}(reinterpret_cast<void*>(&rate_func));
-    rate_func_luts_[func_hash] = lut;
+    rate_func_luts_[func_hash] = std::move(lut);
 
     spdlog::debug("Precomputed rate function LUT with {} samples", samples);
 }
@@ -282,7 +283,7 @@ void GPUAnimationEngine::enable_caching(const Animation& anim, uint32_t num_samp
     // cache.cached_states = memory_pool_->allocate_buffer(...);
 
     cache.valid = true;
-    cache_[anim_hash] = cache;
+    cache_[anim_hash] = std::move(cache);
 
     spdlog::debug("Enabled caching for animation with {} samples", num_samples);
 }
@@ -290,7 +291,7 @@ void GPUAnimationEngine::enable_caching(const Animation& anim, uint32_t num_samp
 bool GPUAnimationEngine::get_cached_state(
     const Animation& anim,
     float t,
-    GPUBuffer& output
+    [[maybe_unused]] GPUBuffer& output
 ) {
     size_t anim_hash = std::hash<const Animation*>{}(&anim);
 
@@ -305,7 +306,7 @@ bool GPUAnimationEngine::get_cached_state(
     // Find nearest cached state
     float normalized_t = t / anim.get_run_time();
     size_t sample_idx = static_cast<size_t>(normalized_t * (cache.num_samples - 1));
-    sample_idx = std::min(sample_idx, cache.num_samples - 1);
+    sample_idx = std::min(sample_idx, static_cast<size_t>(cache.num_samples - 1));
 
     // Copy from cache to output
     // This would copy the cached state

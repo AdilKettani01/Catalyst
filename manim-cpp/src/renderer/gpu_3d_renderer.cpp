@@ -8,12 +8,7 @@ namespace manim {
 // GPU3DRenderer Implementation
 // ============================================================================
 
-GPU3DRenderer::GPU3DRenderer(
-    std::shared_ptr<MemoryPool> memory_pool,
-    std::shared_ptr<ComputeEngine> compute_engine
-) : memory_pool_(memory_pool),
-    compute_engine_(compute_engine) {
-
+GPU3DRenderer::GPU3DRenderer() {
     spdlog::info("Initializing GPU 3D renderer with deferred pipeline");
 }
 

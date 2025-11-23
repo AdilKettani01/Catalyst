@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 #include <string>
+#include <optional>
 
 namespace manim {
 

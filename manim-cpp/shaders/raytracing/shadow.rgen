@@ -130,7 +130,7 @@ void main() {
         // Cast multiple shadow rays for soft shadows
         float light_shadow = 0.0;
 
-        for (uint sample = 0; sample < constants.samples_per_light; ++sample) {
+        for (uint sample_idx = 0; sample_idx < constants.samples_per_light; ++sample_idx) {
             // Sample direction (with jitter for soft shadows)
             vec3 ray_dir = light_dir;
             if (constants.samples_per_light > 1) {

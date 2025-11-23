@@ -1,5 +1,5 @@
-#include "manim/scene/moving_camera_scene.h"
-#include "manim/renderer/renderer.h"
+#include "manim/scene/moving_camera_scene.hpp"
+#include "manim/renderer/renderer.hpp"
 #include <iostream>
 
 namespace manim {

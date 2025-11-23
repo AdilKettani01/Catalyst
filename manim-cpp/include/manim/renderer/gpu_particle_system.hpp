@@ -36,9 +36,6 @@ struct Particle {
 
     math::Vec3 acceleration;
     float mass;
-
-    // Padding to 64 bytes (cache-friendly)
-    float _padding[4];
 };
 static_assert(sizeof(Particle) == 64, "Particle must be 64 bytes");
 

@@ -1,4 +1,4 @@
-#include "manim/utils/gpu_utils.h"
+#include "manim/utils/gpu_utils.hpp"
 #include <algorithm>
 #include <numeric>
 #include <iostream>

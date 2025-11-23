@@ -1,5 +1,5 @@
-#include "manim/cli/config.h"
-#include "manim/cli/gpu_detector.h"
+#include "manim/cli/config.hpp"
+#include "manim/cli/gpu_detector.hpp"
 #include <CLI/CLI.hpp>
 #include <iostream>
 

@@ -33,7 +33,7 @@ Circle& Circle::surround(const Mobject& mobject, float buffer) {
 }
 
 void Circle::generate_points() {
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     float angle_step = 2.0f * math::PI / num_segments_;
 
@@ -54,14 +54,14 @@ void Circle::generate_points() {
                       control_radius * std::sin(angle2 - angle_step * 0.25f), 0.0f};
 
         if (i == 0) {
-            cpu_points_.push_back(p1);
+            points_cpu_.push_back(p1);
         }
-        cpu_points_.push_back(h1);
-        cpu_points_.push_back(h2);
-        cpu_points_.push_back(p2);
+        points_cpu_.push_back(h1);
+        points_cpu_.push_back(h2);
+        points_cpu_.push_back(p2);
     }
 
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
@@ -98,7 +98,7 @@ Ellipse& Ellipse::set_height(float height) {
 }
 
 void Ellipse::generate_points() {
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     float a = width_ * 0.5f;
     float b = height_ * 0.5f;
@@ -123,14 +123,14 @@ void Ellipse::generate_points() {
         math::Vec3 h2{a * (cos2 + k * sin2), b * (sin2 - k * cos2), 0.0f};
 
         if (i == 0) {
-            cpu_points_.push_back(p1);
+            points_cpu_.push_back(p1);
         }
-        cpu_points_.push_back(h1);
-        cpu_points_.push_back(h2);
-        cpu_points_.push_back(p2);
+        points_cpu_.push_back(h1);
+        points_cpu_.push_back(h2);
+        points_cpu_.push_back(p2);
     }
 
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
@@ -150,7 +150,7 @@ Arc& Arc::set_angle(float angle) {
 }
 
 void Arc::generate_points() {
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     if (std::abs(angle_) < 1e-6f) {
         return;
@@ -176,14 +176,14 @@ void Arc::generate_points() {
         math::Vec3 h2{radius_ * (cos2 + k * sin2), radius_ * (sin2 - k * cos2), 0.0f};
 
         if (i == 0) {
-            cpu_points_.push_back(p1);
+            points_cpu_.push_back(p1);
         }
-        cpu_points_.push_back(h1);
-        cpu_points_.push_back(h2);
-        cpu_points_.push_back(p2);
+        points_cpu_.push_back(h1);
+        points_cpu_.push_back(h2);
+        points_cpu_.push_back(p2);
     }
 
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 
@@ -197,7 +197,7 @@ Annulus::Annulus(float inner_radius, float outer_radius, uint32_t num_segments)
 }
 
 void Annulus::generate_points() {
-    cpu_points_.clear();
+    points_cpu_.clear();
 
     float angle_step = 2.0f * math::PI / num_segments_;
 
@@ -219,11 +219,11 @@ void Annulus::generate_points() {
         math::Vec3 h2{outer_radius_ * (cos2 + k * sin2), outer_radius_ * (sin2 - k * cos2), 0.0f};
 
         if (i == 0) {
-            cpu_points_.push_back(p1);
+            points_cpu_.push_back(p1);
         }
-        cpu_points_.push_back(h1);
-        cpu_points_.push_back(h2);
-        cpu_points_.push_back(p2);
+        points_cpu_.push_back(h1);
+        points_cpu_.push_back(h2);
+        points_cpu_.push_back(p2);
     }
 
     // Inner circle (reversed)
@@ -243,12 +243,12 @@ void Annulus::generate_points() {
         math::Vec3 h1{inner_radius_ * (cos1 + k * sin1), inner_radius_ * (sin1 - k * cos1), 0.0f};
         math::Vec3 h2{inner_radius_ * (cos2 - k * sin2), inner_radius_ * (sin2 + k * cos2), 0.0f};
 
-        cpu_points_.push_back(h1);
-        cpu_points_.push_back(h2);
-        cpu_points_.push_back(p2);
+        points_cpu_.push_back(h1);
+        points_cpu_.push_back(h2);
+        points_cpu_.push_back(p2);
     }
 
-    points_dirty_ = true;
+    gpu_dirty_ = true;
     tessellation_dirty_ = true;
 }
 

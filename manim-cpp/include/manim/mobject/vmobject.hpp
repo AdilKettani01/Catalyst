@@ -217,6 +217,9 @@ public:
     GPUStrokeData get_gpu_stroke_data() const;
     GPUFillData get_gpu_fill_data() const;
 
+    // Override copy from base class
+    Ptr copy() const override;  // Implemented in vmobject.cpp
+
 protected:
     void generate_points() override;
     void init_colors() override;
@@ -230,6 +233,12 @@ protected:
      * @brief Ensure points array is valid (size = 1 mod 4 or 0)
      */
     void ensure_valid_points();
+
+    // GPU tessellation members (accessible to derived classes)
+    std::vector<math::Vec3> tessellated_points_;
+    std::optional<GPUBuffer> bezier_control_points_buffer_;
+    std::optional<GPUBuffer> tessellated_vertices_buffer_;
+    bool tessellation_dirty_{true};
 
 private:
     // Fill properties
@@ -262,12 +271,6 @@ private:
     // Bezier settings
     uint32_t n_points_per_cubic_curve_{4};
     float tolerance_for_point_equality_{1e-6f};
-
-    // GPU tessellation
-    std::vector<math::Vec3> tessellated_points_;
-    std::optional<GPUBuffer> bezier_control_points_buffer_;  // Control points for GPU
-    std::optional<GPUBuffer> tessellated_vertices_buffer_;   // Output from GPU tessellation
-    bool tessellation_dirty_{true};
 };
 
 /**
@@ -279,6 +282,16 @@ public:
     explicit VGroup(const std::vector<std::shared_ptr<VMobject>>& vmobjects);
 
     VGroup& add(std::shared_ptr<VMobject> vmobject);
+
+    Ptr copy() const override {
+        auto copied = std::make_shared<VGroup>();
+        for (const auto& submob : submobjects_) {
+            if (auto vmob = std::dynamic_pointer_cast<VMobject>(submob)) {
+                copied->add(std::dynamic_pointer_cast<VMobject>(vmob->copy()));
+            }
+        }
+        return copied;
+    }
 };
 
 }  // namespace manim

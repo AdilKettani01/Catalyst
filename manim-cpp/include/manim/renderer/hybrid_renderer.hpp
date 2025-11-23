@@ -19,6 +19,7 @@
 #include <atomic>
 #include <queue>
 #include <functional>
+#include <condition_variable>
 
 namespace manim {
 

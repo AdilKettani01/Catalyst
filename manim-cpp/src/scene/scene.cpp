@@ -1,6 +1,6 @@
-#include "manim/scene/scene.h"
-#include "manim/renderer/renderer.h"
-#include "manim/animation/animation.h"
+#include "manim/scene/scene.hpp"
+#include "manim/renderer/renderer.hpp"
+#include "manim/animation/animation.hpp"
 #include <algorithm>
 #include <random>
 #include <iostream>

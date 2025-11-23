@@ -1,4 +1,4 @@
-#include "manim/utils/bezier.h"
+#include "manim/utils/bezier.hpp"
 #include <cmath>
 #include <algorithm>
 #include <numeric>

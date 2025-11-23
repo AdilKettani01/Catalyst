@@ -10,14 +10,10 @@ namespace manim {
 // HybridRenderer Implementation
 // ============================================================================
 
-HybridRenderer::HybridRenderer(
-    std::unique_ptr<Renderer> gpu_renderer,
-    std::shared_ptr<MemoryPool> memory_pool,
-    std::shared_ptr<ComputeEngine> compute_engine
-) : gpu_renderer_(std::move(gpu_renderer)),
-    memory_pool_(memory_pool),
-    compute_engine_(compute_engine),
-    cpu_thread_pool_(std::thread::hardware_concurrency()) {
+HybridRenderer::HybridRenderer()
+    : gpu_renderer_(std::make_unique<GPU3DRenderer>()),
+      compute_engine_(std::make_unique<ComputeEngine>()),
+      thread_pool_(std::make_unique<ThreadPool>(std::thread::hardware_concurrency())) {
 
     spdlog::info("Initializing hybrid CPU-GPU renderer");
     spdlog::info("  CPU threads: {}", std::thread::hardware_concurrency());
@@ -28,14 +24,14 @@ HybridRenderer::~HybridRenderer() {
 }
 
 void HybridRenderer::initialize(const RendererConfig& config) {
-    gpu_renderer_->initialize(config);
+    // TODO: Initialize GPU renderer with proper Vulkan parameters
+    // gpu_renderer_->initialize(device, physical_device, memory_pool, config.width, config.height);
 
     // Initialize distribution strategy
-    current_strategy_ = DistributionStrategy::Adaptive;
+    strategy_ = DistributionStrategy::Dynamic;
 
-    // Initialize performance counters
-    cpu_utilization_ = 0.0f;
-    gpu_utilization_ = 0.0f;
+    // Initialize performance monitoring
+    perf_monitor_.reset();
 
     spdlog::info("Hybrid renderer initialized");
 }

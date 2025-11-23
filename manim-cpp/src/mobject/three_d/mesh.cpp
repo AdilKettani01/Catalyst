@@ -12,9 +12,9 @@ namespace manim {
 
 void GPUMesh::generate_points() {
     // Convert vertices to points for base class
-    cpu_points_.clear();
+    points_cpu_.clear();
     for (const auto& v : vertices_) {
-        cpu_points_.push_back(v.position);
+        points_cpu_.push_back(v.position);
     }
 }
 
@@ -63,7 +63,7 @@ void GPUMesh::upload_to_gpu(MemoryPool& pool) {
 
     // Vertex buffer
     VkDeviceSize vertex_size = sizeof(Vertex) * vertices_.size();
-    if (!vertex_buffer_ || vertex_buffer_->size() < vertex_size) {
+    if (!vertex_buffer_ || vertex_buffer_->get_size() < vertex_size) {
         vertex_buffer_ = pool.allocate_buffer(
             vertex_size,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -75,7 +75,7 @@ void GPUMesh::upload_to_gpu(MemoryPool& pool) {
     // Index buffer
     if (!indices_.empty()) {
         VkDeviceSize index_size = sizeof(uint32_t) * indices_.size();
-        if (!index_buffer_ || index_buffer_->size() < index_size) {
+        if (!index_buffer_ || index_buffer_->get_size() < index_size) {
             index_buffer_ = pool.allocate_buffer(
                 index_size,
                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,

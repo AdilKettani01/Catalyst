@@ -1,4 +1,4 @@
-#include "manim/utils/hybrid_compute.h"
+#include "manim/utils/hybrid_compute.hpp"
 #include <iostream>
 #include <immintrin.h> // For SIMD intrinsics
 #include <cpuid.h>     // For CPU capability detection

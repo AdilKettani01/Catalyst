@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <optional>
 #include <glm/glm.hpp>
 
 namespace manim {
@@ -44,7 +45,8 @@ public:
     using Ptr = std::shared_ptr<Mobject>;
     using UpdaterFunc = std::function<void(Mobject&, float dt)>;
 
-    virtual ~Mobject() = default;
+    Mobject();
+    virtual ~Mobject();
 
     // ========================================================================
     // Construction & Initialization
@@ -93,6 +95,11 @@ public:
      * @brief Get all submobjects
      */
     const std::vector<Ptr>& get_submobjects() const { return submobjects_; }
+
+    /**
+     * @brief Clear all submobjects
+     */
+    void clear_submobjects();
 
     /**
      * @brief Get parent mobject
@@ -150,15 +157,43 @@ public:
      */
     Mobject& to_edge(const math::Vec3& direction, float buff = 0.5f);
 
-    /**
-     * @brief Get world transform matrix
-     */
-    math::Mat4 get_world_transform() const;
 
     /**
      * @brief Apply transform to points (GPU operation)
      */
     void apply_transform(const math::Mat4& transform);
+
+    /**
+     * @brief Apply matrix transformation to all points
+     */
+    void apply_matrix(const math::Mat4& matrix, bool about_point = false, const math::Vec3& point = math::Vec3(0.0f));
+
+    /**
+     * @brief Apply function to all points
+     */
+    template<typename Func>
+    void apply_points_function(Func&& func) {
+        sync_from_gpu();
+        for (auto& point : points_cpu_) {
+            point = func(point);
+        }
+        gpu_dirty_ = true;
+    }
+
+    /**
+     * @brief Apply function to all points (non-template version)
+     */
+    void apply_points_function(const std::function<math::Vec3(math::Vec3)>& func);
+
+    /**
+     * @brief Get center point
+     */
+    math::Vec3 get_center() const;
+
+    /**
+     * @brief Get bounding box
+     */
+    std::pair<math::Vec3, math::Vec3> get_bounding_box() const;
 
     // ========================================================================
     // Appearance & Styling
@@ -206,7 +241,10 @@ public:
     /**
      * @brief Set points (uploads to GPU)
      */
-    void set_points(std::span<const math::Vec3> points);
+    virtual void set_points(std::span<const math::Vec3> points);
+    virtual void set_points(const std::vector<math::Vec3>& points) {
+        set_points(std::span<const math::Vec3>(points));
+    }
 
     /**
      * @brief Get GPU buffer for points
@@ -231,10 +269,6 @@ public:
 
     BoundingBox compute_bounding_box() const;
 
-    /**
-     * @brief Get cached bounding box
-     */
-    const BoundingBox& get_bounding_box() const;
 
     // ========================================================================
     // Updaters (Dynamic Animations)
@@ -246,9 +280,9 @@ public:
     void add_updater(UpdaterFunc updater);
 
     /**
-     * @brief Remove updater
+     * @brief Remove updater by index
      */
-    void remove_updater(UpdaterFunc updater);
+    void remove_updater(size_t index);
 
     /**
      * @brief Clear all updaters
@@ -258,12 +292,17 @@ public:
     /**
      * @brief Update mobject (called every frame)
      */
-    virtual void update(float dt);
+    virtual void update(float dt, bool recurse_down = true);
 
     /**
-     * @brief Suspend/resume updating
+     * @brief Suspend updating
      */
-    void suspend_updating(bool suspend = true);
+    void suspend_updating();
+
+    /**
+     * @brief Resume updating
+     */
+    void resume_updating();
 
     // ========================================================================
     // Rendering
@@ -280,6 +319,21 @@ public:
     void mark_dirty();
 
     /**
+     * @brief Mark GPU data as dirty
+     */
+    void mark_as_gpu_dirty();
+
+    /**
+     * @brief Check if GPU data is dirty
+     */
+    bool is_gpu_dirty() const;
+
+    /**
+     * @brief Clear GPU dirty flag
+     */
+    void clear_gpu_dirty_flag();
+
+    /**
      * @brief Update GPU buffers if dirty
      */
     void update_gpu_buffers();
@@ -291,7 +345,7 @@ public:
     /**
      * @brief Copy mobject
      */
-    virtual Ptr copy() const;
+    virtual Ptr copy() const = 0;
 
     /**
      * @brief Get/set name
@@ -317,11 +371,15 @@ protected:
 
     // Transform
     glm::mat4 local_transform_{1.0f};  // Local transform matrix
+    glm::mat4 world_transform_{1.0f};  // World transform matrix
+    glm::mat4 prev_transform_{1.0f};   // Previous transform for animation
+    bool transform_dirty_ = false;
 
     // Appearance
     math::Vec4 color_{1.0f, 1.0f, 1.0f, 1.0f};  // White, opaque
     float opacity_ = 1.0f;
     float z_index_ = 0.0f;
+    int dim_ = 3;  // Dimension
 
     // Updaters
     std::vector<UpdaterFunc> updaters_;
@@ -341,11 +399,14 @@ protected:
 
     // Metadata
     std::string name_;
+    mutable std::optional<size_t> point_hash_;  // Hash of points for caching
 
     // Helper functions
     void update_submobjects(float dt);
     void sync_to_gpu();
     void sync_from_gpu() const;
+    void update_world_transform();
+    const math::Mat4& get_world_transform() const;
 };
 
 /**
@@ -364,6 +425,14 @@ public:
 
     void generate_points() override {
         // Groups don't have their own points
+    }
+
+    Ptr copy() const override {
+        auto copied = std::make_shared<Group>();
+        for (const auto& submob : submobjects_) {
+            copied->add(submob->copy());
+        }
+        return copied;
     }
 
     void render(Renderer& renderer) override;

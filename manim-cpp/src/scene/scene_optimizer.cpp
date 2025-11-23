@@ -1,6 +1,6 @@
-#include "manim/scene/scene_optimizer.h"
-#include "manim/scene/scene.h"
-#include "manim/mobject/mobject.h"
+#include "manim/scene/scene_optimizer.hpp"
+#include "manim/scene/scene.hpp"
+#include "manim/mobject/mobject.hpp"
 #include <iostream>
 #include <algorithm>
 #include <unordered_map>

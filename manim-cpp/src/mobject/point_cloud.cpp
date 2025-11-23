@@ -29,10 +29,10 @@ void PointCloudMobject::set_points(const std::vector<math::Vec3>& positions) {
     }
 
     soa_dirty_ = true;
-    points_dirty_ = true;
+    gpu_dirty_ = true;
 
-    // Also update cpu_points_ for base class compatibility
-    cpu_points_ = positions;
+    // Also update points_cpu_ for base class compatibility
+    points_cpu_ = positions;
 }
 
 void PointCloudMobject::set_points_with_colors(
@@ -51,8 +51,8 @@ void PointCloudMobject::set_points_with_colors(
     }
 
     soa_dirty_ = true;
-    points_dirty_ = true;
-    cpu_points_ = positions;
+    gpu_dirty_ = true;
+    points_cpu_ = positions;
 }
 
 void PointCloudMobject::set_points_with_attributes(
@@ -69,8 +69,8 @@ void PointCloudMobject::set_points_with_attributes(
     sizes_ = sizes;
 
     soa_dirty_ = true;
-    points_dirty_ = true;
-    cpu_points_ = positions;
+    gpu_dirty_ = true;
+    points_cpu_ = positions;
 }
 
 void PointCloudMobject::add_point(
@@ -83,8 +83,8 @@ void PointCloudMobject::add_point(
     sizes_.push_back(size);
 
     soa_dirty_ = true;
-    points_dirty_ = true;
-    cpu_points_.push_back(position);
+    gpu_dirty_ = true;
+    points_cpu_.push_back(position);
 }
 
 // ============================================================================
@@ -144,7 +144,7 @@ void PointCloudMobject::upload_to_gpu_soa(MemoryPool& pool) {
 
     // Positions buffer
     VkDeviceSize pos_size = sizeof(math::Vec3) * count;
-    if (!gpu_soa_.positions || gpu_soa_.positions->size() < pos_size) {
+    if (!gpu_soa_.positions || gpu_soa_.positions->get_size() < pos_size) {
         gpu_soa_.positions = pool.allocate_buffer(
             pos_size,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -155,7 +155,7 @@ void PointCloudMobject::upload_to_gpu_soa(MemoryPool& pool) {
 
     // Colors buffer
     VkDeviceSize color_size = sizeof(math::Vec4) * count;
-    if (!gpu_soa_.colors || gpu_soa_.colors->size() < color_size) {
+    if (!gpu_soa_.colors || gpu_soa_.colors->get_size() < color_size) {
         gpu_soa_.colors = pool.allocate_buffer(
             color_size,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -166,7 +166,7 @@ void PointCloudMobject::upload_to_gpu_soa(MemoryPool& pool) {
 
     // Sizes buffer
     VkDeviceSize size_size = sizeof(float) * count;
-    if (!gpu_soa_.sizes || gpu_soa_.sizes->size() < size_size) {
+    if (!gpu_soa_.sizes || gpu_soa_.sizes->get_size() < size_size) {
         gpu_soa_.sizes = pool.allocate_buffer(
             size_size,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,

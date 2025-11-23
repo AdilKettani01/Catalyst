@@ -1,0 +1,1204 @@
+[  3%] Building CXX object CMakeFiles/manim.dir/src/core/gpu/memory_pool.cpp.o
+[  3%] Building CXX object CMakeFiles/manim.dir/src/animation/transform.cpp.o
+[  5%] Building CXX object CMakeFiles/manim.dir/src/mobject/point_cloud.cpp.o
+[  7%] Building CXX object CMakeFiles/manim.dir/src/animation/animation.cpp.o
+[  9%] Building CXX object CMakeFiles/manim.dir/src/animation/gpu_animation_engine.cpp.o
+[ 10%] Building CXX object CMakeFiles/manim.dir/src/mobject/three_d/mesh.cpp.o
+[ 12%] Building CXX object CMakeFiles/manim.dir/src/mobject/geometry/circle.cpp.o
+[ 14%] Building CXX object CMakeFiles/manim.dir/src/mobject/mobject.cpp.o
+[ 16%] Building CXX object CMakeFiles/manim.dir/src/mobject/vmobject.cpp.o
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp: In constructor ‘manim::Mobject::Mobject()’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:401:17: warning: ‘manim::Mobject::name_’ will be initialized after [-Wreorder]
+  401 |     std::string name_;
+      |                 ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:382:9: warning:   ‘int manim::Mobject::dim_’ [-Wreorder]
+  382 |     int dim_ = 3;  // Dimension
+      |         ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:14:1: warning:   when initialized here [-Wreorder]
+   14 | Mobject::Mobject()
+      | ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:382:9: warning: ‘manim::Mobject::dim_’ will be initialized after [-Wreorder]
+  382 |     int dim_ = 3;  // Dimension
+      |         ^~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:381:11: warning:   ‘float manim::Mobject::z_index_’ [-Wreorder]
+  381 |     float z_index_ = 0.0f;
+      |           ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:14:1: warning:   when initialized here [-Wreorder]
+   14 | Mobject::Mobject()
+      | ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:381:11: warning: ‘manim::Mobject::z_index_’ will be initialized after [-Wreorder]
+  381 |     float z_index_ = 0.0f;
+      |           ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:379:16: warning:   ‘manim::math::Vec4 manim::Mobject::color_’ [-Wreorder]
+  379 |     math::Vec4 color_{1.0f, 1.0f, 1.0f, 1.0f};  // White, opaque
+      |                ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:14:1: warning:   when initialized here [-Wreorder]
+   14 | Mobject::Mobject()
+      | ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:393:10: warning: ‘manim::Mobject::gpu_dirty_’ will be initialized after [-Wreorder]
+  393 |     bool gpu_dirty_ = true;  // GPU needs update
+      |          ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:376:10: warning:   ‘bool manim::Mobject::transform_dirty_’ [-Wreorder]
+  376 |     bool transform_dirty_ = false;
+      |          ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:14:1: warning:   when initialized here [-Wreorder]
+   14 | Mobject::Mobject()
+      | ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:376:10: warning: ‘manim::Mobject::transform_dirty_’ will be initialized after [-Wreorder]
+  376 |     bool transform_dirty_ = false;
+      |          ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:370:12: warning:   ‘size_t manim::Mobject::num_points_’ [-Wreorder]
+  370 |     size_t num_points_ = 0;
+      |            ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:14:1: warning:   when initialized here [-Wreorder]
+   14 | Mobject::Mobject()
+      | ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/mobject.cpp:28:20: warning: pure virtual ‘virtual void manim::Mobject::generate_points()’ called from constructor
+   28 |     generate_points();
+      |     ~~~~~~~~~~~~~~~^~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp: In member function ‘void manim::GPUAnimationEngine::interpolate_transforms_gpu(const manim::GPUBuffer&, const manim::GPUBuffer&, float, manim::GPUBuffer&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:75:22: warning: unused parameter ‘start_transforms’ [-Wunused-parameter]
+   75 |     const GPUBuffer& start_transforms,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:76:22: warning: unused parameter ‘end_transforms’ [-Wunused-parameter]
+   76 |     const GPUBuffer& end_transforms,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:78:16: warning: unused parameter ‘output’ [-Wunused-parameter]
+   78 |     GPUBuffer& output
+      |     ~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp: In member function ‘void manim::GPUAnimationEngine::interpolate_colors_gpu(const manim::GPUBuffer&, const manim::GPUBuffer&, float, manim::GPUBuffer&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:93:22: warning: unused parameter ‘start_colors’ [-Wunused-parameter]
+   93 |     const GPUBuffer& start_colors,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:94:22: warning: unused parameter ‘end_colors’ [-Wunused-parameter]
+   94 |     const GPUBuffer& end_colors,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:96:16: warning: unused parameter ‘output’ [-Wunused-parameter]
+   96 |     GPUBuffer& output
+      |     ~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp: In member function ‘void manim::GPUAnimationEngine::interpolate_points_gpu(const manim::GPUBuffer&, const manim::GPUBuffer&, float, manim::GPUBuffer&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:107:22: warning: unused parameter ‘start_points’ [-Wunused-parameter]
+  107 |     const GPUBuffer& start_points,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:108:22: warning: unused parameter ‘end_points’ [-Wunused-parameter]
+  108 |     const GPUBuffer& end_points,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:110:16: warning: unused parameter ‘output’ [-Wunused-parameter]
+  110 |     GPUBuffer& output
+      |     ~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp: In member function ‘void manim::GPUAnimationEngine::morph_shapes_gpu(const manim::GPUBuffer&, const manim::GPUBuffer&, float, manim::GPUBuffer&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:121:22: warning: unused parameter ‘start_curves’ [-Wunused-parameter]
+  121 |     const GPUBuffer& start_curves,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:122:22: warning: unused parameter ‘end_curves’ [-Wunused-parameter]
+  122 |     const GPUBuffer& end_curves,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:124:16: warning: unused parameter ‘output’ [-Wunused-parameter]
+  124 |     GPUBuffer& output
+      |     ~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp: In member function ‘void manim::GPUAnimationEngine::apply_rate_function_gpu(const manim::GPUBuffer&, manim::RateFunc, manim::GPUBuffer&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:144:22: warning: unused parameter ‘alphas’ [-Wunused-parameter]
+  144 |     const GPUBuffer& alphas,
+      |     ~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/gpu_animation_engine.cpp:146:16: warning: unused parameter ‘output’ [-Wunused-parameter]
+  146 |     GPUBuffer& output
+      |     ~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::update_gpu_buffers()’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:110:22: warning: unused variable ‘index_size’ [-Wunused-variable]
+  110 |         VkDeviceSize index_size = sizeof(uint32_t) * indices_.size();
+      |                      ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:106:18: warning: unused variable ‘vertex_size’ [-Wunused-variable]
+  106 |     VkDeviceSize vertex_size = sizeof(Vertex) * vertices_.size();
+      |                  ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::setup_instancing(uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:126:18: warning: unused variable ‘instance_size’ [-Wunused-variable]
+  126 |     VkDeviceSize instance_size = sizeof(InstanceData) * max_instances;
+      |                  ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::render_instanced(VkCommandBuffer, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:157:18: warning: unused variable ‘offset’ [-Wunused-variable]
+  157 |     VkDeviceSize offset = 0;
+      |                  ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:167:14: warning: unused variable ‘index_count’ [-Wunused-variable]
+  167 |     uint32_t index_count = static_cast<uint32_t>(indices_.size());
+      |              ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:150:48: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  150 | void GPUMesh::render_instanced(VkCommandBuffer cmd, uint32_t instance_count) {
+      |                                ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:150:62: warning: unused parameter ‘instance_count’ [-Wunused-parameter]
+  150 | void GPUMesh::render_instanced(VkCommandBuffer cmd, uint32_t instance_count) {
+      |                                                     ~~~~~~~~~^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::update_instance_buffer()’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:176:18: warning: unused variable ‘instance_size’ [-Wunused-variable]
+  176 |     VkDeviceSize instance_size = sizeof(InstanceData) * instances_.size();
+      |                  ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::compute_normals_gpu(manim::ComputeEngine&, bool)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:186:50: warning: unused parameter ‘engine’ [-Wunused-parameter]
+  186 | void GPUMesh::compute_normals_gpu(ComputeEngine& engine, bool smooth) {
+      |                                   ~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::compute_tangents_gpu(manim::ComputeEngine&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:204:51: warning: unused parameter ‘engine’ [-Wunused-parameter]
+  204 | void GPUMesh::compute_tangents_gpu(ComputeEngine& engine) {
+      |                                    ~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In member function ‘void manim::GPUMesh::tessellate_gpu(manim::ComputeEngine&, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:214:45: warning: unused parameter ‘engine’ [-Wunused-parameter]
+  214 | void GPUMesh::tessellate_gpu(ComputeEngine& engine, uint32_t level) {
+      |                              ~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In static member function ‘static std::shared_ptr<manim::GPUMesh> manim::GPUMesh::create_plane(float, float, uint32_t, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:368:11: warning: unused variable ‘half_w’ [-Wunused-variable]
+  368 |     float half_w = width * 0.5f;
+      |           ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:369:11: warning: unused variable ‘half_h’ [-Wunused-variable]
+  369 |     float half_h = height * 0.5f;
+      |           ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In static member function ‘static std::shared_ptr<manim::GPUMesh> manim::GPUMesh::create_cylinder(float, float, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:415:11: warning: unused parameter ‘radius’ [-Wunused-parameter]
+  415 |     float radius,
+      |     ~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:416:11: warning: unused parameter ‘height’ [-Wunused-parameter]
+  416 |     float height,
+      |     ~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:417:14: warning: unused parameter ‘segments’ [-Wunused-parameter]
+  417 |     uint32_t segments
+      |     ~~~~~~~~~^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp: In static member function ‘static std::shared_ptr<manim::GPUMesh> manim::GPUMesh::create_torus(float, float, uint32_t, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:426:11: warning: unused parameter ‘major_radius’ [-Wunused-parameter]
+  426 |     float major_radius,
+      |     ~~~~~~^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:427:11: warning: unused parameter ‘minor_radius’ [-Wunused-parameter]
+  427 |     float minor_radius,
+      |     ~~~~~~^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:428:14: warning: unused parameter ‘major_segments’ [-Wunused-parameter]
+  428 |     uint32_t major_segments,
+      |     ~~~~~~~~~^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/three_d/mesh.cpp:429:14: warning: unused parameter ‘minor_segments’ [-Wunused-parameter]
+  429 |     uint32_t minor_segments
+      |     ~~~~~~~~~^~~~~~~~~~~~~~
+[ 18%] Building CXX object CMakeFiles/manim.dir/src/renderer/gpu_3d_renderer.cpp.o
+[ 20%] Building CXX object CMakeFiles/manim.dir/src/renderer/gpu_particle_system.cpp.o
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp: In member function ‘virtual void manim::Animation::begin()’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:39:35: error: no matching function for call to ‘manim::Mobject::suspend_updating(bool)’
+   39 |         mobject_->suspend_updating(true);
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/include/manim/animation/animation.hpp:3,
+                 from /home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:300:10: note: candidate: ‘void manim::Mobject::suspend_updating()’
+  300 |     void suspend_updating();
+      |          ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:300:10: note:   candidate expects 0 arguments, 1 provided
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp: In member function ‘virtual void manim::Animation::finish()’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:79:35: error: no matching function for call to ‘manim::Mobject::suspend_updating(bool)’
+   79 |         mobject_->suspend_updating(false);
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:300:10: note: candidate: ‘void manim::Mobject::suspend_updating()’
+  300 |     void suspend_updating();
+      |          ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/mobject/mobject.hpp:300:10: note:   candidate expects 0 arguments, 1 provided
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp: In member function ‘virtual void manim::Animation::upload_to_gpu(manim::GPUAnimationEngine&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:110:51: warning: unused parameter ‘engine’ [-Wunused-parameter]
+  110 | void Animation::upload_to_gpu(GPUAnimationEngine& engine) {
+      |                               ~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp: In member function ‘virtual void manim::Animation::interpolate_on_gpu(float, VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:114:42: warning: unused parameter ‘t’ [-Wunused-parameter]
+  114 | void Animation::interpolate_on_gpu(float t, VkCommandBuffer cmd) {
+      |                                    ~~~~~~^
+/home/adil/CPPmath-independent/manim-cpp/src/animation/animation.cpp:114:61: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  114 | void Animation::interpolate_on_gpu(float t, VkCommandBuffer cmd) {
+      |                                             ~~~~~~~~~~~~~~~~^~~
+[ 21%] Building CXX object CMakeFiles/manim.dir/src/renderer/hybrid_renderer.cpp.o
+[ 23%] Building CXX object CMakeFiles/manim.dir/src/renderer/renderer.cpp.o
+gmake[2]: *** [CMakeFiles/manim.dir/build.make:136: CMakeFiles/manim.dir/src/animation/animation.cpp.o] Error 1
+gmake[2]: *** Waiting for unfinished jobs....
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/vmobject.cpp: In member function ‘void manim::VMobject::tessellate_on_gpu(uint32_t, manim::ComputeEngine&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/vmobject.cpp:155:78: warning: unused parameter ‘engine’ [-Wunused-parameter]
+  155 | void VMobject::tessellate_on_gpu(uint32_t segments_per_curve, ComputeEngine& engine) {
+      |                                                               ~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/vmobject.cpp: In member function ‘void manim::VMobject::insert_n_curves(size_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/vmobject.cpp:403:14: warning: variable ‘pts’ set but not used [-Wunused-but-set-variable]
+  403 |         auto pts = get_curve_points(i);
+      |              ^~~
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/geometry/circle.cpp: In member function ‘virtual void manim::Circle::generate_points()’:
+/home/adil/CPPmath-independent/manim-cpp/src/mobject/geometry/circle.cpp:48:15: warning: unused variable ‘angle_mid’ [-Wunused-variable]
+   48 |         float angle_mid = (angle1 + angle2) * 0.5f;
+      |               ^~~~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:3:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::initialize(const manim::RendererConfig&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:18:43: warning: unused parameter ‘config’ [-Wunused-parameter]
+   18 |     void initialize(const RendererConfig& config) override {}
+      |                     ~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::render_scene(manim::Scene&, manim::Camera&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:22:30: warning: unused parameter ‘scene’ [-Wunused-parameter]
+   22 |     void render_scene(Scene& scene, Camera& camera) override {}
+      |                       ~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:22:45: warning: unused parameter ‘camera’ [-Wunused-parameter]
+   22 |     void render_scene(Scene& scene, Camera& camera) override {}
+      |                                     ~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::render_mobject(manim::Mobject&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:23:34: warning: unused parameter ‘mobject’ [-Wunused-parameter]
+   23 |     void render_mobject(Mobject& mobject) override {}
+      |                         ~~~~~~~~~^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::clear(const manim::math::Vec4&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:24:34: warning: unused parameter ‘color’ [-Wunused-parameter]
+   24 |     void clear(const math::Vec4& color = math::Vec4{0, 0, 0, 1}) override {}
+      |                ~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::resize(uint32_t, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:25:26: warning: unused parameter ‘width’ [-Wunused-parameter]
+   25 |     void resize(uint32_t width, uint32_t height) override {}
+      |                 ~~~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:25:42: warning: unused parameter ‘height’ [-Wunused-parameter]
+   25 |     void resize(uint32_t width, uint32_t height) override {}
+      |                                 ~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::capture_frame(const std::string&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:27:43: warning: unused parameter ‘output_path’ [-Wunused-parameter]
+   27 |     void capture_frame(const std::string& output_path) override {}
+      |                        ~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual bool manim::VulkanRenderer::supports_feature(const std::string&) const’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:29:46: warning: unused parameter ‘feature’ [-Wunused-parameter]
+   29 |     bool supports_feature(const std::string& feature) const override { return false; }
+      |                           ~~~~~~~~~~~~~~~~~~~^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp: In member function ‘virtual void manim::VulkanRenderer::set_render_mode(manim::Renderer::RenderMode)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/vulkan_renderer.hpp:31:37: warning: unused parameter ‘mode’ [-Wunused-parameter]
+   31 |     void set_render_mode(RenderMode mode) override {}
+      |                          ~~~~~~~~~~~^~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:4:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::initialize(const manim::RendererConfig&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:17:43: warning: unused parameter ‘config’ [-Wunused-parameter]
+   17 |     void initialize(const RendererConfig& config) override {}
+      |                     ~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::render_scene(manim::Scene&, manim::Camera&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:21:30: warning: unused parameter ‘scene’ [-Wunused-parameter]
+   21 |     void render_scene(Scene& scene, Camera& camera) override {}
+      |                       ~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:21:45: warning: unused parameter ‘camera’ [-Wunused-parameter]
+   21 |     void render_scene(Scene& scene, Camera& camera) override {}
+      |                                     ~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::render_mobject(manim::Mobject&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:22:34: warning: unused parameter ‘mobject’ [-Wunused-parameter]
+   22 |     void render_mobject(Mobject& mobject) override {}
+      |                         ~~~~~~~~~^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::clear(const manim::math::Vec4&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:23:34: warning: unused parameter ‘color’ [-Wunused-parameter]
+   23 |     void clear(const math::Vec4& color = math::Vec4{0, 0, 0, 1}) override {}
+      |                ~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::resize(uint32_t, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:24:26: warning: unused parameter ‘width’ [-Wunused-parameter]
+   24 |     void resize(uint32_t width, uint32_t height) override {}
+      |                 ~~~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:24:42: warning: unused parameter ‘height’ [-Wunused-parameter]
+   24 |     void resize(uint32_t width, uint32_t height) override {}
+      |                                 ~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::capture_frame(const std::string&)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:26:43: warning: unused parameter ‘output_path’ [-Wunused-parameter]
+   26 |     void capture_frame(const std::string& output_path) override {}
+      |                        ~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual bool manim::OpenGLRenderer::supports_feature(const std::string&) const’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:28:46: warning: unused parameter ‘feature’ [-Wunused-parameter]
+   28 |     bool supports_feature(const std::string& feature) const override { return false; }
+      |                           ~~~~~~~~~~~~~~~~~~~^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp: In member function ‘virtual void manim::OpenGLRenderer::set_render_mode(manim::Renderer::RenderMode)’:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/opengl_renderer.hpp:30:37: warning: unused parameter ‘mode’ [-Wunused-parameter]
+   30 |     void set_render_mode(RenderMode mode) override {}
+      |                          ~~~~~~~~~~~^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:12:1: error: no declaration matches ‘manim::GPUParticleSystem::GPUParticleSystem(std::shared_ptr<manim::MemoryPool>, std::shared_ptr<manim::ComputeEngine>, uint32_t)’
+   12 | GPUParticleSystem::GPUParticleSystem(
+      | ^~~~~~~~~~~~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: candidates are: ‘manim::GPUParticleSystem::GPUParticleSystem(const manim::GPUParticleSystem&)’
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:106:5: note:                 ‘manim::GPUParticleSystem::GPUParticleSystem()’
+  106 |     GPUParticleSystem();
+      |     ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In destructor ‘manim::GPUParticleSystem::~GPUParticleSystem()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:31:5: error: ‘cleanup’ was not declared in this scope
+   31 |     cleanup();
+      |     ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:34:6: error: no declaration matches ‘void manim::GPUParticleSystem::initialize_buffers()’
+   34 | void GPUParticleSystem::initialize_buffers() {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:34:6: note: no functions named ‘void manim::GPUParticleSystem::initialize_buffers()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:68:6: error: no declaration matches ‘void manim::GPUParticleSystem::initialize_compute_pipeline()’
+   68 | void GPUParticleSystem::initialize_compute_pipeline() {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:68:6: note: no functions named ‘void manim::GPUParticleSystem::initialize_compute_pipeline()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:75:6: error: no declaration matches ‘void manim::GPUParticleSystem::cleanup()’
+   75 | void GPUParticleSystem::cleanup() {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:75:6: note: no functions named ‘void manim::GPUParticleSystem::cleanup()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In destructor ‘manim::GPU3DRenderer::~GPU3DRenderer()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:16:5: error: ‘cleanup’ was not declared in this scope
+   16 |     cleanup();
+      |     ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:19:38: error: ‘GPU3DConfig’ does not name a type; did you mean ‘GIConfig’?
+   19 | void GPU3DRenderer::initialize(const GPU3DConfig& config) {
+      |                                      ^~~~~~~~~~~
+      |                                      GIConfig
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:19:6: error: no declaration matches ‘void manim::GPU3DRenderer::initialize(const int&)’
+   19 | void GPU3DRenderer::initialize(const GPU3DConfig& config) {
+      |      ^~~~~~~~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:134:10: note: candidate is: ‘void manim::GPU3DRenderer::initialize(VkDevice, VkPhysicalDevice, manim::MemoryPool&, uint32_t, uint32_t)’
+  134 |     void initialize(
+      |          ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:33:6: error: no declaration matches ‘void manim::GPU3DRenderer::cleanup()’
+   33 | void GPU3DRenderer::cleanup() {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:33:6: note: no functions named ‘void manim::GPU3DRenderer::cleanup()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:38:6: error: no declaration matches ‘void manim::GPU3DRenderer::render_frame(VkCommandBuffer, manim::Scene&, manim::Camera&)’
+   38 | void GPU3DRenderer::render_frame(VkCommandBuffer cmd, Scene& scene, Camera& camera) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:38:6: note: no functions named ‘void manim::GPU3DRenderer::render_frame(VkCommandBuffer, manim::Scene&, manim::Camera&)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:65:6: error: no declaration matches ‘void manim::GPU3DRenderer::create_gbuffer(uint32_t, uint32_t)’
+   65 | void GPU3DRenderer::create_gbuffer(uint32_t width, uint32_t height) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:350:10: note: candidate is: ‘void manim::GPU3DRenderer::create_gbuffer()’
+  350 |     void create_gbuffer();
+      |          ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In member function ‘void manim::GPUParticleSystem::update(VkCommandBuffer, float)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:82:5: error: ‘time_accumulator_’ was not declared in this scope
+   82 |     time_accumulator_ += dt;
+      |     ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:86:25: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+   86 |         emitter_config_.rate * dt
+      |                         ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::create_shadow_maps()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:118:30: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  118 |     const auto& shadow_cfg = config_.shadow_config;
+      |                              ^~~~~~~
+      |                              gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:120:33: error: ‘ShadowTechnique’ has not been declared
+  120 |     if (shadow_cfg.technique == ShadowTechnique::CascadedShadowMaps) {
+      |                                 ^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:125:77: error: no match for ‘operator=’ (operand types are ‘VkExtent3D’ and ‘<brace-enclosed initializer list>’)
+  125 |         image_info.extent = {shadow_cfg.resolution, shadow_cfg.resolution, 1};
+      |                                                                             ^
+In file included from /home/adil/vcpkg/installed/x64-linux/include/vulkan/vulkan.h:11,
+                 from /home/adil/CPPmath-independent/manim-cpp/include/manim/core/memory_pool.hpp:11,
+                 from /home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:11,
+                 from /home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:16:
+/home/adil/vcpkg/installed/x64-linux/include/vulkan/vulkan_core.h:3033:16: note: candidate: ‘constexpr VkExtent3D& VkExtent3D::operator=(const VkExtent3D&)’
+ 3033 | typedef struct VkExtent3D {
+      |                ^~~~~~~~~~
+/home/adil/vcpkg/installed/x64-linux/include/vulkan/vulkan_core.h:3033:16: note:   no known conversion for argument 1 from ‘<brace-enclosed initializer list>’ to ‘const VkExtent3D&’
+/home/adil/vcpkg/installed/x64-linux/include/vulkan/vulkan_core.h:3033:16: note: candidate: ‘constexpr VkExtent3D& VkExtent3D::operator=(VkExtent3D&&)’
+/home/adil/vcpkg/installed/x64-linux/include/vulkan/vulkan_core.h:3033:16: note:   no known conversion for argument 1 from ‘<brace-enclosed initializer list>’ to ‘VkExtent3D&&’
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:94:5: error: ‘update_particles_gpu’ was not declared in this scope; did you mean ‘update_particles_cpu’?
+   94 |     update_particles_gpu(cmd, dt);
+      |     ^~~~~~~~~~~~~~~~~~~~
+      |     update_particles_cpu
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:133:9: error: ‘shadow_maps_’ was not declared in this scope; did you mean ‘shadow_cascades_’?
+  133 |         shadow_maps_.resize(1);
+      |         ^~~~~~~~~~~~
+      |         shadow_cascades_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:134:55: error: no matching function for call to ‘manim::MemoryPool::allocate_image(VkImageCreateInfo&, manim::MemoryType, manim::MemoryUsage)’
+  134 |         shadow_maps_[0] = memory_pool_->allocate_image(
+      |                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+  135 |             image_info,
+      |             ~~~~~~~~~~~                                
+  136 |             MemoryType::DeviceLocal,
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~                   
+  137 |             MemoryUsage::Static
+      |             ~~~~~~~~~~~~~~~~~~~                        
+  138 |         );
+      |         ~                                              
+/home/adil/CPPmath-independent/manim-cpp/include/manim/core/memory_pool.hpp:153:14: note: candidate: ‘manim::GPUImage manim::MemoryPool::allocate_image(uint32_t, uint32_t, VkFormat, VkImageUsageFlags, manim::MemoryType)’
+  153 |     GPUImage allocate_image(
+      |              ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/core/memory_pool.hpp:153:14: note:   candidate expects 5 arguments, 3 provided
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::create_voxel_grid()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:146:10: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  146 |     if (!config_.gi_config.enabled || config_.gi_config.technique != GITechnique::VXGI) {
+      |          ^~~~~~~
+      |          gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:146:70: error: ‘GITechnique’ has not been declared
+  146 |     if (!config_.gi_config.enabled || config_.gi_config.technique != GITechnique::VXGI) {
+      |                                                                      ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:97:9: error: ‘sorting_enabled_’ was not declared in this scope
+   97 |     if (sorting_enabled_) {
+      |         ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:150:20: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  150 |     uint32_t res = config_.gi_config.voxel_resolution;
+      |                    ^~~~~~~
+      |                    gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:164:47: error: no matching function for call to ‘manim::MemoryPool::allocate_image(VkImageCreateInfo&, manim::MemoryType, manim::MemoryUsage)’
+  164 |     voxel_grid_ = memory_pool_->allocate_image(
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+  165 |         image_info,
+      |         ~~~~~~~~~~~                            
+  166 |         MemoryType::DeviceLocal,
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~               
+  167 |         MemoryUsage::Static
+      |         ~~~~~~~~~~~~~~~~~~~                    
+  168 |     );
+      |     ~                                          
+/home/adil/CPPmath-independent/manim-cpp/include/manim/core/memory_pool.hpp:153:14: note: candidate: ‘manim::GPUImage manim::MemoryPool::allocate_image(uint32_t, uint32_t, VkFormat, VkImageUsageFlags, manim::MemoryType)’
+  153 |     GPUImage allocate_image(
+      |              ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/core/memory_pool.hpp:153:14: note:   candidate expects 5 arguments, 3 provided
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:173:6: error: no declaration matches ‘void manim::GPU3DRenderer::create_postprocess_targets()’
+  173 | void GPU3DRenderer::create_postprocess_targets() {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:173:6: note: no functions named ‘void manim::GPU3DRenderer::create_postprocess_targets()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::render_geometry_pass(VkCommandBuffer, manim::Scene&, manim::Camera&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:207:58: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  207 | void GPU3DRenderer::render_geometry_pass(VkCommandBuffer cmd, Scene& scene, Camera& camera) {
+      |                                          ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:207:70: warning: unused parameter ‘scene’ [-Wunused-parameter]
+  207 | void GPU3DRenderer::render_geometry_pass(VkCommandBuffer cmd, Scene& scene, Camera& camera) {
+      |                                                               ~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:207:85: warning: unused parameter ‘camera’ [-Wunused-parameter]
+  207 | void GPU3DRenderer::render_geometry_pass(VkCommandBuffer cmd, Scene& scene, Camera& camera) {
+      |                                                                             ~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::render_lighting_pass(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:220:58: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  220 | void GPU3DRenderer::render_lighting_pass(VkCommandBuffer cmd) {
+      |                                          ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:228:6: error: no declaration matches ‘void manim::GPU3DRenderer::render_shadows(VkCommandBuffer, manim::Scene&)’
+  228 | void GPU3DRenderer::render_shadows(VkCommandBuffer cmd, Scene& scene) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:228:6: note: no functions named ‘void manim::GPU3DRenderer::render_shadows(VkCommandBuffer, manim::Scene&)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::render_cascaded_shadow_maps(VkCommandBuffer, manim::Scene&, const manim::math::Vec3&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:239:21: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  239 |     VkCommandBuffer cmd,
+      |     ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:240:12: warning: unused parameter ‘scene’ [-Wunused-parameter]
+  240 |     Scene& scene,
+      |     ~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:241:23: warning: unused parameter ‘light_dir’ [-Wunused-parameter]
+  241 |     const math::Vec3& light_dir
+      |     ~~~~~~~~~~~~~~~~~~^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:250:6: error: no declaration matches ‘void manim::GPU3DRenderer::render_raytraced_shadows(VkCommandBuffer, manim::Scene&)’
+  250 | void GPU3DRenderer::render_raytraced_shadows(VkCommandBuffer cmd, Scene& scene) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:250:6: note: no functions named ‘void manim::GPU3DRenderer::render_raytraced_shadows(VkCommandBuffer, manim::Scene&)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::compute_voxel_gi(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:257:54: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  257 | void GPU3DRenderer::compute_voxel_gi(VkCommandBuffer cmd) {
+      |                                      ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:265:6: error: no declaration matches ‘void manim::GPU3DRenderer::compute_ssgi(VkCommandBuffer)’
+  265 | void GPU3DRenderer::compute_ssgi(VkCommandBuffer cmd) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:265:6: note: no functions named ‘void manim::GPU3DRenderer::compute_ssgi(VkCommandBuffer)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:272:6: error: no declaration matches ‘void manim::GPU3DRenderer::compute_raytraced_gi(VkCommandBuffer)’
+  272 | void GPU3DRenderer::compute_raytraced_gi(VkCommandBuffer cmd) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:272:6: note: no functions named ‘void manim::GPU3DRenderer::compute_raytraced_gi(VkCommandBuffer)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:279:6: error: no declaration matches ‘void manim::GPU3DRenderer::apply_post_processing(VkCommandBuffer)’
+  279 | void GPU3DRenderer::apply_post_processing(VkCommandBuffer cmd) {
+      |      ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:279:6: note: no functions named ‘void manim::GPU3DRenderer::apply_post_processing(VkCommandBuffer)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:129:7: note: ‘class manim::GPU3DRenderer’ defined here
+  129 | class GPU3DRenderer {
+      |       ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::apply_taa(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:302:47: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  302 | void GPU3DRenderer::apply_taa(VkCommandBuffer cmd) {
+      |                               ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:98:9: error: ‘sort_particles_gpu’ was not declared in this scope; did you mean ‘emit_particles_gpu’?
+   98 |         sort_particles_gpu(cmd);
+      |         ^~~~~~~~~~~~~~~~~~
+      |         emit_particles_gpu
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:101:12: error: ‘struct manim::GPUParticleSystem::Stats’ has no member named ‘active_particles’; did you mean ‘alive_particles’?
+  101 |     stats_.active_particles = num_alive_;
+      |            ^~~~~~~~~~~~~~~~
+      |            alive_particles
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::apply_bloom(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:316:29: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  316 |     const auto& bloom_cfg = config_.postprocess_config;
+      |                             ^~~~~~~
+      |                             gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:310:49: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  310 | void GPU3DRenderer::apply_bloom(VkCommandBuffer cmd) {
+      |                                 ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::apply_dof(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:326:47: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  326 | void GPU3DRenderer::apply_dof(VkCommandBuffer cmd) {
+      |                               ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::apply_motion_blur(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:333:55: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  333 | void GPU3DRenderer::apply_motion_blur(VkCommandBuffer cmd) {
+      |                                       ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:101:31: error: ‘num_alive_’ was not declared in this scope
+  101 |     stats_.active_particles = num_alive_;
+      |                               ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::apply_tone_mapping(VkCommandBuffer)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:344:36: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  344 |                   static_cast<int>(config_.postprocess_config.tone_mapper));
+      |                                    ^~~~~~~
+      |                                    gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:339:56: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  339 | void GPU3DRenderer::apply_tone_mapping(VkCommandBuffer cmd) {
+      |                                        ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘virtual void manim::HybridRenderer::initialize(const manim::RendererConfig&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:34:5: error: ‘perf_monitor_’ was not declared in this scope
+   34 |     perf_monitor_.reset();
+      |     ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:26:55: warning: unused parameter ‘config’ [-Wunused-parameter]
+   26 | void HybridRenderer::initialize(const RendererConfig& config) {
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: In member function ‘void manim::GPU3DRenderer::resize(uint32_t, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:348:5: error: ‘config_’ was not declared in this scope; did you mean ‘gi_config_’?
+  348 |     config_.width = width;
+      |     ^~~~~~~
+      |     gi_config_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:352:19: error: no matching function for call to ‘manim::GPU3DRenderer::create_gbuffer(uint32_t&, uint32_t&)’
+  352 |     create_gbuffer(width, height);
+      |     ~~~~~~~~~~~~~~^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:350:10: note: candidate: ‘void manim::GPU3DRenderer::create_gbuffer()’
+  350 |     void create_gbuffer();
+      |          ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:350:10: note:   candidate expects 0 arguments, 2 provided
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In member function ‘void manim::GPUParticleSystem::emit_particles(VkCommandBuffer, uint32_t)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:105:46: error: ‘num_alive_’ was not declared in this scope
+  105 |     count = std::min(count, max_particles_ - num_alive_);
+      |                                              ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:104:56: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  104 | void GPUParticleSystem::emit_particles(VkCommandBuffer cmd, uint32_t count) {
+      |                                        ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:118:6: error: no declaration matches ‘void manim::GPUParticleSystem::update_particles_gpu(VkCommandBuffer, float)’
+  118 | void GPUParticleSystem::update_particles_gpu(VkCommandBuffer cmd, float dt) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:118:6: note: no functions named ‘void manim::GPUParticleSystem::update_particles_gpu(VkCommandBuffer, float)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:157:6: error: no declaration matches ‘void manim::GPUParticleSystem::render(VkCommandBuffer, const manim::math::Mat4&)’
+  157 | void GPUParticleSystem::render(VkCommandBuffer cmd, const math::Mat4& view_proj) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:144:10: note: candidate is: ‘void manim::GPUParticleSystem::render(VkCommandBuffer, const manim::math::Mat4&, const manim::math::Vec3&)’
+  144 |     void render(
+      |          ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In member function ‘void manim::GPUParticleSystem::render_volumetric(VkCommandBuffer, const manim::math::Mat4&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:175:59: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  175 | void GPUParticleSystem::render_volumetric(VkCommandBuffer cmd, const math::Mat4& view_proj) {
+      |                                           ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:175:82: warning: unused parameter ‘view_proj’ [-Wunused-parameter]
+  175 | void GPUParticleSystem::render_volumetric(VkCommandBuffer cmd, const math::Mat4& view_proj) {
+      |                                                                ~~~~~~~~~~~~~~~~~~^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:185:6: error: no declaration matches ‘void manim::GPUParticleSystem::sort_particles_gpu(VkCommandBuffer)’
+  185 | void GPUParticleSystem::sort_particles_gpu(VkCommandBuffer cmd) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:185:6: note: no functions named ‘void manim::GPUParticleSystem::sort_particles_gpu(VkCommandBuffer)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:193:6: error: no declaration matches ‘void manim::GPUParticleSystem::set_emitter(const manim::ParticleEmitterConfig&)’
+  193 | void GPUParticleSystem::set_emitter(const ParticleEmitterConfig& config) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:193:6: note: no functions named ‘void manim::GPUParticleSystem::set_emitter(const manim::ParticleEmitterConfig&)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:217:6: error: redefinition of ‘void manim::GPUParticleSystem::enable_sph_fluid(bool)’
+  217 | void GPUParticleSystem::enable_sph_fluid(bool enable) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:197:10: note: ‘void manim::GPUParticleSystem::enable_sph_fluid(bool)’ previously defined here
+  197 |     void enable_sph_fluid(bool enable) { use_sph_ = enable; }
+      |          ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:228:6: error: no declaration matches ‘void manim::GPUParticleSystem::initialize_sph()’
+  228 | void GPUParticleSystem::initialize_sph() {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:228:6: note: no functions named ‘void manim::GPUParticleSystem::initialize_sph()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:255:6: error: redefinition of ‘void manim::GPUParticleSystem::enable_sorting(bool)’
+  255 | void GPUParticleSystem::enable_sorting(bool enable) {
+      |      ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:213:10: note: ‘void manim::GPUParticleSystem::enable_sorting(bool)’ previously defined here
+  213 |     void enable_sorting(bool enable) { enable_sorting_ = enable; }
+      |          ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘virtual void manim::HybridRenderer::shutdown()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:41:25: error: ‘cpu_task_futures_’ was not declared in this scope
+   41 |     for (auto& future : cpu_task_futures_) {
+      |                         ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In member function ‘void manim::GPUParticleSystem::reset()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:261:5: error: ‘num_alive_’ was not declared in this scope
+  261 |     num_alive_ = 0;
+      |     ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:23:20: error: definition of implicitly-declared ‘constexpr manim::Renderer::Renderer()’
+   23 | Renderer::Renderer() = default;
+      |                    ^
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:24:1: error: definition of explicitly-defaulted ‘manim::Renderer::~Renderer()’
+   24 | Renderer::~Renderer() = default;
+      | ^~~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:92:13: note: ‘virtual manim::Renderer::~Renderer()’ explicitly defaulted here
+   92 |     virtual ~Renderer() = default;
+      |             ^
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp: In member function ‘virtual void manim::Renderer::set_render_mode(RenderMode)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:27:5: error: ‘render_mode_’ was not declared in this scope; did you mean ‘RenderMode’?
+   27 |     render_mode_ = mode;
+      |     ^~~~~~~~~~~~
+      |     RenderMode
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:353:5: error: ‘create_postprocess_targets’ was not declared in this scope
+  353 |     create_postprocess_targets();
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘virtual void manim::HybridRenderer::render_scene(manim::Scene&, manim::Camera&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:61:5: error: ‘execute_cpu_tasks’ was not declared in this scope
+   61 |     execute_cpu_tasks();
+      |     ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_3d_renderer.cpp:358:16: error: redefinition of ‘const manim::GBuffer& manim::GPU3DRenderer::get_gbuffer() const’
+  358 | const GBuffer& GPU3DRenderer::get_gbuffer() const {
+      |                ^~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_3d_renderer.hpp:288:20: note: ‘const manim::GBuffer& manim::GPU3DRenderer::get_gbuffer() const’ previously defined here
+  288 |     const GBuffer& get_gbuffer() const { return gbuffer_; }
+      |                    ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:31:6: error: no declaration matches ‘void manim::Renderer::toggle_wireframe()’
+   31 | void Renderer::toggle_wireframe() {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:31:6: note: no functions named ‘void manim::Renderer::toggle_wireframe()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:36:6: error: no declaration matches ‘void manim::Renderer::set_vsync(bool)’
+   36 | void Renderer::set_vsync(bool enabled) {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:36:6: note: no functions named ‘void manim::Renderer::set_vsync(bool)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:41:6: error: no declaration matches ‘bool manim::Renderer::supports_ray_tracing() const’
+   41 | bool Renderer::supports_ray_tracing() const {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:41:6: note: no functions named ‘bool manim::Renderer::supports_ray_tracing() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:45:6: error: no declaration matches ‘bool manim::Renderer::supports_mesh_shaders() const’
+   45 | bool Renderer::supports_mesh_shaders() const {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:45:6: note: no functions named ‘bool manim::Renderer::supports_mesh_shaders() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:49:12: error: no declaration matches ‘manim::FrameStats manim::Renderer::get_frame_stats() const’
+   49 | FrameStats Renderer::get_frame_stats() const {
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:49:12: note: no functions named ‘manim::FrameStats manim::Renderer::get_frame_stats() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:53:6: error: no declaration matches ‘void manim::Renderer::begin_frame_timing()’
+   53 | void Renderer::begin_frame_timing() {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:53:6: note: no functions named ‘void manim::Renderer::begin_frame_timing()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:57:6: error: no declaration matches ‘void manim::Renderer::end_frame_timing()’
+   57 | void Renderer::end_frame_timing() {
+      |      ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:57:6: note: no functions named ‘void manim::Renderer::end_frame_timing()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:90:7: note: ‘class manim::Renderer’ defined here
+   90 | class Renderer {
+      |       ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:262:5: error: ‘time_accumulator_’ was not declared in this scope
+  262 |     time_accumulator_ = 0.0f;
+      |     ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:270:10: error: no declaration matches ‘uint32_t manim::GPUParticleSystem::get_num_alive() const’
+  270 | uint32_t GPUParticleSystem::get_num_alive() const {
+      |          ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:270:10: note: no functions named ‘uint32_t manim::GPUParticleSystem::get_num_alive() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:274:10: error: no declaration matches ‘uint32_t manim::GPUParticleSystem::get_max_particles() const’
+  274 | uint32_t GPUParticleSystem::get_max_particles() const {
+      |          ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:274:10: note: no functions named ‘uint32_t manim::GPUParticleSystem::get_max_particles() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:104:7: note: ‘class manim::GPUParticleSystem’ defined here
+  104 | class GPUParticleSystem {
+      |       ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:278:7: error: ‘ParticleStats’ does not name a type; did you mean ‘ParticleTrail’?
+  278 | const ParticleStats& GPUParticleSystem::get_stats() const {
+      |       ^~~~~~~~~~~~~
+      |       ParticleTrail
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::fire()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:289:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  289 |     config.direction = math::Vec3{0.0f, 1.0f, 0.0f};  // Upward
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:290:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  290 |     config.rate = 100.0f;
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:291:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  291 |     config.spread = 0.3f;
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:292:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  292 |     config.velocity_min = math::Vec3{-0.1f, 0.5f, -0.1f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:293:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  293 |     config.velocity_max = math::Vec3{0.1f, 2.0f, 0.1f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:294:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  294 |     config.lifetime_min = 0.5f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:295:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  295 |     config.lifetime_max = 2.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:296:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  296 |     config.size_start = 0.2f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:297:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  297 |     config.size_end = 0.05f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::smoke()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:306:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  306 |     config.direction = math::Vec3{0.0f, 1.0f, 0.0f};
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:307:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  307 |     config.rate = 50.0f;
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:308:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  308 |     config.spread = 0.5f;
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:309:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  309 |     config.velocity_min = math::Vec3{-0.2f, 0.3f, -0.2f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:310:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  310 |     config.velocity_max = math::Vec3{0.2f, 1.0f, 0.2f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:311:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  311 |     config.lifetime_min = 2.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:312:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  312 |     config.lifetime_max = 5.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:313:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  313 |     config.size_start = 0.1f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:314:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  314 |     config.size_end = 0.5f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::explosion()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:323:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  323 |     config.direction = math::Vec3{0.0f, 1.0f, 0.0f};
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:324:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  324 |     config.rate = 1000.0f;  // Burst
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:325:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  325 |     config.spread = 3.14159f;  // All directions
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:326:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  326 |     config.velocity_min = math::Vec3{-5.0f, -5.0f, -5.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:327:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  327 |     config.velocity_max = math::Vec3{5.0f, 5.0f, 5.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:328:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  328 |     config.lifetime_min = 0.5f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:329:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  329 |     config.lifetime_max = 2.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:330:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  330 |     config.size_start = 0.3f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:331:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  331 |     config.size_end = 0.0f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::rain()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:340:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  340 |     config.direction = math::Vec3{0.0f, -1.0f, 0.0f};  // Downward
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:341:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  341 |     config.rate = 500.0f;
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:342:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  342 |     config.spread = 0.0f;  // Straight down
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:343:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  343 |     config.velocity_min = math::Vec3{0.0f, -10.0f, 0.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:344:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  344 |     config.velocity_max = math::Vec3{0.0f, -15.0f, 0.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:345:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  345 |     config.lifetime_min = 2.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:346:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  346 |     config.lifetime_max = 3.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:347:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  347 |     config.size_start = 0.05f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:348:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  348 |     config.size_end = 0.05f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::snow()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:357:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  357 |     config.direction = math::Vec3{0.0f, -1.0f, 0.0f};
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:358:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  358 |     config.rate = 200.0f;
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:359:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  359 |     config.spread = 0.2f;
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:360:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  360 |     config.velocity_min = math::Vec3{-0.5f, -1.0f, -0.5f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:361:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  361 |     config.velocity_max = math::Vec3{0.5f, -0.5f, 0.5f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:362:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  362 |     config.lifetime_min = 5.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:363:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  363 |     config.lifetime_max = 10.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:364:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  364 |     config.size_start = 0.1f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:365:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  365 |     config.size_end = 0.1f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: In static member function ‘static manim::ParticleEmitterConfig manim::ParticlePresets::sparks()’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:374:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘direction’
+  374 |     config.direction = math::Vec3{0.0f, 1.0f, 0.0f};
+      |            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:375:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘rate’
+  375 |     config.rate = 300.0f;
+      |            ^~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:376:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘spread’
+  376 |     config.spread = 1.0f;
+      |            ^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:377:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_min’; did you mean ‘velocity’?
+  377 |     config.velocity_min = math::Vec3{-3.0f, 1.0f, -3.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:378:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘velocity_max’; did you mean ‘velocity’?
+  378 |     config.velocity_max = math::Vec3{3.0f, 5.0f, 3.0f};
+      |            ^~~~~~~~~~~~
+      |            velocity
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:379:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_min’
+  379 |     config.lifetime_min = 0.3f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:380:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘lifetime_max’
+  380 |     config.lifetime_max = 1.0f;
+      |            ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:381:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_start’
+  381 |     config.size_start = 0.1f;
+      |            ^~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:382:12: error: ‘struct manim::ParticleEmitterConfig’ has no member named ‘size_end’
+  382 |     config.size_end = 0.0f;
+      |            ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:388:23: error: no declaration matches ‘manim::ParticleEmitterConfig manim::ParticlePresets::waterfall()’
+  388 | ParticleEmitterConfig ParticlePresets::waterfall() {
+      |                       ^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/gpu_particle_system.cpp:388:23: note: no functions named ‘manim::ParticleEmitterConfig manim::ParticlePresets::waterfall()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/gpu_particle_system.hpp:373:7: note: ‘class manim::ParticlePresets’ defined here
+  373 | class ParticlePresets {
+      |       ^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp: In function ‘std::unique_ptr<manim::Renderer> manim::create_renderer(RendererType, const RendererConfig&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:72:84: warning: unused parameter ‘config’ [-Wunused-parameter]
+   72 | std::unique_ptr<Renderer> create_renderer(RendererType type, const RendererConfig& config) {
+      |                                                              ~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:187:16: error: no declaration matches ‘manim::RendererConfig manim::RendererConfig::default_config()’
+  187 | RendererConfig RendererConfig::default_config() {
+      |                ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:187:16: note: no functions named ‘manim::RendererConfig manim::RendererConfig::default_config()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:38:8: note: ‘struct manim::RendererConfig’ defined here
+   38 | struct RendererConfig {
+      |        ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:200:16: error: no declaration matches ‘manim::RendererConfig manim::RendererConfig::high_quality_config()’
+  200 | RendererConfig RendererConfig::high_quality_config() {
+      |                ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:200:16: note: no functions named ‘manim::RendererConfig manim::RendererConfig::high_quality_config()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:38:8: note: ‘struct manim::RendererConfig’ defined here
+   38 | struct RendererConfig {
+      |        ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:213:16: error: no declaration matches ‘manim::RendererConfig manim::RendererConfig::performance_config()’
+  213 | RendererConfig RendererConfig::performance_config() {
+      |                ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/renderer.cpp:213:16: note: no functions named ‘manim::RendererConfig manim::RendererConfig::performance_config()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:38:8: note: ‘struct manim::RendererConfig’ defined here
+   38 | struct RendererConfig {
+      |        ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:68:5: error: ‘synchronize’ was not declared in this scope
+   68 |     synchronize();
+      |     ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:71:20: error: ‘class manim::GPU3DRenderer’ has no member named ‘render_scene’
+   71 |     gpu_renderer_->render_scene(scene, camera);
+      |                    ^~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:77:24: error: no matching function for call to ‘manim::HybridRenderer::adjust_distribution(manim::SceneComplexity&, std::chrono::duration<long int, std::ratio<1, 1000> >::rep)’
+   77 |     adjust_distribution(complexity, duration.count());
+      |     ~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:2:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:235:10: note: candidate: ‘void manim::HybridRenderer::adjust_distribution()’
+  235 |     void adjust_distribution();
+      |          ^~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:235:10: note:   candidate expects 0 arguments, 2 provided
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘virtual void manim::HybridRenderer::render_mobject(manim::Mobject&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:84:22: error: invalid use of incomplete type ‘class manim::Mobject’
+   84 |     work.data_size = mobject.get_num_points();
+      |                      ^~~~~~~
+In file included from /home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:14:
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:20:7: note: forward declaration of ‘class manim::Mobject’
+   20 | class Mobject;
+      |       ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:85:23: error: ‘estimate_mobject_complexity’ was not declared in this scope
+   85 |     work.complexity = estimate_mobject_complexity(mobject);
+      |                       ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:88:24: error: ‘class manim::GPU3DRenderer’ has no member named ‘render_mobject’
+   88 |         gpu_renderer_->render_mobject(mobject);
+      |                        ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:91:9: error: ‘render_mobject_cpu’ was not declared in this scope; did you mean ‘render_mobject’?
+   91 |         render_mobject_cpu(mobject);
+      |         ^~~~~~~~~~~~~~~~~~
+      |         render_mobject
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘manim::SceneComplexity manim::HybridRenderer::analyze_scene_complexity(manim::Scene&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:99:31: error: invalid use of incomplete type ‘class manim::Scene’
+   99 |     complexity.num_mobjects = scene.get_mobject_count();
+      |                               ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:102:16: error: ‘struct manim::SceneComplexity’ has no member named ‘total_vertices’
+  102 |     complexity.total_vertices = 0;
+      |                ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:103:16: error: ‘struct manim::SceneComplexity’ has no member named ‘total_triangles’
+  103 |     complexity.total_triangles = 0;
+      |                ^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:105:26: error: invalid use of incomplete type ‘class manim::Scene’
+  105 |     for (auto& mobject : scene.get_mobjects()) {
+      |                          ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:106:20: error: ‘struct manim::SceneComplexity’ has no member named ‘total_vertices’
+  106 |         complexity.total_vertices += mobject->get_num_points();
+      |                    ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:108:20: error: ‘struct manim::SceneComplexity’ has no member named ‘total_triangles’
+  108 |         complexity.total_triangles += mobject->get_num_points() / 3;
+      |                    ^~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:112:29: error: invalid use of incomplete type ‘class manim::Scene’
+  112 |     complexity.num_lights = scene.get_light_count();
+      |                             ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:115:46: error: ‘struct manim::SceneComplexity’ has no member named ‘total_vertices’
+  115 |     float vertex_score = std::min(complexity.total_vertices / 1000000.0f, 1.0f);
+      |                                              ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:119:16: error: ‘struct manim::SceneComplexity’ has no member named ‘complexity_score’
+  119 |     complexity.complexity_score = (vertex_score + mobject_score + light_score) / 3.0f;
+      |                ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:122:30: error: ‘struct manim::SceneComplexity’ has no member named ‘complexity_score’
+  122 |                   complexity.complexity_score, complexity.num_mobjects, complexity.total_vertices);
+      |                              ^~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:122:84: error: ‘struct manim::SceneComplexity’ has no member named ‘total_vertices’
+  122 |                   complexity.complexity_score, complexity.num_mobjects, complexity.total_vertices);
+      |                                                                                    ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘void manim::HybridRenderer::distribute_render_tasks(manim::Scene&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:128:5: error: ‘cpu_work_queue_’ was not declared in this scope; did you mean ‘work_queue_’?
+  128 |     cpu_work_queue_.clear();
+      |     ^~~~~~~~~~~~~~~
+      |     work_queue_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:129:5: error: ‘gpu_work_queue_’ was not declared in this scope; did you mean ‘work_queue_’?
+  129 |     gpu_work_queue_.clear();
+      |     ^~~~~~~~~~~~~~~
+      |     work_queue_
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:133:43: error: ‘SceneUpdate’ is not a member of ‘manim::RenderWork::Type’
+  133 |     scene_update.type = RenderWork::Type::SceneUpdate;
+      |                                           ^~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:150:26: error: invalid use of incomplete type ‘class manim::Scene’
+  150 |     for (auto& mobject : scene.get_mobjects()) {
+      |                          ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:154:44: error: ‘Animation’ is not a member of ‘manim::RenderWork::Type’
+  154 |         anim_work.type = RenderWork::Type::Animation;
+      |                                            ^~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In lambda function:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:160:70: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  160 |             anim_work.gpu_function = [mobject, this](VkCommandBuffer cmd) {
+      |                                                      ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘void manim::HybridRenderer::distribute_render_tasks(manim::Scene&)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:174:9: error: invalid use of incomplete type ‘class manim::Scene’
+  174 |     if (scene.has_physics()) {
+      |         ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:177:29: error: invalid use of incomplete type ‘class manim::Scene’
+  177 |         physics.data_size = scene.get_physics_particle_count();
+      |                             ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/renderer.hpp:21:7: note: forward declaration of ‘class manim::Scene’
+   21 | class Scene;
+      |       ^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In lambda function:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:182:67: warning: unused parameter ‘cmd’ [-Wunused-parameter]
+  182 |             physics.gpu_function = [&scene, this](VkCommandBuffer cmd) {
+      |                                                   ~~~~~~~~~~~~~~~~^~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘bool manim::HybridRenderer::should_use_gpu(const manim::RenderWork&) const’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:201:13: error: ‘current_strategy_’ was not declared in this scope
+  201 |     switch (current_strategy_) {
+      |             ^~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:202:36: error: ‘GPUOnly’ is not a member of ‘manim::DistributionStrategy’
+  202 |         case DistributionStrategy::GPUOnly:
+      |                                    ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:205:36: error: ‘CPUOnly’ is not a member of ‘manim::DistributionStrategy’
+  205 |         case DistributionStrategy::CPUOnly:
+      |                                    ^~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:208:36: error: ‘BalancedStatic’ is not a member of ‘manim::DistributionStrategy’
+  208 |         case DistributionStrategy::BalancedStatic:
+      |                                    ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:212:36: error: ‘Adaptive’ is not a member of ‘manim::DistributionStrategy’
+  212 |         case DistributionStrategy::Adaptive:
+      |                                    ^~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:237:6: error: no declaration matches ‘void manim::HybridRenderer::execute_cpu_tasks()’
+  237 | void HybridRenderer::execute_cpu_tasks() {
+      |      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:237:6: note: no functions named ‘void manim::HybridRenderer::execute_cpu_tasks()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:250:6: error: no declaration matches ‘void manim::HybridRenderer::synchronize()’
+  250 | void HybridRenderer::synchronize() {
+      |      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:250:6: note: no functions named ‘void manim::HybridRenderer::synchronize()’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:261:6: error: no declaration matches ‘void manim::HybridRenderer::adjust_distribution(const manim::SceneComplexity&, float)’
+  261 | void HybridRenderer::adjust_distribution(const SceneComplexity& complexity, float frame_time_ms) {
+      |      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:235:10: note: candidate is: ‘void manim::HybridRenderer::adjust_distribution()’
+  235 |     void adjust_distribution();
+      |          ^~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:295:7: error: no declaration matches ‘float manim::HybridRenderer::estimate_mobject_complexity(manim::Mobject&) const’
+  295 | float HybridRenderer::estimate_mobject_complexity(Mobject& mobject) const {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:295:7: note: no functions named ‘float manim::HybridRenderer::estimate_mobject_complexity(manim::Mobject&) const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘void manim::HybridRenderer::update_scene_logic(manim::Scene&, float)’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:307:48: warning: unused parameter ‘scene’ [-Wunused-parameter]
+  307 | void HybridRenderer::update_scene_logic(Scene& scene, float dt) {
+      |                                         ~~~~~~~^~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:307:61: warning: unused parameter ‘dt’ [-Wunused-parameter]
+  307 | void HybridRenderer::update_scene_logic(Scene& scene, float dt) {
+      |                                                       ~~~~~~^~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: At global scope:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:316:6: error: no declaration matches ‘void manim::HybridRenderer::render_mobject_cpu(manim::Mobject&)’
+  316 | void HybridRenderer::render_mobject_cpu(Mobject& mobject) {
+      |      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:316:6: note: no functions named ‘void manim::HybridRenderer::render_mobject_cpu(manim::Mobject&)’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:323:6: error: redefinition of ‘void manim::HybridRenderer::set_distribution_strategy(manim::DistributionStrategy)’
+  323 | void HybridRenderer::set_distribution_strategy(DistributionStrategy strategy) {
+      |      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:155:10: note: ‘void manim::HybridRenderer::set_distribution_strategy(manim::DistributionStrategy)’ previously defined here
+  155 |     void set_distribution_strategy(DistributionStrategy strategy) {
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:328:22: error: no declaration matches ‘manim::DistributionStrategy manim::HybridRenderer::get_distribution_strategy() const’
+  328 | DistributionStrategy HybridRenderer::get_distribution_strategy() const {
+      |                      ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:328:22: note: no functions named ‘manim::DistributionStrategy manim::HybridRenderer::get_distribution_strategy() const’
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:98:7: note: ‘class manim::HybridRenderer’ defined here
+   98 | class HybridRenderer : public Renderer {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:332:7: error: redefinition of ‘float manim::HybridRenderer::get_cpu_utilization() const’
+  332 | float HybridRenderer::get_cpu_utilization() const {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:220:11: note: ‘float manim::HybridRenderer::get_cpu_utilization() const’ previously defined here
+  220 |     float get_cpu_utilization() const { return cpu_utilization_.load(); }
+      |           ^~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:336:7: error: redefinition of ‘float manim::HybridRenderer::get_gpu_utilization() const’
+  336 | float HybridRenderer::get_gpu_utilization() const {
+      |       ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:225:11: note: ‘float manim::HybridRenderer::get_gpu_utilization() const’ previously defined here
+  225 |     float get_gpu_utilization() const { return gpu_utilization_.load(); }
+      |           ^~~~~~~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:340:14: error: redefinition of ‘manim::RendererType manim::HybridRenderer::get_type() const’
+  340 | RendererType HybridRenderer::get_type() const {
+      |              ^~~~~~~~~~~~~~
+/home/adil/CPPmath-independent/manim-cpp/include/manim/renderer/hybrid_renderer.hpp:114:18: note: ‘virtual manim::RendererType manim::HybridRenderer::get_type() const’ previously defined here
+  114 |     RendererType get_type() const override { return RendererType::Vulkan; }
+      |                  ^~~~~~~~
+gmake[2]: *** [CMakeFiles/manim.dir/build.make:262: CMakeFiles/manim.dir/src/renderer/gpu_3d_renderer.cpp.o] Error 1
+gmake[2]: *** [CMakeFiles/manim.dir/build.make:276: CMakeFiles/manim.dir/src/renderer/gpu_particle_system.cpp.o] Error 1
+gmake[2]: *** [CMakeFiles/manim.dir/build.make:304: CMakeFiles/manim.dir/src/renderer/renderer.cpp.o] Error 1
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp: In member function ‘bool manim::HybridRenderer::should_use_gpu(const manim::RenderWork&) const’:
+/home/adil/CPPmath-independent/manim-cpp/src/renderer/hybrid_renderer.cpp:235:1: warning: control reaches end of non-void function [-Wreturn-type]
+  235 | }
+      | ^
+gmake[2]: *** [CMakeFiles/manim.dir/build.make:290: CMakeFiles/manim.dir/src/renderer/hybrid_renderer.cpp.o] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:97: CMakeFiles/manim.dir/all] Error 2
+gmake: *** [Makefile:146: all] Error 2
