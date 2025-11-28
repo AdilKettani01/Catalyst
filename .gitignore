@@ -138,7 +138,7 @@ third_party/*
 # C++ build artifacts
 manim-cpp/build/
 *.ppm
-*.png
+manim-cpp/build/*.png
 *.o
 *.a
 *.spv
