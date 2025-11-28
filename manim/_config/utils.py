@@ -1183,7 +1183,7 @@ class ManimConfig(MutableMapping):
     def frame_rate(self, value: float) -> None:
         self._d.__setitem__("frame_rate", value)
 
-    # TODO: This was parsed before maybe add ManimColor(val), but results in circular import
+    # TODO.md: This was parsed before maybe add ManimColor(val), but results in circular import
     @property
     def background_color(self) -> ManimColor:
         """Background color of the scene (-c)."""
@@ -1805,7 +1805,7 @@ class ManimConfig(MutableMapping):
         self._d["plugins"] = value
 
 
-# TODO: to be used in the future - see PR #620
+# TODO.md: to be used in the future - see PR #620
 # https://github.com/ManimCommunity/manim/pull/620
 class ManimFrame(Mapping):
     _OPTS: ClassVar[set[str]] = {

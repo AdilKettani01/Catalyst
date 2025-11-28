@@ -1,0 +1,71 @@
+#version 450
+
+// Hi-Z (Hierarchical Z-buffer) pyramid construction shader
+// Builds mipmap chain where each texel is the MAX depth of 4 source texels
+// This enables conservative occlusion culling
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Source depth (previous mip level or original depth buffer)
+layout(binding = 0) uniform sampler2D src_depth;
+
+// Destination mip level (write target)
+layout(binding = 1, r32f) writeonly uniform image2D dst_mip;
+
+layout(push_constant) uniform PushConstants {
+    int src_width;      // Source resolution width
+    int src_height;     // Source resolution height
+    int dst_width;      // Destination resolution width
+    int dst_height;     // Destination resolution height
+    uint mip_level;     // Current mip level being generated
+    uint padding[3];    // Align to 32 bytes
+} pc;
+
+void main() {
+    ivec2 dst_coord = ivec2(gl_GlobalInvocationID.xy);
+
+    // Early out if outside destination bounds
+    if (dst_coord.x >= pc.dst_width || dst_coord.y >= pc.dst_height) {
+        return;
+    }
+
+    // Sample 4 texels from source (2x2 region)
+    // Use texel centers for correct sampling
+    vec2 src_texel_size = 1.0 / vec2(pc.src_width, pc.src_height);
+    vec2 base_uv = (vec2(dst_coord) * 2.0 + 0.5) * src_texel_size;
+
+    // Gather 4 depth values (using textureGather would be more efficient but less portable)
+    float d00 = texture(src_depth, base_uv).r;
+    float d10 = texture(src_depth, base_uv + vec2(src_texel_size.x, 0.0)).r;
+    float d01 = texture(src_depth, base_uv + vec2(0.0, src_texel_size.y)).r;
+    float d11 = texture(src_depth, base_uv + src_texel_size).r;
+
+    // Take maximum depth (conservative for occlusion - farthest point)
+    // In reversed-Z, we'd take minimum instead
+    float max_depth = max(max(d00, d10), max(d01, d11));
+
+    // Handle edge cases where source is odd-sized
+    // Sample additional texels if needed
+    if ((pc.src_width & 1) != 0 && dst_coord.x == pc.dst_width - 1) {
+        // Extra column on the right
+        float d20 = texture(src_depth, base_uv + vec2(2.0 * src_texel_size.x, 0.0)).r;
+        float d21 = texture(src_depth, base_uv + vec2(2.0 * src_texel_size.x, src_texel_size.y)).r;
+        max_depth = max(max_depth, max(d20, d21));
+    }
+
+    if ((pc.src_height & 1) != 0 && dst_coord.y == pc.dst_height - 1) {
+        // Extra row at the bottom
+        float d02 = texture(src_depth, base_uv + vec2(0.0, 2.0 * src_texel_size.y)).r;
+        float d12 = texture(src_depth, base_uv + vec2(src_texel_size.x, 2.0 * src_texel_size.y)).r;
+        max_depth = max(max_depth, max(d02, d12));
+    }
+
+    if ((pc.src_width & 1) != 0 && (pc.src_height & 1) != 0 &&
+        dst_coord.x == pc.dst_width - 1 && dst_coord.y == pc.dst_height - 1) {
+        // Corner texel
+        float d22 = texture(src_depth, base_uv + 2.0 * src_texel_size).r;
+        max_depth = max(max_depth, d22);
+    }
+
+    imageStore(dst_mip, dst_coord, vec4(max_depth));
+}

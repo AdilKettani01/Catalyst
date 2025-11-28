@@ -293,6 +293,38 @@ int main() {
 }
 ```
 
+### Basic CPU Renderer (Week 3-4 milestone)
+
+A lightweight CPU renderer is available for quick shape previews before the full Vulkan path is wired up:
+
+```bash
+cmake --build build --target manim
+./build/bin/manim render basic_scene.ppm
+```
+
+This generates `basic_scene.ppm` with a circle, ellipse, and dot rendered through the new basic pipeline.
+
+### GPU Render to File
+
+Render a test scene directly to an image file using the Vulkan GPU pipeline:
+
+```bash
+# Build
+cd manim-cpp/build && make -j4
+
+# Render with GPU (default MSAA 4x)
+./bin/gpu_render_to_file --gpu output.ppm
+
+# Convert PPM to PNG
+ffmpeg -i output.ppm output.png
+
+# Or one-liner:
+./bin/gpu_render_to_file --gpu output.ppm && ffmpeg -y -i output.ppm output.png
+```
+
+**Output:** `output.ppm` (1920x1080, RGB)
+**Expected:** Blue circle, red ellipse, white dot on dark background with smooth anti-aliased edges (4x MSAA).
+
 ### Python Bindings (pybind11)
 
 ```python

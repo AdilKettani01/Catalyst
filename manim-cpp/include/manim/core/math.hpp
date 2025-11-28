@@ -27,12 +27,35 @@ using Vec2 = glm::vec2;
 using Vec3 = glm::vec3;
 using Vec4 = glm::vec4;
 using Mat3 = glm::mat3;
-using Mat4 = glm::mat4;
+struct Mat4Wrapper : public glm::mat4 {
+    using glm::mat4::mat4;
+    Mat4Wrapper(const glm::mat4& other) : glm::mat4(other) {}
+    Mat4Wrapper& operator=(const glm::mat4& other) {
+        glm::mat4::operator=(other);
+        return *this;
+    }
+    static Mat4Wrapper identity() { return Mat4Wrapper(1.0f); }
+};
+using Mat4 = Mat4Wrapper;
 using Quat = glm::quat;
 
 // For more complex linear algebra (CPU-side)
 using MatrixXf = Eigen::MatrixXf;
 using VectorXf = Eigen::VectorXf;
+
+inline constexpr float DEGREES = glm::pi<float>() / 180.0f;
+
+inline Mat4 rotate(float angle, const Vec3& axis) {
+    return Mat4(glm::rotate(glm::mat4(1.0f), angle, axis));
+}
+
+inline Mat4 rotate(const Mat4& base, float angle, const Vec3& axis) {
+    return Mat4(glm::rotate(glm::mat4(base), angle, axis));
+}
+
+inline Mat4 translate(const Mat4& m, const Vec3& v) {
+    return Mat4(glm::translate(glm::mat4(m), v));
+}
 
 // ============================================================================
 // GPU-Accelerated Array (like NumPy ndarray)
@@ -155,6 +178,9 @@ using Mat4Array = Array<Mat4>;
  * @brief Normalize vectors on GPU
  */
 Vec3Array normalize(const Vec3Array& vectors);
+
+inline float dot(const Vec3& a, const Vec3& b) { return glm::dot(a, b); }
+inline Vec3 cross(const Vec3& a, const Vec3& b) { return glm::cross(a, b); }
 
 /**
  * @brief Dot product for arrays of vectors

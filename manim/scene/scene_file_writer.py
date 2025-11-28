@@ -170,7 +170,7 @@ class SceneFileWriter:
                 self.output_name, config["movie_file_extension"]
             )
 
-            # TODO: /dev/null would be good in case sections_output_dir is used without being set (doesn't work on Windows), everyone likes defensive programming, right?
+            # TODO.md: /dev/null would be good in case sections_output_dir is used without being set (doesn't work on Windows), everyone likes defensive programming, right?
             self.sections_output_dir = Path("")
             if config.save_sections:
                 self.sections_output_dir = guarantee_existence(
@@ -376,7 +376,7 @@ class SceneFileWriter:
         # .wav and .raw files, respectively.
         if file_path.suffix not in (".wav", ".raw"):
             # we need to pass delete=False to work on Windows
-            # TODO: figure out a way to cache the wav file generated (benchmark needed)
+            # TODO.md: figure out a way to cache the wav file generated (benchmark needed)
             with NamedTemporaryFile(suffix=".wav", delete=False) as wav_file_path:
                 convert_audio(file_path, wav_file_path, "pcm_s16le")
                 new_segment = AudioSegment.from_file(wav_file_path.name)

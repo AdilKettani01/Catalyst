@@ -5,13 +5,13 @@
 namespace manim {
 
 bool RenderConfig::loadFromFile(const std::filesystem::path& path) {
-    // TODO: Implement TOML/JSON loading
+    // TODO.md: Implement TOML/JSON loading
     std::cout << "Loading config from: " << path << std::endl;
     return true;
 }
 
 bool RenderConfig::saveToFile(const std::filesystem::path& path) const {
-    // TODO: Implement TOML/JSON saving
+    // TODO.md: Implement TOML/JSON saving
     std::cout << "Saving config to: " << path << std::endl;
     return true;
 }

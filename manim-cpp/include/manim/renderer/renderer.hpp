@@ -13,6 +13,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <chrono>
 
 namespace manim {
 
@@ -58,11 +59,18 @@ struct RendererConfig {
     bool enable_frustum_culling = true;
     bool enable_occlusion_culling = true;
     uint32_t max_lights = 16;
+    uint32_t max_frames_in_flight = 2;
 
     // Debug
     bool debug_wireframe = false;
     bool debug_normals = false;
     bool show_fps = true;
+    bool enable_validation = false;
+    bool enable_mesh_shaders = false;
+
+    static RendererConfig default_config();
+    static RendererConfig high_quality_config();
+    static RendererConfig performance_config();
 };
 
 /**
@@ -80,6 +88,7 @@ struct FrameStats {
 
     uint64_t gpu_memory_used = 0;
     uint64_t cpu_memory_used = 0;
+    uint64_t frame_number = 0;
 };
 
 /**
@@ -89,6 +98,7 @@ struct FrameStats {
  */
 class Renderer {
 public:
+    Renderer();
     virtual ~Renderer() = default;
 
     /**
@@ -120,6 +130,12 @@ public:
      * @brief Render single mobject
      */
     virtual void render_mobject(Mobject& mobject) = 0;
+
+    virtual std::shared_ptr<Camera> getCamera() { return nullptr; }
+    virtual void addMobject(std::shared_ptr<Mobject>) {}
+    virtual void removeMobject(std::shared_ptr<Mobject>) {}
+    virtual void finishScene() {}
+    virtual void render() {}
 
     /**
      * @brief Clear screen
@@ -166,15 +182,30 @@ public:
         Depth,         ///< Depth visualization
         Lighting,      ///< Lighting only
         Shadows,       ///< Shadow maps
-        GBuffer        ///< G-buffer visualization
+        GBuffer,       ///< G-buffer visualization
+        HYBRID_AUTO,   ///< Hybrid renderer automatic mode
+        PERFORMANCE,   ///< GPU-heavy mode
+        QUALITY        ///< Balanced/quality mode
     };
 
     virtual void set_render_mode(RenderMode mode) = 0;
+
+    void toggle_wireframe();
+    void set_vsync(bool enabled);
+    bool supports_ray_tracing() const;
+    bool supports_mesh_shaders() const;
+    FrameStats get_frame_stats() const;
+    void begin_frame_timing();
+    void end_frame_timing();
 
 protected:
     RendererConfig config_;
     FrameStats stats_;
     std::unique_ptr<MemoryPool> memory_pool_;
+    RenderMode render_mode_ = RenderMode::Normal;
+    bool wireframe_enabled_ = false;
+    bool vsync_enabled_ = true;
+    std::chrono::high_resolution_clock::time_point frame_timer_start_;
 };
 
 /**
@@ -187,9 +218,18 @@ std::unique_ptr<Renderer> create_renderer(
     const RendererConfig& config = {}
 );
 
+std::unique_ptr<Renderer> create_best_available_renderer(const RendererConfig& config = {});
+std::vector<RendererType> get_available_renderers();
+std::string renderer_type_to_string(RendererType type);
+
 /**
  * @brief Detect best available renderer for current platform
  */
 RendererType detect_best_renderer();
 
+using RenderMode = Renderer::RenderMode;
+
 } // namespace manim
+
+#include "vulkan_renderer.hpp"
+#include "opengl_renderer.hpp"

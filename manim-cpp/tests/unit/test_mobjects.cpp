@@ -12,6 +12,9 @@
 #include "manim/mobject/mobject.hpp"
 #include "manim/mobject/vmobject.hpp"
 #include "manim/mobject/geometry/circle.hpp"
+#include "manim/mobject/three_d/mesh.hpp"
+#include "manim/mobject/three_d/surface.hpp"
+#include "manim/mobject/three_d/volume.hpp"
 #include "manim/core/types.h"
 
 using namespace manim;
@@ -316,6 +319,248 @@ TEST(VolumeTest, DefaultConstruction) {
     EXPECT_NE(volume, nullptr);
 }
 
+// ==================== Procedural Mesh Generator Tests ====================
+
+TEST(MeshGeneratorTest, CylinderGeneration) {
+    auto cylinder = GPUMesh::create_cylinder(1.0f, 2.0f, 32);
+    EXPECT_NE(cylinder, nullptr);
+    EXPECT_GT(cylinder->get_num_vertices(), 0);
+    EXPECT_GT(cylinder->get_num_triangles(), 0);
+
+    // Verify proper vertex/triangle counts for cylinder
+    // 32 segments * 2 rings (sides) + 2 caps with center + ring
+    EXPECT_GE(cylinder->get_num_vertices(), 64); // At minimum
+}
+
+TEST(MeshGeneratorTest, TorusGeneration) {
+    auto torus = GPUMesh::create_torus(1.0f, 0.3f, 32, 24);
+    EXPECT_NE(torus, nullptr);
+    EXPECT_GT(torus->get_num_vertices(), 0);
+    EXPECT_GT(torus->get_num_triangles(), 0);
+
+    // Torus should have (major_segments+1) * (minor_segments+1) vertices
+    EXPECT_GE(torus->get_num_vertices(), 33 * 25);
+}
+
+TEST(MeshGeneratorTest, ConeGeneration) {
+    auto cone = GPUMesh::create_cone(1.0f, 2.0f, 32, false);
+    EXPECT_NE(cone, nullptr);
+    EXPECT_GT(cone->get_num_vertices(), 0);
+    EXPECT_GT(cone->get_num_triangles(), 0);
+
+    // Open-ended cone
+    auto cone_open = GPUMesh::create_cone(1.0f, 2.0f, 32, true);
+    EXPECT_NE(cone_open, nullptr);
+    // Open cone should have fewer vertices (no cap)
+    EXPECT_LT(cone_open->get_num_vertices(), cone->get_num_vertices());
+}
+
+TEST(MeshGeneratorTest, CapsuleGeneration) {
+    auto capsule = GPUMesh::create_capsule(0.5f, 2.0f, 32, 8);
+    EXPECT_NE(capsule, nullptr);
+    EXPECT_GT(capsule->get_num_vertices(), 0);
+    EXPECT_GT(capsule->get_num_triangles(), 0);
+}
+
+TEST(MeshGeneratorTest, IcosphereSubdivision) {
+    auto ico0 = GPUMesh::create_icosphere(1.0f, 0);
+    auto ico1 = GPUMesh::create_icosphere(1.0f, 1);
+    auto ico2 = GPUMesh::create_icosphere(1.0f, 2);
+
+    EXPECT_NE(ico0, nullptr);
+    EXPECT_NE(ico1, nullptr);
+    EXPECT_NE(ico2, nullptr);
+
+    // Icosahedron (level 0) has 12 vertices
+    EXPECT_EQ(ico0->get_num_vertices(), 12);
+
+    // Each subdivision multiplies faces by 4
+    EXPECT_GT(ico1->get_num_vertices(), ico0->get_num_vertices());
+    EXPECT_GT(ico2->get_num_vertices(), ico1->get_num_vertices());
+}
+
+TEST(MeshGeneratorTest, ArrowGeneration) {
+    auto arrow = GPUMesh::create_arrow(0.05f, 1.0f, 0.15f, 0.3f, 16);
+    EXPECT_NE(arrow, nullptr);
+    EXPECT_GT(arrow->get_num_vertices(), 0);
+    EXPECT_GT(arrow->get_num_triangles(), 0);
+}
+
+TEST(MeshGeneratorTest, SphereGeneration) {
+    auto sphere = GPUMesh::create_sphere(1.0f, 32);
+    EXPECT_NE(sphere, nullptr);
+    EXPECT_GT(sphere->get_num_vertices(), 0);
+    EXPECT_GT(sphere->get_num_triangles(), 0);
+
+    // UV sphere: (rings+1) * (sectors+1) vertices
+    EXPECT_GE(sphere->get_num_vertices(), 33 * 65);
+}
+
+TEST(MeshGeneratorTest, CubeGeneration) {
+    auto cube = GPUMesh::create_cube(1.0f);
+    EXPECT_NE(cube, nullptr);
+
+    // Cube has 24 vertices (4 per face * 6 faces for proper normals)
+    EXPECT_EQ(cube->get_num_vertices(), 24);
+
+    // 36 indices = 12 triangles (2 per face * 6 faces)
+    EXPECT_EQ(cube->get_num_triangles(), 12);
+}
+
+TEST(MeshGeneratorTest, PlaneGeneration) {
+    auto plane = GPUMesh::create_plane(2.0f, 2.0f, 4, 4);
+    EXPECT_NE(plane, nullptr);
+
+    // Subdivided plane: (subdivisions_x+1) * (subdivisions_y+1) vertices
+    EXPECT_EQ(plane->get_num_vertices(), 25);
+}
+
+// ==================== Instancing Tests ====================
+
+TEST(InstancedRenderingTest, SetupInstancing) {
+    auto mesh = GPUMesh::create_cube(1.0f);
+    mesh->setup_instancing(100);
+
+    EXPECT_TRUE(mesh->has_instancing());
+    EXPECT_EQ(mesh->get_instance_count(), 0);
+}
+
+TEST(InstancedRenderingTest, AddInstances) {
+    auto mesh = GPUMesh::create_cube(1.0f);
+    mesh->setup_instancing(100);
+
+    for (int i = 0; i < 10; ++i) {
+        GPUMesh::InstanceData instance;
+        instance.model_matrix = math::Mat4(1.0f);
+        instance.model_matrix[3][0] = static_cast<float>(i) * 2.0f;  // Translate X
+        instance.color = math::Vec4(1, 1, 1, 1);
+        instance.metallic = 0.5f;
+        instance.roughness = 0.5f;
+        instance.ao = 1.0f;
+        mesh->add_instance(instance);
+    }
+
+    EXPECT_EQ(mesh->get_instance_count(), 10);
+}
+
+TEST(InstancedRenderingTest, ClearInstances) {
+    auto mesh = GPUMesh::create_cube(1.0f);
+    mesh->setup_instancing(100);
+
+    GPUMesh::InstanceData instance;
+    instance.model_matrix = math::Mat4(1.0f);
+    instance.color = math::Vec4(1, 1, 1, 1);
+    mesh->add_instance(instance);
+    mesh->add_instance(instance);
+    mesh->add_instance(instance);
+
+    EXPECT_EQ(mesh->get_instance_count(), 3);
+
+    mesh->clear_instances();
+    EXPECT_EQ(mesh->get_instance_count(), 0);
+}
+
+// ==================== LOD System Tests ====================
+
+TEST(LODSystemTest, AddLODLevel) {
+    auto mesh = GPUMesh::create_sphere(1.0f, 32);
+
+    GPUMesh::LOD lod1;
+    lod1.distance_threshold = 10.0f;
+    mesh->add_lod_level(lod1);
+
+    GPUMesh::LOD lod2;
+    lod2.distance_threshold = 25.0f;
+    mesh->add_lod_level(lod2);
+
+    // Base mesh + 2 LOD levels
+    EXPECT_EQ(mesh->get_lod_count(), 3);
+}
+
+TEST(LODSystemTest, DistanceSelection) {
+    auto mesh = GPUMesh::create_sphere(1.0f, 32);
+
+    GPUMesh::LOD lod1;
+    lod1.distance_threshold = 10.0f;
+    mesh->add_lod_level(lod1);
+
+    GPUMesh::LOD lod2;
+    lod2.distance_threshold = 25.0f;
+    mesh->add_lod_level(lod2);
+
+    // Close distance should select LOD 0 (highest detail)
+    EXPECT_EQ(mesh->select_lod(5.0f), 0);
+
+    // Medium distance
+    EXPECT_EQ(mesh->select_lod(15.0f), 1);
+
+    // Far distance
+    EXPECT_EQ(mesh->select_lod(30.0f), 1);  // Last LOD
+}
+
+TEST(LODSystemTest, AutomaticGeneration) {
+    auto sphere = GPUMesh::create_sphere(1.0f, 32);
+
+    GPUMesh::LODGenerationConfig config;
+    config.distance_thresholds = {10.0f, 25.0f, 50.0f};
+    config.target_ratios = {0.5f, 0.25f, 0.1f};
+
+    sphere->generate_lod_levels(config);
+
+    // Should have 3 LOD levels + base
+    EXPECT_EQ(sphere->get_lod_count(), 4);
+
+    // Each LOD should have fewer or equal vertices
+    size_t prev_vertices = sphere->get_num_vertices();
+    for (size_t i = 0; i < 3; ++i) {
+        const GPUMesh::LOD* lod = sphere->get_lod(i);
+        EXPECT_NE(lod, nullptr);
+        EXPECT_LE(lod->vertices.size(), prev_vertices);
+        prev_vertices = lod->vertices.size();
+    }
+}
+
+// ==================== Geomorphing Tests ====================
+
+TEST(GeomorphingTest, StartTransition) {
+    auto mesh = GPUMesh::create_sphere(1.0f, 32);
+
+    GPUMesh::LOD lod;
+    lod.distance_threshold = 10.0f;
+    mesh->add_lod_level(lod);
+
+    mesh->start_lod_transition(1, 0.5f);
+
+    EXPECT_TRUE(mesh->is_transitioning());
+    EXPECT_FLOAT_EQ(mesh->get_morph_factor(), 0.0f);
+}
+
+TEST(GeomorphingTest, UpdateTransition) {
+    auto mesh = GPUMesh::create_sphere(1.0f, 32);
+
+    GPUMesh::LODGenerationConfig config;
+    config.distance_thresholds = {10.0f};
+    config.target_ratios = {0.5f};
+    mesh->generate_lod_levels(config);
+
+    mesh->start_lod_transition(1, 1.0f);  // 1 second transition
+
+    // Update by 0.5 seconds
+    mesh->update_lod_transition(0.5f);
+    EXPECT_FLOAT_EQ(mesh->get_morph_factor(), 0.5f);
+    EXPECT_TRUE(mesh->is_transitioning());
+
+    // Update by another 0.5 seconds - should complete
+    mesh->update_lod_transition(0.5f);
+    EXPECT_FLOAT_EQ(mesh->get_morph_factor(), 1.0f);
+    EXPECT_FALSE(mesh->is_transitioning());
+}
+
+TEST(GeomorphingTest, GeomorphVertexStructureSize) {
+    // Verify GeomorphVertex is 96 bytes for cache alignment
+    EXPECT_EQ(sizeof(GPUMesh::GeomorphVertex), 96);
+}
+
 // ==================== Performance Tests ====================
 
 TEST(MobjectPerformance, CreateThousandCircles) {
@@ -382,7 +627,9 @@ TEST(MobjectThreadSafety, ConcurrentCreation) {
 
 // ==================== Main ====================
 
+#if 0
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+#endif

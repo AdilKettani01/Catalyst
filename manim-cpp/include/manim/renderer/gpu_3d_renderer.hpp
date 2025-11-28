@@ -15,9 +15,11 @@
 
 #include <manim/renderer/renderer.hpp>
 #include <manim/core/compute_engine.hpp>
+#include <manim/culling/indirect_renderer.hpp>
 #include <vulkan/vulkan.h>
 #include <memory>
 #include <array>
+#include <vector>
 
 namespace manim {
 
@@ -124,6 +126,19 @@ struct PostProcessConfig {
 };
 
 /**
+ * @brief Aggregate configuration for the GPU3DRenderer
+ */
+struct GPU3DConfig {
+    uint32_t width = 1920;
+    uint32_t height = 1080;
+    bool enable_swapchain = false;
+    uint32_t swapchain_image_count = 2;
+    ShadowConfig shadow_config{};
+    GIConfig gi_config{};
+    PostProcessConfig postprocess_config{};
+};
+
+/**
  * @brief Advanced GPU 3D rendering pipeline
  */
 class GPU3DRenderer {
@@ -134,10 +149,14 @@ public:
     void initialize(
         VkDevice device,
         VkPhysicalDevice physical_device,
+        VkQueue graphics_queue,
+        uint32_t graphics_queue_family,
         MemoryPool& memory_pool,
         uint32_t width,
-        uint32_t height
+        uint32_t height,
+        uint32_t msaa_samples = 4  ///< MSAA sample count (1, 2, 4, 8, 16)
     );
+    void setup_deferred_pipeline() {}
 
     void shutdown();
 
@@ -155,6 +174,7 @@ public:
         Scene& scene,
         Camera& camera
     );
+    void advance_swapchain();
 
     // ========================================================================
     // Deferred Rendering Pipeline
@@ -284,15 +304,70 @@ public:
     // Render Targets
     // ========================================================================
 
-    const GPUImage& get_final_image() const { return final_image_; }
+    const GPUImage& get_final_image() const;
     const GBuffer& get_gbuffer() const { return gbuffer_; }
+    const GPUImage& get_swapchain_image() const { return swapchain_images_.empty() ? final_image_ : swapchain_images_[swapchain_present_index_]; }
+
+    /**
+     * @brief Get depth image for Hi-Z pyramid construction
+     *
+     * Use with OcclusionCuller::build_hiz_pyramid_temporal() after render pass:
+     * @code
+     * renderer.render(cmd, scene, camera);
+     * // After render pass:
+     * occlusion_culler.build_hiz_pyramid_temporal(
+     *     renderer.get_depth_image().get_image(),
+     *     renderer.get_depth_image().get_view(),
+     *     width, height, view_proj, cmd);
+     * occlusion_culler.end_frame();
+     * @endcode
+     */
+    const GPUImage& get_depth_image() const { return depth_image_; }
+
+    // ========================================================================
+    // Indirect Rendering
+    // ========================================================================
+
+    /**
+     * @brief Enable/disable GPU-driven indirect rendering
+     */
+    void set_indirect_rendering_enabled(bool enabled) { indirect_rendering_enabled_ = enabled; }
+    bool is_indirect_rendering_enabled() const { return indirect_rendering_enabled_; }
+
+    /**
+     * @brief Get indirect renderer for advanced usage
+     */
+    culling::IndirectRenderer& get_indirect_renderer() { return indirect_renderer_; }
+    const culling::IndirectRenderer& get_indirect_renderer() const { return indirect_renderer_; }
+
+    /**
+     * @brief Render using GPU-driven indirect rendering
+     *
+     * This method performs:
+     * 1. Submit objects from scene to indirect renderer
+     * 2. Execute GPU culling
+     * 3. Generate draw commands on GPU
+     * 4. Record indirect draw calls
+     *
+     * @param cmd Command buffer
+     * @param scene Scene to render
+     * @param camera Camera for view-projection matrix
+     */
+    void render_indirect(
+        VkCommandBuffer cmd,
+        Scene& scene,
+        Camera& camera
+    );
 
 private:
     // Vulkan resources
     VkDevice device_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    VkQueue graphics_queue_ = VK_NULL_HANDLE;
+    uint32_t graphics_queue_family_ = 0;
     MemoryPool* memory_pool_ = nullptr;
 
+    GPU3DConfig config_{};
     uint32_t width_ = 0;
     uint32_t height_ = 0;
 
@@ -314,6 +389,17 @@ private:
     // Render targets
     GPUImage hdr_image_;            // HDR render target
     GPUImage final_image_;          // Final LDR output
+    std::vector<GPUImage> swapchain_images_; // Offscreen swapchain images
+    uint32_t swapchain_index_ = 0;
+    uint32_t swapchain_present_index_ = 0;
+    uint32_t swapchain_image_count_ = 2;
+    bool use_swapchain_ = false;
+    GPUImage depth_image_;          // Depth buffer (single-sampled when not using MSAA)
+
+    // MSAA resources
+    VkSampleCountFlagBits msaa_samples_ = VK_SAMPLE_COUNT_1_BIT;
+    GPUImage msaa_color_image_;     // Multisampled color target (when MSAA enabled)
+    GPUImage msaa_depth_image_;     // Multisampled depth target (when MSAA enabled)
 
     // Post-processing
     GPUImage taa_history_;          // Previous frame for TAA
@@ -323,6 +409,11 @@ private:
     ShadowConfig shadow_config_;
     GIConfig gi_config_;
     PostProcessConfig post_config_;
+
+    // Indirect rendering
+    culling::IndirectRenderer indirect_renderer_;
+    bool indirect_rendering_enabled_ = false;
+    bool indirect_renderer_initialized_ = false;
 
     // Pipelines
     VkPipeline geometry_pipeline_ = VK_NULL_HANDLE;
@@ -337,6 +428,22 @@ private:
     VkPipeline taa_pipeline_ = VK_NULL_HANDLE;
     VkPipeline tonemap_pipeline_ = VK_NULL_HANDLE;
 
+    VkRenderPass render_pass_ = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer_ = VK_NULL_HANDLE; // single-frame fallback
+    std::vector<VkFramebuffer> swapchain_framebuffers_;
+    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline triangle_pipeline_ = VK_NULL_HANDLE;
+    std::vector<GPUBuffer> frame_vertex_buffers_;
+    std::vector<GPUBuffer> frame_index_buffers_;
+    GPUBuffer batched_fill_vertex_buffer_;
+    GPUBuffer batched_fill_index_buffer_;
+    GPUBuffer batched_stroke_vertex_buffer_;
+    GPUBuffer batched_stroke_index_buffer_;
+    VkDeviceSize batched_fill_vertex_capacity_ = 0;
+    VkDeviceSize batched_fill_index_capacity_ = 0;
+    VkDeviceSize batched_stroke_vertex_capacity_ = 0;
+    VkDeviceSize batched_stroke_index_capacity_ = 0;
+
     // Ray tracing pipelines (optional)
     VkPipeline rt_shadow_pipeline_ = VK_NULL_HANDLE;
     VkPipeline rt_gi_pipeline_ = VK_NULL_HANDLE;
@@ -347,12 +454,36 @@ private:
     VkDescriptorSetLayout lighting_layout_ = VK_NULL_HANDLE;
 
     // Helper functions
+    enum class DrawBufferSet { FillBatch, StrokeBatch, Custom };
+
+    struct BatchedDraw {
+        DrawBufferSet buffer_set;
+        uint32_t first_index;
+        uint32_t index_count;
+        int32_t vertex_offset;
+        math::Vec4 color;
+        VkBuffer custom_vertex = VK_NULL_HANDLE;
+        VkBuffer custom_index = VK_NULL_HANDLE;
+    };
+
+    std::vector<BatchedDraw> batched_draws_;
+    uint32_t tessellation_segments_per_curve_ = 16;
+
     void create_gbuffer();
     void create_shadow_maps();
     void create_voxel_grid();
     void create_render_targets();
     void create_pipelines();
+    void create_render_pass();
+    void create_framebuffers();
+    void create_triangle_pipeline();
     void destroy_resources();
+    void upload_batched_buffers(const std::vector<math::Vec3>& vertices,
+                                const std::vector<uint32_t>& indices,
+                                GPUBuffer& vertex_buffer,
+                                GPUBuffer& index_buffer,
+                                VkDeviceSize& vertex_capacity,
+                                VkDeviceSize& index_capacity);
 
     // Shadow helpers
     void calculate_cascade_splits(

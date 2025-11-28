@@ -9,6 +9,10 @@
 
 namespace manim {
 
+// Forward declarations
+class VMobject;
+class Mobject;
+
 /**
  * @brief GPU Animation Engine for parallel animation processing
  *
@@ -22,6 +26,7 @@ namespace manim {
  */
 class GPUAnimationEngine {
 public:
+    GPUAnimationEngine() = default;
     explicit GPUAnimationEngine(
         std::shared_ptr<ComputeEngine> compute_engine,
         std::shared_ptr<MemoryPool> memory_pool
@@ -52,6 +57,9 @@ public:
         const std::vector<std::shared_ptr<Animation>>& animations,
         float t
     );
+    void process_batch(const std::vector<std::shared_ptr<Animation>>& animations, float t) {
+        batch_process(animations, t);
+    }
 
     // ========================================================================
     // GPU Interpolation
@@ -159,6 +167,80 @@ public:
         AnimationType type,
         const std::vector<std::shared_ptr<Animation>>& batch,
         float t
+    );
+
+    // ========================================================================
+    // Animation Composition Support
+    // ========================================================================
+
+    /**
+     * @brief Batch data for animation group processing
+     */
+    struct AnimationBatchData {
+        std::shared_ptr<Animation> animation;
+        float alpha;              // Local alpha for this animation
+        uint32_t start_offset;    // Offset in point buffer
+        uint32_t num_points;      // Number of points
+    };
+
+    /**
+     * @brief Interpolate multiple animations with different alphas
+     *
+     * Used by AnimationGroup for parallel animations with lag.
+     * Each animation can have a different alpha value.
+     *
+     * @param batch Vector of animation batch data
+     * @param global_alpha Global progress (for logging)
+     * @param cmd Command buffer
+     */
+    void interpolate_batch(
+        const std::vector<AnimationBatchData>& batch,
+        float global_alpha,
+        VkCommandBuffer cmd
+    );
+
+    /**
+     * @brief Move multiple mobjects along the same path
+     *
+     * Efficient batch path following for MoveAlongPath animations.
+     *
+     * @param mobjects Vector of mobjects to move
+     * @param path The path to follow
+     * @param alphas Per-mobject alpha values
+     * @param cmd Command buffer
+     */
+    void move_along_path_batch(
+        const std::vector<std::shared_ptr<Mobject>>& mobjects,
+        const std::shared_ptr<VMobject>& path,
+        const std::vector<float>& alphas,
+        VkCommandBuffer cmd
+    );
+
+    /**
+     * @brief Apply homotopy function on GPU
+     *
+     * For large point counts, applies homotopy in parallel.
+     *
+     * @param points Input points buffer
+     * @param output Output points buffer
+     * @param t Homotopy time parameter
+     * @param homotopy_id Identifier for pre-uploaded homotopy kernel
+     * @param cmd Command buffer
+     */
+    void apply_homotopy_gpu(
+        const GPUBuffer& points,
+        GPUBuffer& output,
+        float t,
+        uint32_t homotopy_id,
+        VkCommandBuffer cmd
+    );
+
+    /**
+     * @brief Upload path data for GPU path following
+     */
+    void upload_path_data(
+        const std::shared_ptr<VMobject>& path,
+        GPUBuffer& path_buffer
     );
 
     // ========================================================================

@@ -18,8 +18,13 @@
 #include <unordered_map>
 #include <memory>
 #include <filesystem>
+#include <functional>
 
 namespace manim {
+
+class ShaderPipeline;
+struct ComputePipelineConfig;
+struct GraphicsPipelineConfig;
 
 /**
  * @brief Shader stage type
@@ -121,6 +126,7 @@ public:
      * @brief Hot-reload shader
      */
     void reload();
+    void reload_from_spirv(const std::vector<uint32_t>& spirv);
 
     /**
      * @brief Get Vulkan shader module
@@ -143,6 +149,7 @@ private:
     ShaderStage stage_;
     std::vector<uint32_t> spirv_;
     std::filesystem::path source_path_;
+    std::filesystem::file_time_type last_write_time_{};
 
     // Compile GLSL to SPIR-V
     std::vector<uint32_t> compile_glsl_to_spirv(
@@ -192,10 +199,22 @@ struct RayTracingShaderConfig {
 };
 
 /**
+ * @brief Shader tracking info for hot-reload
+ */
+struct ShaderTrackingInfo {
+    std::filesystem::path source_path;
+    std::filesystem::file_time_type last_modified;
+    ShaderStage stage;
+    ShaderCompileOptions options;
+    std::weak_ptr<ShaderModule> module;
+};
+
+/**
  * @brief Shader manager for loading and caching shaders
  */
 class ShaderManager {
 public:
+    ShaderManager();
     explicit ShaderManager(VkDevice device);
     ~ShaderManager();
 
@@ -226,31 +245,50 @@ public:
     /**
      * @brief Reload all shaders (hot-reload)
      */
-    void reload_all_shaders();
+    void reload_all();
+
+    /**
+     * @brief Check for modified shaders and reload them
+     * @return Number of shaders reloaded
+     */
+    size_t check_and_reload();
+
+    /**
+     * @brief Enable/disable hot-reload tracking
+     */
+    void set_hot_reload_enabled(bool enabled) { hot_reload_enabled_ = enabled; }
+    bool is_hot_reload_enabled() const { return hot_reload_enabled_; }
+
+    /**
+     * @brief Register callback for when shaders are reloaded
+     */
+    using ReloadCallback = std::function<void(const std::string& shader_name)>;
+    void set_reload_callback(ReloadCallback callback) { reload_callback_ = std::move(callback); }
 
     /**
      * @brief Clear shader cache
      */
-    void clear_cache();
+    void clear();
 
-    /**
-     * @brief Enable shader hot-reload
-     */
-    void enable_hot_reload(bool enable) { hot_reload_enabled_ = enable; }
+    std::shared_ptr<ShaderPipeline> create_compute_pipeline(
+        std::shared_ptr<ShaderModule> compute_shader,
+        const ComputePipelineConfig& config
+    );
 
-    /**
-     * @brief Check for shader file changes
-     */
-    void check_for_updates();
+    std::shared_ptr<ShaderPipeline> create_graphics_pipeline(
+        const std::vector<std::shared_ptr<ShaderModule>>& shaders,
+        const GraphicsPipelineConfig& config
+    );
 
 private:
     VkDevice device_;
-    std::unordered_map<std::string, std::shared_ptr<ShaderModule>> shader_cache_;
+    std::vector<std::shared_ptr<ShaderModule>> shaders_;
+    std::vector<std::shared_ptr<ShaderPipeline>> pipelines_;
+    std::unordered_map<std::string, ShaderTrackingInfo> tracked_shaders_;
     bool hot_reload_enabled_ = false;
+    ReloadCallback reload_callback_;
 
-    // File watching for hot-reload
-    struct FileWatcher;
-    std::unique_ptr<FileWatcher> file_watcher_;
+    std::vector<uint32_t> load_spirv_from_file(const std::filesystem::path& path);
 };
 
 /**
@@ -424,54 +462,6 @@ private:
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
     std::vector<std::shared_ptr<ShaderModule>> shaders_;
-};
-
-// Update ShaderManager class
-class ShaderManager {
-public:
-    explicit ShaderManager(VkDevice device);
-    ~ShaderManager();
-
-    std::shared_ptr<ShaderModule> load_shader(
-        const std::filesystem::path& path,
-        ShaderStage stage,
-        const ShaderCompileOptions& options = {}
-    );
-
-    std::shared_ptr<ShaderModule> create_shader(
-        const std::string& source,
-        ShaderStage stage,
-        const ShaderCompileOptions& options = {}
-    );
-
-    std::shared_ptr<ShaderPipeline> create_compute_pipeline(
-        std::shared_ptr<ShaderModule> compute_shader,
-        const ComputePipelineConfig& config
-    );
-
-    std::shared_ptr<ShaderPipeline> create_graphics_pipeline(
-        const std::vector<std::shared_ptr<ShaderModule>>& shaders,
-        const GraphicsPipelineConfig& config
-    );
-
-    void reload_all();
-    void clear();
-
-private:
-    VkDevice device_;
-    std::vector<std::shared_ptr<ShaderModule>> shaders_;
-    std::vector<std::shared_ptr<ShaderPipeline>> pipelines_;
-};
-
-// Update BuiltInShaders class
-class BuiltInShaders {
-public:
-    static void initialize(VkDevice device);
-    static std::shared_ptr<ShaderPipeline> get_pbr_pipeline();
-    static std::shared_ptr<ShaderPipeline> get_unlit_pipeline();
-    static std::shared_ptr<ShaderPipeline> get_wireframe_pipeline();
-    static std::shared_ptr<ShaderPipeline> get_shadow_pipeline();
-    static std::shared_ptr<ShaderPipeline> get_post_process_pipeline(const std::string& effect);
 };
 
 } // namespace manim

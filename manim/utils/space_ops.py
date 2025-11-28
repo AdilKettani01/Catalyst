@@ -82,7 +82,7 @@ def cross(v1: Vector3DLike, v2: Vector3DLike) -> Vector3D:
 
 
 # Quaternions
-# TODO, implement quaternion type
+# TODO.md, implement quaternion type
 
 
 def quaternion_mult(

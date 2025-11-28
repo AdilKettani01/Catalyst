@@ -1,0 +1,90 @@
+#version 450
+
+// Generate indirect draw commands from visibility results
+// This shader converts visible object indices into VkDrawIndexedIndirectCommand structures
+// enabling GPU-driven rendering without CPU intervention
+
+layout(local_size_x = 256) in;
+
+// VkDrawIndexedIndirectCommand structure
+struct DrawCommand {
+    uint index_count;       // Number of indices
+    uint instance_count;    // Number of instances (always 1 for our case)
+    uint first_index;       // Starting index in index buffer
+    int  vertex_offset;     // Offset added to vertex indices
+    uint first_instance;    // First instance ID (used for per-object data lookup)
+};
+
+// Object draw info (matches ObjectDrawInfo in culling_types.hpp)
+struct ObjectDrawInfo {
+    uint index_count;       // Number of indices for this object
+    uint first_index;       // Starting index in merged index buffer
+    int  vertex_offset;     // Vertex offset in merged vertex buffer
+    uint material_id;       // Material/shader binding
+    uint lod_level;         // LOD level
+    uint padding[3];        // Align to 32 bytes
+};
+
+// Input: Visible object indices (from culling)
+layout(std430, binding = 0) readonly buffer VisibleIndices {
+    uint visible_indices[];
+};
+
+// Input: Object draw info (pre-computed for each object)
+layout(std430, binding = 1) readonly buffer ObjectDrawInfoBuffer {
+    ObjectDrawInfo object_info[];
+};
+
+// Output: Indirect draw commands
+layout(std430, binding = 2) writeonly buffer DrawCommands {
+    DrawCommand commands[];
+};
+
+// Output: Draw count (for vkCmdDrawIndexedIndirectCount)
+layout(std430, binding = 3) buffer DrawCount {
+    uint draw_count;
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_visible;       // Number of visible objects
+    uint max_draws;         // Maximum draw commands to generate
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= pc.num_visible) {
+        return;
+    }
+
+    // Get the object index from visibility buffer
+    uint obj_idx = visible_indices[idx];
+
+    // Load object draw info
+    ObjectDrawInfo info = object_info[obj_idx];
+
+    // Skip objects with zero indices (shouldn't happen, but safety)
+    if (info.index_count == 0) {
+        return;
+    }
+
+    // Atomically allocate a draw command slot
+    uint draw_slot = atomicAdd(draw_count, 1);
+
+    // Check we haven't exceeded max draws
+    if (draw_slot >= pc.max_draws) {
+        // Rollback the counter
+        atomicAdd(draw_count, uint(-1));
+        return;
+    }
+
+    // Generate draw command
+    DrawCommand cmd;
+    cmd.index_count = info.index_count;
+    cmd.instance_count = 1;
+    cmd.first_index = info.first_index;
+    cmd.vertex_offset = info.vertex_offset;
+    cmd.first_instance = obj_idx;  // Use for per-object data lookup in shader
+
+    commands[draw_slot] = cmd;
+}

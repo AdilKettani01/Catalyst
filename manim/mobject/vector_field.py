@@ -100,7 +100,7 @@ class VectorField(VGroup):
                 def color_scheme(vec: Vector3D) -> float:
                     return np.linalg.norm(vec)
 
-            self.color_scheme = color_scheme  # TODO maybe other default for direction?
+            self.color_scheme = color_scheme  # TODO.md maybe other default for direction?
             self.rgbs: FloatRGB_Array = np.array(list(map(color_to_rgb, colors)))
 
             def pos_to_rgb(pos: Point3D) -> FloatRGB:
@@ -416,7 +416,7 @@ class VectorField(VGroup):
         x_array = x_array.reshape((1, len(x_array)))
         y_array = y_array.reshape((len(y_array), 1))
         x_array = x_array.repeat(ph, axis=0)
-        y_array.repeat(pw, axis=1)  # TODO why not y_array = y_array.repeat(...)?
+        y_array.repeat(pw, axis=1)  # TODO.md why not y_array = y_array.repeat(...)?
         points_array[:, :, 0] = x_array
         points_array[:, :, 1] = y_array
         rgbs = np.apply_along_axis(self.pos_to_rgb, 2, points_array)
@@ -1084,4 +1084,4 @@ class StreamLines(VectorField):
         return AnimationGroup(*animations)
 
 
-# TODO: Variant of StreamLines that is able to respond to changes in the vector field function
+# TODO.md: Variant of StreamLines that is able to respond to changes in the vector field function

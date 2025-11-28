@@ -1,0 +1,47 @@
+#version 450
+// radix_histogram.comp - Build per-workgroup histograms for radix sort
+// Each workgroup counts the 4-bit digit (16 buckets) occurrences in its data chunk
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    uint input_data[];
+};
+
+layout(std430, binding = 1) buffer HistogramBuffer {
+    uint histograms[];  // [num_workgroups * 16] - each workgroup writes 16 counts
+};
+
+layout(push_constant) uniform Constants {
+    uint num_elements;
+    uint bit_shift;     // Which 4-bit digit to extract (0, 4, 8, 12, 16, 20, 24, 28)
+    uint num_workgroups;
+} constants;
+
+shared uint local_hist[16];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    // Clear local histogram (first 16 threads)
+    if (tid < 16) {
+        local_hist[tid] = 0;
+    }
+    barrier();
+
+    // Count this thread's element
+    if (gid < constants.num_elements) {
+        uint value = input_data[gid];
+        uint digit = (value >> constants.bit_shift) & 0xF;
+        atomicAdd(local_hist[digit], 1);
+    }
+    barrier();
+
+    // Write local histogram to global histogram buffer
+    // Layout: histograms[wg_id * 16 + digit] = count for digit in workgroup wg_id
+    if (tid < 16) {
+        histograms[wg_id * 16 + tid] = local_hist[tid];
+    }
+}

@@ -57,7 +57,7 @@ class MovingCamera(Camera):
         self.frame = frame
         super().__init__(**kwargs)
 
-    # TODO, make these work for a rotated frame
+    # TODO.md, make these work for a rotated frame
     @property
     def frame_height(self) -> float:
         """Returns the height of the frame.

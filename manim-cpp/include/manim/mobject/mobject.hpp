@@ -15,6 +15,7 @@
 
 #include <manim/core/memory_pool.hpp>
 #include <manim/core/math.hpp>
+#include <manim/core/types.h>
 #include <vector>
 #include <memory>
 #include <string>
@@ -61,7 +62,7 @@ public:
      * @brief Generate geometry points
      * Override this to define mobject shape
      */
-    virtual void generate_points() = 0;
+    virtual void generate_points();
 
     /**
      * @brief Initialize colors based on style
@@ -153,6 +154,11 @@ public:
                      float buff = 0.25f);
 
     /**
+     * @brief Align this mobject to another
+     */
+    Mobject& align_to(const Mobject& other);
+
+    /**
      * @brief Move to center of screen
      */
     Mobject& to_edge(const math::Vec3& direction, float buff = 0.5f);
@@ -203,6 +209,15 @@ public:
      * @brief Set color
      */
     Mobject& set_color(const math::Vec4& color);
+    Mobject& set_color(const Color& color) { return set_color(color.toVec4()); }
+    Mobject& set_color(std::initializer_list<float> components) {
+        auto it = components.begin();
+        float r = (it != components.end()) ? *it++ : 1.0f;
+        float g = (it != components.end()) ? *it++ : 1.0f;
+        float b = (it != components.end()) ? *it++ : 1.0f;
+        float a = (it != components.end()) ? *it++ : 1.0f;
+        return set_color(math::Vec4{r, g, b, a});
+    }
 
     /**
      * @brief Set opacity
@@ -228,6 +243,36 @@ public:
      * @brief Get z-index
      */
     float get_z_index() const { return z_index_; }
+
+    // Compatibility helpers (camelCase API)
+    void moveTo(const math::Vec3& position) { move_to(position); }
+    void nextTo(const Ptr& other, const math::Vec3& direction = math::Vec3{1, 0, 0}) { if (other) next_to(*other, direction); }
+    void alignTo(const Ptr& other) { if (other) align_to(*other); }
+    void setColor(const math::Vec4& color) { set_color(color); }
+    void setOpacity(float opacity) { set_opacity(opacity); }
+    void saveState() { save_state(); }
+    math::Vec3 getCenter() const { return get_center(); }
+    math::Vec4 getColor() const { return color_; }
+    void addUpdater(UpdaterFunc updater) { add_updater(std::move(updater)); }
+    void removeUpdater(size_t index) { remove_updater(index); }
+    void save_state() { saved_states_.push_back(points_cpu_); }
+    void restore() {
+        if (!saved_states_.empty()) {
+            points_cpu_ = saved_states_.back();
+            num_points_ = points_cpu_.size();
+            gpu_dirty_ = true;
+            bbox_dirty_ = true;
+            saved_states_.pop_back();
+        }
+    }
+    void become(const Ptr& other) {
+        if (other) {
+            points_cpu_ = other->points_cpu_;
+            num_points_ = points_cpu_.size();
+        }
+    }
+    void matchPoints(const Ptr& other) { become(other); }
+    std::vector<Ptr> getFamily() const { return get_family(); }
 
     // ========================================================================
     // Geometry Access (GPU-accelerated)
@@ -345,13 +390,18 @@ public:
     /**
      * @brief Copy mobject
      */
-    virtual Ptr copy() const = 0;
+    virtual Ptr copy() const;
 
     /**
      * @brief Get/set name
      */
     const std::string& get_name() const { return name_; }
     void set_name(const std::string& name) { name_ = name; }
+
+    /**
+     * @brief Get world transform (updates if dirty)
+     */
+    const math::Mat4& get_world_transform() const;
 
     /**
      * @brief Print debug info
@@ -367,12 +417,13 @@ protected:
     GPUBuffer points_buffer_;
     GPUBuffer color_buffer_;
     mutable std::vector<math::Vec3> points_cpu_;  // CPU cache
+    mutable std::vector<std::vector<math::Vec3>> saved_states_;
     size_t num_points_ = 0;
 
     // Transform
-    glm::mat4 local_transform_{1.0f};  // Local transform matrix
-    glm::mat4 world_transform_{1.0f};  // World transform matrix
-    glm::mat4 prev_transform_{1.0f};   // Previous transform for animation
+    math::Mat4 local_transform_ = math::Mat4::identity();  // Local transform matrix
+    math::Mat4 world_transform_ = math::Mat4::identity();  // World transform matrix
+    math::Mat4 prev_transform_ = math::Mat4::identity();   // Previous transform for animation
     bool transform_dirty_ = false;
 
     // Appearance
@@ -406,7 +457,7 @@ protected:
     void sync_to_gpu();
     void sync_from_gpu() const;
     void update_world_transform();
-    const math::Mat4& get_world_transform() const;
+    // (Previously protected) world transform helper
 };
 
 /**

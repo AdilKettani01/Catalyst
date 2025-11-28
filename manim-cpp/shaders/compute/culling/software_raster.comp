@@ -1,0 +1,140 @@
+#version 450
+
+// Software rasterization compute shader for small occluders
+// Rasterizes triangles into a coarse depth buffer
+// Optimized for batched processing of many small triangles
+
+layout(local_size_x = 256) in;
+
+// Triangle data structure
+struct RasterTriangle {
+    vec4 v0;        // xyz = world position, w = 1
+    vec4 v1;
+    vec4 v2;
+    uint object_id;
+    uint flags;
+    float padding[2];
+};
+
+// Input: Triangles to rasterize
+layout(std430, binding = 0) readonly buffer TriangleBuffer {
+    RasterTriangle triangles[];
+};
+
+// Output: Depth buffer (atomic min operations)
+layout(std430, binding = 1) buffer DepthBuffer {
+    uint depth_buffer[];  // Use uint for atomic operations, reinterpret as float
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    uint depth_width;
+    uint depth_height;
+    uint num_triangles;
+    uint flags;
+} pc;
+
+// Project world-space point to screen space
+// Returns: xy = screen coords, z = depth, w = 1/w (or -1 if behind camera)
+vec4 project_point(vec3 world_pos) {
+    vec4 clip = pc.view_proj * vec4(world_pos, 1.0);
+
+    if (clip.w <= 0.0) {
+        return vec4(-1.0);
+    }
+
+    float inv_w = 1.0 / clip.w;
+    vec3 ndc = clip.xyz * inv_w;
+
+    // Convert to screen coordinates
+    float screen_x = (ndc.x * 0.5 + 0.5) * float(pc.depth_width);
+    float screen_y = (ndc.y * 0.5 + 0.5) * float(pc.depth_height);
+
+    return vec4(screen_x, screen_y, ndc.z, inv_w);
+}
+
+// Edge function for triangle rasterization
+float edge_function(vec2 a, vec2 b, vec2 c) {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+// Convert float to sortable uint (for atomic min on depth)
+uint float_to_sortable(float f) {
+    uint u = floatBitsToUint(f);
+    // Handle negative floats correctly
+    return (u & 0x80000000u) != 0 ? ~u : u | 0x80000000u;
+}
+
+// Atomically update depth buffer if new depth is closer
+void atomic_depth_min(uint idx, float depth) {
+    uint new_depth = float_to_sortable(depth);
+    atomicMin(depth_buffer[idx], new_depth);
+}
+
+void main() {
+    uint tri_idx = gl_GlobalInvocationID.x;
+
+    if (tri_idx >= pc.num_triangles) {
+        return;
+    }
+
+    RasterTriangle tri = triangles[tri_idx];
+
+    // Project all three vertices
+    vec4 sv0 = project_point(tri.v0.xyz);
+    vec4 sv1 = project_point(tri.v1.xyz);
+    vec4 sv2 = project_point(tri.v2.xyz);
+
+    // Skip if any vertex is behind camera
+    if (sv0.w < 0.0 || sv1.w < 0.0 || sv2.w < 0.0) {
+        return;
+    }
+
+    // Get bounding box
+    vec2 p0 = sv0.xy;
+    vec2 p1 = sv1.xy;
+    vec2 p2 = sv2.xy;
+
+    float min_x = max(0.0, min(min(p0.x, p1.x), p2.x));
+    float max_x = min(float(pc.depth_width - 1), max(max(p0.x, p1.x), p2.x));
+    float min_y = max(0.0, min(min(p0.y, p1.y), p2.y));
+    float max_y = min(float(pc.depth_height - 1), max(max(p0.y, p1.y), p2.y));
+
+    // Skip degenerate triangles
+    if (min_x >= max_x || min_y >= max_y) {
+        return;
+    }
+
+    // Triangle area for barycentric coordinates
+    float area = edge_function(p0, p1, p2);
+    if (abs(area) < 1e-6) {
+        return;  // Degenerate
+    }
+    float inv_area = 1.0 / area;
+
+    // Rasterize (simple scanline approach for compute shader)
+    for (int y = int(min_y); y <= int(max_y); ++y) {
+        for (int x = int(min_x); x <= int(max_x); ++x) {
+            vec2 p = vec2(float(x) + 0.5, float(y) + 0.5);
+
+            // Barycentric coordinates
+            float w0 = edge_function(p1, p2, p) * inv_area;
+            float w1 = edge_function(p2, p0, p) * inv_area;
+            float w2 = edge_function(p0, p1, p) * inv_area;
+
+            // Inside test
+            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) {
+                // Interpolate depth
+                float depth = w0 * sv0.z + w1 * sv1.z + w2 * sv2.z;
+
+                // Clamp depth to valid range
+                depth = clamp(depth, 0.0, 1.0);
+
+                // Atomic depth test and update
+                uint idx = y * pc.depth_width + x;
+                atomic_depth_min(idx, depth);
+            }
+        }
+    }
+}

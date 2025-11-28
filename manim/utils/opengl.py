@@ -150,7 +150,7 @@ def z_rotation_matrix(z: float = 0) -> MatrixMN:
     )
 
 
-# TODO: When rotating around the x axis, rotation eventually stops.
+# TODO.md: When rotating around the x axis, rotation eventually stops.
 def rotate_in_place_matrix(
     initial_position: Point3D, x: float = 0, y: float = 0, z: float = 0
 ) -> MatrixMN:

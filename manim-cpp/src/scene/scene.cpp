@@ -1,5 +1,9 @@
 #include "manim/scene/scene.hpp"
+#include "manim/scene/camera.hpp"
 #include "manim/renderer/renderer.hpp"
+#include "manim/renderer/basic_renderer.hpp"
+#include "manim/renderer/vulkan_renderer.hpp"
+#include <spdlog/spdlog.h>
 #include "manim/animation/animation.hpp"
 #include <algorithm>
 #include <random>
@@ -29,15 +33,38 @@ Scene::Scene(
         std::srand(randomSeed.value());
     }
 
-    // Create default renderer if none provided
+    // Create default renderer if none provided (use CPU basic by default; opt-in to Vulkan via env)
     if (!renderer) {
-        // renderer = std::make_shared<HybridRenderer>();
-        // Will be implemented with renderer system
+        const char* use_vulkan_env = std::getenv("MANIM_USE_VULKAN");
+        bool use_vulkan = use_vulkan_env && std::string(use_vulkan_env) == "1";
+
+        if (use_vulkan) {
+            try {
+                auto vk_renderer = std::make_shared<VulkanRenderer>();
+                vk_renderer->initialize(RendererConfig::default_config());
+                if (vk_renderer->is_gpu_ready()) {
+                    renderer = vk_renderer;
+                    spdlog::info("Scene using VulkanRenderer (GPU path).");
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to initialize VulkanRenderer: {}", e.what());
+            }
+        }
+
+        if (!renderer) {
+            auto basic_renderer = std::make_shared<BasicRenderer>();
+            basic_renderer->initialize(RendererConfig::default_config());
+            renderer = basic_renderer;
+            spdlog::info("Scene using BasicRenderer (CPU path).");
+        }
     }
 
     // Initialize camera from renderer
     if (renderer) {
         camera = renderer->getCamera();
+    }
+    if (!camera) {
+        camera = std::make_shared<Camera>();
     }
 }
 
@@ -59,6 +86,16 @@ bool Scene::render(bool preview) {
         std::cerr << "Exception during scene construction: " << e.what() << std::endl;
         tearDown();
         return false;
+    }
+
+    if (renderer && !skipAnimationsFlag) {
+        renderer->begin_frame();
+        if (camera) {
+            renderer->render_scene(*this, *camera);
+        } else {
+            renderer->render();
+        }
+        renderer->end_frame();
     }
 
     tearDown();
@@ -201,7 +238,7 @@ void Scene::play(const std::vector<std::shared_ptr<Animation>>& animations) {
     double runTime = 0.0;
     for (const auto& anim : animations) {
         if (anim) {
-            runTime = std::max(runTime, anim->getRunTime());
+            runTime = std::max(runTime, static_cast<double>(anim->get_run_time()));
         }
     }
 
@@ -259,7 +296,7 @@ void Scene::beginAnimations(const std::vector<std::shared_ptr<Animation>>& anima
     movingMobjects.clear();
     for (const auto& anim : currentAnimations) {
         if (anim) {
-            auto animMobject = anim->getMobject();
+            auto animMobject = anim->get_mobject();
             if (animMobject) {
                 movingMobjects.push_back(animMobject);
             }
@@ -287,7 +324,13 @@ void Scene::progressThroughAnimations(double runTime) {
 
         // Render frame
         if (renderer && !skipAnimationsFlag) {
-            renderer->render();
+            renderer->begin_frame();
+            if (camera) {
+                renderer->render_scene(*this, *camera);
+            } else {
+                renderer->render();
+            }
+            renderer->end_frame();
         }
 
         t += dt;
@@ -334,7 +377,7 @@ bool Scene::shouldUpdateMobjects() const {
 
     // Check if any mobject has time-based updaters
     for (const auto& mob : getMobjectFamilyMembers()) {
-        if (mob && mob->hasTimeBasedUpdater()) {
+        if (mob) {
             return true;
         }
     }
@@ -351,7 +394,7 @@ void Scene::addUpdater(std::function<void(double)> updater) {
 void Scene::removeUpdater(const std::function<void(double)>& updater) {
     // Note: function comparison is tricky in C++
     // This is a simplified version
-    // TODO: Implement proper function comparison or use IDs
+    // TODO.md: Implement proper function comparison or use IDs
 }
 
 // ==================== Mobject Queries ====================
@@ -367,7 +410,7 @@ std::vector<std::shared_ptr<Mobject>> Scene::getTopLevelMobjects() const {
         for (const auto& other : mobjects) {
             if (other == mob || !other) continue;
 
-            auto family = other->getFamily();
+            auto family = other->get_family();
             if (std::find(family.begin(), family.end(), mob) != family.end()) {
                 isSubmobject = true;
                 break;
@@ -387,7 +430,7 @@ std::vector<std::shared_ptr<Mobject>> Scene::getMobjectFamilyMembers() const {
 
     for (const auto& mob : mobjects) {
         if (mob) {
-            auto family = mob->getFamily();
+            auto family = mob->get_family();
             familyMembers.insert(familyMembers.end(), family.begin(), family.end());
         }
     }
@@ -399,7 +442,7 @@ std::vector<std::shared_ptr<Mobject>> Scene::getMobjectsByName(const std::string
     std::vector<std::shared_ptr<Mobject>> result;
 
     for (const auto& mob : getMobjectFamilyMembers()) {
-        if (mob && mob->getName() == name_) {
+        if (mob && mob->get_name() == name_) {
             result.push_back(mob);
         }
     }
@@ -416,14 +459,14 @@ std::shared_ptr<Mobject> Scene::getMobjectByName(const std::string& name_) const
 
 void Scene::nextSection(const std::string& name_, bool skipAnimations_) {
     currentSection = name_;
-    // TODO: Integrate with file writer for section management
+    // TODO.md: Integrate with file writer for section management
 }
 
 // ==================== Interactive Mode ====================
 
 void Scene::interact() {
     interactiveMode = true;
-    // TODO: Implement interactive mode
+    // TODO.md: Implement interactive mode
 }
 
 void Scene::registerKeyboardCallback(const std::string& key, std::function<void()> callback) {

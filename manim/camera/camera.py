@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 
 LINE_JOIN_MAP = {
-    LineJointType.AUTO: None,  # TODO: this could be improved
+    LineJointType.AUTO: None,  # TODO.md: this could be improved
     LineJointType.ROUND: cairo.LineJoin.ROUND,
     LineJointType.BEVEL: cairo.LineJoin.BEVEL,
     LineJointType.MITER: cairo.LineJoin.MITER,
@@ -52,7 +52,7 @@ LINE_JOIN_MAP = {
 
 
 CAP_STYLE_MAP = {
-    CapStyleType.AUTO: None,  # TODO: this could be improved
+    CapStyleType.AUTO: None,  # TODO.md: this could be improved
     CapStyleType.ROUND: cairo.LineCap.ROUND,
     CapStyleType.BUTT: cairo.LineCap.BUTT,
     CapStyleType.SQUARE: cairo.LineCap.SQUARE,
@@ -284,7 +284,7 @@ class Camera:
         if self.background_image is not None:
             path = get_full_raster_image_path(self.background_image)
             image = Image.open(path).convert(self.image_mode)
-            # TODO, how to gracefully handle backgrounds
+            # TODO.md, how to gracefully handle backgrounds
             # with different sizes?
             self.background = np.array(image)[:height, :width]
             self.background = self.background.astype(self.pixel_array_dtype)
@@ -386,7 +386,7 @@ class Camera:
         """
         self.background = self.convert_pixel_array(pixel_array, convert_from_floats)
 
-    # TODO, this should live in utils, not as a method of Camera
+    # TODO.md, this should live in utils, not as a method of Camera
     def make_background_from_func(
         self, coords_to_colors_func: Callable[[np.ndarray], np.ndarray]
     ) -> PixelArray:
@@ -712,7 +712,7 @@ class Camera:
             Camera object after setting cairo_context_path
         """
         points = self.transform_points_pre_display(vmobject, vmobject.points)
-        # TODO, shouldn't this be handled in transform_points_pre_display?
+        # TODO.md, shouldn't this be handled in transform_points_pre_display?
         # points = points - self.get_frame_center()
         if len(points) == 0:
             return self
@@ -936,7 +936,7 @@ class Camera:
     ) -> None:
         """Displays a PMobject by modifying the pixel array suitably.
 
-        TODO: Write a description for the rgbas argument.
+        TODO.md: Write a description for the rgbas argument.
 
         Parameters
         ----------
@@ -1034,7 +1034,7 @@ class Camera:
                 expand=1,
             )
 
-        # TODO, there is no accounting for a shear...
+        # TODO.md, there is no accounting for a shear...
 
         # Paste into an image as large as the camera's pixel array
         full_image = Image.fromarray(
@@ -1117,13 +1117,13 @@ class Camera:
         self,
         mobject: Mobject,
         points: Point3D_Array,
-    ) -> Point3D_Array:  # TODO: Write more detailed docstrings for this method.
+    ) -> Point3D_Array:  # TODO.md: Write more detailed docstrings for this method.
         # NOTE: There seems to be an unused argument `mobject`.
 
         # Subclasses (like ThreeDCamera) may want to
         # adjust points further before they're shown
         if not np.all(np.isfinite(points)):
-            # TODO, print some kind of warning about
+            # TODO.md, print some kind of warning about
             # mobject having invalid points?
             points = np.zeros((1, 3))
         return points
@@ -1132,7 +1132,7 @@ class Camera:
         self,
         mobject: Mobject,
         points: Point3D_Array,
-    ) -> npt.NDArray[ManimInt]:  # TODO: Write more detailed docstrings for this method.
+    ) -> npt.NDArray[ManimInt]:  # TODO.md: Write more detailed docstrings for this method.
         points = self.transform_points_pre_display(mobject, points)
         shifted_points = points - self.frame_center
 
@@ -1190,7 +1190,7 @@ class Camera:
             The adjusted stroke width that reflects zooming in with
             the camera.
         """
-        # TODO: This seems...unsystematic
+        # TODO.md: This seems...unsystematic
         big_sum: float = op.add(config["pixel_height"], config["pixel_width"])
         this_sum: float = op.add(self.pixel_height, self.pixel_width)
         factor = big_sum / this_sum
@@ -1236,7 +1236,7 @@ class Camera:
         size = pixel_coords.size
         return pixel_coords.reshape((size // 2, 2))
 
-    # TODO, reimplement using cairo matrix
+    # TODO.md, reimplement using cairo matrix
     def get_coords_of_all_pixels(self) -> PixelArray:
         """Returns the cartesian coordinates of each pixel.
 

@@ -157,7 +157,7 @@ class CoordinateSystem:
         self.x_axis: NumberLine
 
     def coords_to_point(self, *coords: ManimFloat) -> Point3D:
-        # TODO: I think the method should be able to return more than just a single point.
+        # TODO.md: I think the method should be able to return more than just a single point.
         # E.g. see the implementation of it on line 2065.
         raise NotImplementedError()
 
@@ -2852,7 +2852,7 @@ class NumberPlane(Axes):
             self.faded_line_ratio,
         )
 
-        # TODO this was added so that we can run tests on NumberPlane
+        # TODO.md this was added so that we can run tests on NumberPlane
         # In the future these attributes will be tacked onto self.background_lines
         self.x_lines = x_lines1
         self.y_lines = y_lines1
@@ -3457,7 +3457,7 @@ class ComplexPlane(NumberPlane):
         :class:`~.VGroup`
             A :class:`~.VGroup` containing the positioned label mobjects.
         """
-        # TODO: Make this work the same as coord_sys.add_coordinates()
+        # TODO.md: Make this work the same as coord_sys.add_coordinates()
         if len(numbers) == 0:
             numbers = self._get_default_coordinate_values()
 

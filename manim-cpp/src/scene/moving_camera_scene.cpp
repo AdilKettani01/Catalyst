@@ -22,7 +22,7 @@ MovingCameraScene::MovingCameraScene(
 }
 
 std::shared_ptr<MovingCamera> MovingCameraScene::getMovingCamera() const {
-    // TODO: Implement proper camera casting
+    // TODO.md: Implement proper camera casting
     return nullptr; // std::dynamic_pointer_cast<MovingCamera>(camera);
 }
 
@@ -35,7 +35,7 @@ void MovingCameraScene::zoomToMobject(std::shared_ptr<Mobject> mobject,
     if (!movingCam) return;
 
     // Get mobject bounding box
-    // TODO: Get actual bounding box from mobject
+    // TODO.md: Get actual bounding box from mobject
     // For now, use placeholder logic
 
     // Calculate target camera position and width
@@ -43,7 +43,7 @@ void MovingCameraScene::zoomToMobject(std::shared_ptr<Mobject> mobject,
     // double targetWidth = mobject->getWidth() * zoomFactor;
 
     // Animate camera to target
-    // TODO: Create camera animation
+    // TODO.md: Create camera animation
     std::cout << "Zooming to mobject with factor " << zoomFactor << std::endl;
 }
 
@@ -57,17 +57,17 @@ void MovingCameraScene::autoZoom(const std::vector<std::shared_ptr<Mobject>>& mo
     if (!movingCam) return;
 
     // Calculate bounding box of all mobjects
-    // TODO: Compute combined bounding box
+    // TODO.md: Compute combined bounding box
 
     // Calculate target camera settings
-    // TODO: Compute camera position and size to fit all mobjects
+    // TODO.md: Compute camera position and size to fit all mobjects
 
     if (animate) {
         std::cout << "Auto-zooming to " << mobjects.size() << " mobjects with animation" << std::endl;
-        // TODO: Animate camera
+        // TODO.md: Animate camera
     } else {
         std::cout << "Auto-zooming to " << mobjects.size() << " mobjects instantly" << std::endl;
-        // TODO: Set camera immediately
+        // TODO.md: Set camera immediately
     }
 }
 
@@ -78,7 +78,7 @@ void MovingCameraScene::panTo(const Vec3& position, double duration) {
     if (duration > 0.0) {
         std::cout << "Panning camera to (" << position.x << ", " << position.y << ", " << position.z
                   << ") over " << duration << "s" << std::endl;
-        // TODO: Animate camera position
+        // TODO.md: Animate camera position
     } else {
         movingCam->setPosition(position);
     }
@@ -90,7 +90,7 @@ void MovingCameraScene::setCameraFrameWidth(double width, double duration) {
 
     if (duration > 0.0) {
         std::cout << "Animating camera width to " << width << " over " << duration << "s" << std::endl;
-        // TODO: Animate camera width
+        // TODO.md: Animate camera width
     } else {
         movingCam->setFrameWidth(width);
     }
@@ -102,7 +102,7 @@ void MovingCameraScene::setCameraFrameHeight(double height, double duration) {
 
     if (duration > 0.0) {
         std::cout << "Animating camera height to " << height << " over " << duration << "s" << std::endl;
-        // TODO: Animate camera height
+        // TODO.md: Animate camera height
     } else {
         movingCam->setFrameHeight(height);
     }
@@ -114,7 +114,7 @@ void MovingCameraScene::resetCamera(double duration) {
 
     if (duration > 0.0) {
         std::cout << "Resetting camera over " << duration << "s" << std::endl;
-        // TODO: Animate camera to default state
+        // TODO.md: Animate camera to default state
     } else {
         movingCam->setPosition(defaultState.position);
         movingCam->setFrameWidth(defaultState.width);
@@ -150,7 +150,7 @@ void MovingCameraScene::restoreCameraState(double duration) {
 
     if (duration > 0.0) {
         std::cout << "Restoring camera state over " << duration << "s" << std::endl;
-        // TODO: Animate camera to saved state
+        // TODO.md: Animate camera to saved state
     } else {
         movingCam->setPosition(state.position);
         movingCam->setFrameWidth(state.width);

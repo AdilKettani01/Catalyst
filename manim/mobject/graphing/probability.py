@@ -76,7 +76,7 @@ class SampleSpace(Rectangle):
     def add_title(
         self, title: str = "Sample space", buff: float = MED_SMALL_BUFF
     ) -> None:
-        # TODO, should this really exist in SampleSpaceScene
+        # TODO.md, should this really exist in SampleSpaceScene
         title_mob = Tex(title)
         if title_mob.width > self.width:
             title_mob.width = self.width

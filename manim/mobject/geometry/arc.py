@@ -341,7 +341,7 @@ class Arc(TipableVMobject):
         self.shift(self.arc_center)
 
     # Points are set a bit differently when rendering via OpenGL.
-    # TODO: refactor Arc so that only one strategy for setting points
+    # TODO.md: refactor Arc so that only one strategy for setting points
     # has to be used.
     def init_points(self) -> None:
         self.set_points(
@@ -670,10 +670,10 @@ class Circle(Arc):
                     self.add(group)
         """
         # Ignores dim_to_match and stretch; result will always be a circle
-        # TODO: Perhaps create an ellipse class to handle single-dimension stretching
+        # TODO.md: Perhaps create an ellipse class to handle single-dimension stretching
 
         # Something goes wrong here when surrounding lines?
-        # TODO: Figure out and fix
+        # TODO.md: Figure out and fix
         self.replace(mobject, dim_to_match, stretch)
 
         self.width = np.sqrt(mobject.width**2 + mobject.height**2)

@@ -1,0 +1,127 @@
+#version 450
+
+// GPU-accelerated frustum culling
+// Tests object AABBs against 6 frustum planes
+// Outputs: visibility bitfield and compacted visible indices
+
+layout(local_size_x = 256) in;
+
+// Object bounds (48 bytes per object)
+struct ObjectBounds {
+    vec4 aabb_min;      // xyz = min corner, w = flags
+    vec4 aabb_max;      // xyz = max corner, w = object_id (as float bits)
+    vec4 sphere;        // xyz = center, w = radius
+};
+
+// Input: object bounds
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Input: frustum planes (6 planes + metadata)
+layout(std140, binding = 1) uniform FrustumUBO {
+    vec4 planes[6];     // xyz = normal, w = distance
+    uint num_objects;
+    uint padding[3];
+} frustum;
+
+// Output: visibility bitfield (1 bit per object)
+layout(std430, binding = 2) buffer VisibilityBitfield {
+    uint visibility[];
+};
+
+// Output: compacted visible indices
+layout(std430, binding = 3) buffer VisibleIndices {
+    uint visible_count;
+    uint visible_indices[];
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint num_objects;
+    uint output_mode;   // 0 = bitfield only, 1 = bitfield + compaction
+    uint padding[2];
+} pc;
+
+// Test AABB against single plane
+// Returns true if AABB is on positive side (or intersecting)
+bool test_aabb_plane(vec3 aabb_min, vec3 aabb_max, vec4 plane) {
+    // Find the P-vertex (most positive vertex relative to plane normal)
+    vec3 p_vertex;
+    p_vertex.x = (plane.x >= 0.0) ? aabb_max.x : aabb_min.x;
+    p_vertex.y = (plane.y >= 0.0) ? aabb_max.y : aabb_min.y;
+    p_vertex.z = (plane.z >= 0.0) ? aabb_max.z : aabb_min.z;
+
+    // If P-vertex is on negative side, AABB is completely outside
+    float dist = dot(plane.xyz, p_vertex) + plane.w;
+    return dist >= 0.0;
+}
+
+// Test AABB against all 6 frustum planes
+bool test_aabb_frustum(vec3 aabb_min, vec3 aabb_max) {
+    // Test against each plane with early-out
+    for (int i = 0; i < 6; ++i) {
+        if (!test_aabb_plane(aabb_min, aabb_max, frustum.planes[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Optional: sphere-frustum test for early rejection
+bool test_sphere_frustum(vec3 center, float radius) {
+    for (int i = 0; i < 6; ++i) {
+        float dist = dot(frustum.planes[i].xyz, center) + frustum.planes[i].w;
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint object_idx = gl_GlobalInvocationID.x;
+
+    if (object_idx >= pc.num_objects) {
+        return;
+    }
+
+    // Load object bounds
+    ObjectBounds obj = objects[object_idx];
+    vec3 aabb_min = obj.aabb_min.xyz;
+    vec3 aabb_max = obj.aabb_max.xyz;
+    vec3 sphere_center = obj.sphere.xyz;
+    float sphere_radius = obj.sphere.w;
+
+    // Two-phase culling for efficiency:
+    // 1. Quick sphere test for early rejection
+    // 2. Accurate AABB test if sphere passes
+
+    bool visible = false;
+
+    // Sphere test (cheaper, conservative)
+    if (sphere_radius > 0.0) {
+        if (test_sphere_frustum(sphere_center, sphere_radius)) {
+            // Sphere passed, do accurate AABB test
+            visible = test_aabb_frustum(aabb_min, aabb_max);
+        }
+        // else: sphere rejected, object is definitely outside
+    } else {
+        // No sphere data, just do AABB test
+        visible = test_aabb_frustum(aabb_min, aabb_max);
+    }
+
+    // Write to visibility bitfield using atomic OR
+    uint word_idx = object_idx / 32;
+    uint bit_idx = object_idx % 32;
+
+    if (visible) {
+        atomicOr(visibility[word_idx], 1u << bit_idx);
+
+        // If compaction mode enabled, add to visible list
+        if (pc.output_mode == 1) {
+            uint slot = atomicAdd(visible_count, 1);
+            visible_indices[slot] = object_idx;
+        }
+    }
+}

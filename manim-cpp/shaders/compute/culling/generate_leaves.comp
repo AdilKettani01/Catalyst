@@ -1,0 +1,75 @@
+#version 450
+
+// Generate leaf nodes for BVH
+// Each thread processes one leaf node, setting its AABB from object bounds
+
+layout(local_size_x = 256) in;
+
+// Object bounds
+struct ObjectBounds {
+    vec4 aabb_min;      // xyz = min corner
+    vec4 aabb_max;      // xyz = max corner, w = object_id
+    vec4 sphere;        // xyz = center, w = radius
+};
+
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Sorted Morton codes (provides object index mapping)
+layout(std430, binding = 1) readonly buffer SortedMortonCodes {
+    uvec2 sorted_morton[];  // x = morton_code, y = object_index
+};
+
+// BVH nodes
+struct BVHNode {
+    vec3 aabb_min;
+    uint left;          // Left child or first primitive (if leaf)
+    vec3 aabb_max;
+    uint right;         // Right child or primitive count with MSB set (if leaf)
+};
+
+layout(std430, binding = 2) buffer BVHNodes {
+    BVHNode nodes[];
+};
+
+// Sorted object indices output (for traversal)
+layout(std430, binding = 3) writeonly buffer SortedIndices {
+    uint sorted_indices[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_leaves;
+    uint num_internal;  // = num_leaves - 1
+    uint padding[2];
+} pc;
+
+void main() {
+    uint leaf_idx = gl_GlobalInvocationID.x;
+
+    if (leaf_idx >= pc.num_leaves) {
+        return;
+    }
+
+    // Get the object index from sorted Morton codes
+    uint obj_idx = sorted_morton[leaf_idx].y;
+
+    // Write to sorted indices buffer (for traversal/refit)
+    sorted_indices[leaf_idx] = obj_idx;
+
+    // Get object bounds
+    ObjectBounds obj = objects[obj_idx];
+
+    // Leaf node index in BVH array (leaves come after internal nodes)
+    uint node_idx = pc.num_internal + leaf_idx;
+
+    // Set leaf node AABB from object bounds
+    nodes[node_idx].aabb_min = obj.aabb_min.xyz;
+    nodes[node_idx].aabb_max = obj.aabb_max.xyz;
+
+    // Mark as leaf:
+    // left = first primitive index (the sorted index)
+    // right = primitive count | 0x80000000 (MSB indicates leaf)
+    nodes[node_idx].left = leaf_idx;
+    nodes[node_idx].right = 1u | 0x80000000u;  // Single primitive per leaf
+}

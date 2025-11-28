@@ -1,0 +1,36 @@
+#version 450
+// radix_scatter.comp - Scatter elements to their sorted positions
+// Uses prefix sums to determine destination indices for each element
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    uint input_data[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    uint output_data[];
+};
+
+layout(std430, binding = 2) buffer PrefixSums {
+    uint prefix_sums[];  // Global prefix sums for each digit bucket
+};
+
+layout(push_constant) uniform Constants {
+    uint num_elements;
+    uint bit_shift;     // Which 4-bit digit to extract
+} constants;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= constants.num_elements) return;
+
+    uint value = input_data[gid];
+    uint digit = (value >> constants.bit_shift) & 0xF;
+
+    // Atomically get the destination index for this element
+    uint dest = atomicAdd(prefix_sums[digit], 1);
+
+    // Write the element to its sorted position
+    output_data[dest] = value;
+}

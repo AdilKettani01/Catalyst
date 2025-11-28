@@ -607,7 +607,7 @@ class NumberLine(Line):
 
         labels = VGroup()
         for x, label in dict_values.items():
-            # TODO: remove this check and ability to call
+            # TODO.md: remove this check and ability to call
             # this method via CoordinateSystem.add_coordinates()
             # must be explicitly called
             if isinstance(label, str) and label_constructor is MathTex:

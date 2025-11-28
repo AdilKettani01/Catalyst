@@ -314,7 +314,7 @@ class OpenGLRenderer:
     def refresh_perspective_uniforms(self, camera):
         pw, ph = self.get_pixel_shape()
         fw, fh = camera.get_shape()
-        # TODO, this should probably be a mobject uniform, with
+        # TODO.md, this should probably be a mobject uniform, with
         # the camera taking care of the conversion factor
         anti_alias_width = self.anti_alias_width / (ph / fh)
         # Orient light
@@ -431,7 +431,7 @@ class OpenGLRenderer:
         *args: Animation | Mobject | _AnimationBuilder,
         **kwargs: Any,
     ) -> None:
-        # TODO: Handle data locking / unlocking.
+        # TODO.md: Handle data locking / unlocking.
         self.animation_start_time = time.time()
         self.file_writer.begin_animation(not self.skip_animations)
 

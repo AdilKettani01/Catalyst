@@ -1,0 +1,39 @@
+#version 450
+// matrix_multiply.comp - Batch mat4 operations for GPU acceleration
+// Processes an array of 4x4 matrices in parallel
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer MatrixBuffer {
+    mat4 matrices[];
+};
+
+layout(std430, binding = 1) buffer ResultBuffer {
+    mat4 results[];
+};
+
+layout(push_constant) uniform Constants {
+    uint num_matrices;
+    uint operation;  // 0 = identity/copy, 1 = self multiply (A*A), 2 = reserved
+} constants;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= constants.num_matrices) return;
+
+    mat4 m = matrices[idx];
+
+    switch (constants.operation) {
+        case 0:  // Identity/copy - just pass through
+            results[idx] = m;
+            break;
+
+        case 1:  // Self multiply (A * A)
+            results[idx] = m * m;
+            break;
+
+        default:
+            results[idx] = m;
+            break;
+    }
+}

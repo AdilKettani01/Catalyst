@@ -216,7 +216,7 @@ class Animation:
         self.interpolate(0)
 
     def finish(self) -> None:
-        # TODO: begin and finish should require a scene as parameter.
+        # TODO.md: begin and finish should require a scene as parameter.
         # That way Animation.clean_up_from_screen and Scene.add_mobjects_from_animations
         # could be removed as they fulfill basically the same purpose.
         """Finish the animation.
@@ -321,7 +321,7 @@ class Animation:
 
     # Methods for interpolation, the mean of an Animation
 
-    # TODO: stop using alpha as parameter name in different meanings.
+    # TODO.md: stop using alpha as parameter name in different meanings.
     def interpolate(self, alpha: float) -> None:
         """Set the animation progress.
 
@@ -377,7 +377,7 @@ class Animation:
         float
             The progress of the subanimation.
         """
-        # TODO, make this more understandable, and/or combine
+        # TODO.md, make this more understandable, and/or combine
         # its functionality with AnimationGroup's method
         # build_animations_with_timings
         lag_ratio = self.lag_ratio
@@ -411,7 +411,7 @@ class Animation:
         self.run_time = run_time
         return self
 
-    # TODO: is this getter even necessary?
+    # TODO.md: is this getter even necessary?
     def get_run_time(self) -> float:
         """Get the run time of the animation.
 

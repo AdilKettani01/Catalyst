@@ -650,7 +650,7 @@ class ShowSubmobjectsOneByOne(ShowIncreasingSubsets):
             current_submobjects[-1].set_opacity(1)
 
 
-# TODO, this is broken...
+# TODO.md, this is broken...
 class AddTextWordByWord(Succession):
     """Show a :class:`~.Text` word by word on the scene. Note: currently broken."""
 

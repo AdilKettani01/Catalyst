@@ -198,7 +198,7 @@ class QuickHull:
                     horizon = self.compute_horizon(eye, facet)
                     for f in horizon.facets:
                         points_to_append = self.outside[f][0]
-                        # TODO: is this always true?
+                        # TODO.md: is this always true?
                         assert points_to_append is not None
                         self.unclaimed = np.vstack((self.unclaimed, points_to_append))
                         self.removed.add(f)

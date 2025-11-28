@@ -1,0 +1,90 @@
+#version 450
+
+// Compute Morton codes for LBVH construction
+// Morton codes provide Z-order curve spatial hashing for locality
+
+layout(local_size_x = 256) in;
+
+// Object bounds
+struct ObjectBounds {
+    vec4 aabb_min;      // xyz = min corner
+    vec4 aabb_max;      // xyz = max corner
+    vec4 sphere;        // xyz = center, w = radius
+};
+
+// Input: object bounds
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Output: Morton code + object index pairs
+layout(std430, binding = 1) writeonly buffer MortonCodes {
+    uvec2 morton_pairs[];  // x = morton code, y = object index
+};
+
+// Scene bounds and object count
+layout(push_constant) uniform PushConstants {
+    vec3 scene_min;
+    uint num_objects;
+    vec3 scene_max;
+    uint padding;
+} pc;
+
+// Expand 10-bit integer into 30 bits by inserting 2 zeros after each bit
+// Used for 3D Morton code construction
+uint expand_bits_10(uint v) {
+    // v = ---- ---- ---- ---- ---- --98 7654 3210
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    // v = ---- ---- 9876 5432 ---- ---- 1098 7654
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    // v = ---- 9876 ---- 5432 ---- 1098 ---- 7654
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    // v = --98 --76 --54 --32 --10 --98 --76 --54
+    v = (v * 0x00000005u) & 0x49249249u;
+    // v = -9-8 -7-6 -5-4 -3-2 -1-0 -9-8 -7-6 -5-4
+    return v;
+}
+
+// Compute 30-bit Morton code for 3D point
+// Interleaves x, y, z coordinates: z2 y2 x2 z1 y1 x1 z0 y0 x0
+uint morton_code_3d(vec3 normalized_pos) {
+    // Clamp and quantize to 10 bits per axis (1024 levels)
+    normalized_pos = clamp(normalized_pos, 0.0, 1.0);
+    uvec3 quantized = uvec3(normalized_pos * 1023.0);
+
+    // Expand each coordinate and interleave
+    uint xx = expand_bits_10(quantized.x);
+    uint yy = expand_bits_10(quantized.y);
+    uint zz = expand_bits_10(quantized.z);
+
+    return (zz << 2) | (yy << 1) | xx;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= pc.num_objects) {
+        return;
+    }
+
+    // Load object bounds
+    ObjectBounds obj = objects[idx];
+
+    // Compute center point
+    vec3 center_pt = (obj.aabb_min.xyz + obj.aabb_max.xyz) * 0.5;
+
+    // Normalize to [0, 1] based on scene bounds
+    vec3 scene_size = pc.scene_max - pc.scene_min;
+
+    // Handle degenerate case where scene has zero size in some dimension
+    vec3 normalized;
+    normalized.x = (scene_size.x > 0.0001) ? (center_pt.x - pc.scene_min.x) / scene_size.x : 0.5;
+    normalized.y = (scene_size.y > 0.0001) ? (center_pt.y - pc.scene_min.y) / scene_size.y : 0.5;
+    normalized.z = (scene_size.z > 0.0001) ? (center_pt.z - pc.scene_min.z) / scene_size.z : 0.5;
+
+    // Compute Morton code
+    uint morton = morton_code_3d(normalized);
+
+    // Write Morton code and object index
+    morton_pairs[idx] = uvec2(morton, idx);
+}

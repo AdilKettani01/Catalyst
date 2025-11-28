@@ -1,7 +1,9 @@
 #include "manim/scene/three_d_scene.hpp"
 #include "manim/renderer/renderer.hpp"
+#include "manim/culling/gpu_culling_pipeline.hpp"
 #include <iostream>
 #include <cmath>
+#include <spdlog/spdlog.h>
 
 namespace manim {
 
@@ -25,26 +27,26 @@ EnvironmentMap::EnvironmentMap()
 
 EnvironmentMap::~EnvironmentMap() {
     // Cleanup Vulkan resources
-    // TODO: Implement proper Vulkan cleanup
+    // TODO.md: Implement proper Vulkan cleanup
 }
 
 void EnvironmentMap::loadFromFile(const std::string& path) {
-    // TODO: Implement HDR environment map loading
+    // TODO.md: Implement HDR environment map loading
     std::cout << "Loading environment map from: " << path << std::endl;
 }
 
 void EnvironmentMap::generateIrradianceMap() {
-    // TODO: Generate irradiance map from cubemap
+    // TODO.md: Generate irradiance map from cubemap
     std::cout << "Generating irradiance map..." << std::endl;
 }
 
 void EnvironmentMap::generateSpecularMap() {
-    // TODO: Generate specular map from cubemap
+    // TODO.md: Generate specular map from cubemap
     std::cout << "Generating specular map..." << std::endl;
 }
 
 void EnvironmentMap::generateBRDFLUT() {
-    // TODO: Generate BRDF lookup table
+    // TODO.md: Generate BRDF lookup table
     std::cout << "Generating BRDF LUT..." << std::endl;
 }
 
@@ -123,11 +125,11 @@ void ThreeDScene::beginAmbientCameraRotation(double rate, const std::string& abo
 
 void ThreeDScene::stopAmbientCameraRotation(const std::string& about) {
     isAmbientRotating = false;
-    // TODO: Remove specific updater
+    // TODO.md: Remove specific updater
 }
 
 void ThreeDScene::moveCameraTo(const Vec3& position, double duration) {
-    // TODO: Implement camera movement animation
+    // TODO.md: Implement camera movement animation
     auto cam3d = get3DCamera();
     if (cam3d) {
         cam3d->setPosition(position);
@@ -135,7 +137,7 @@ void ThreeDScene::moveCameraTo(const Vec3& position, double duration) {
 }
 
 std::shared_ptr<ThreeDCamera> ThreeDScene::get3DCamera() const {
-    // TODO: Implement proper camera casting
+    // TODO.md: Implement proper camera casting
     return nullptr; // std::dynamic_pointer_cast<ThreeDCamera>(camera);
 }
 
@@ -164,10 +166,19 @@ GPU3DScene::GPU3DScene(
     , ssrEnabled(true)
     , bloomEnabled(true)
     , toneMappingEnabled(true)
+    , volumetricLightingEnabled(false)
+    , taaEnabled(false)
+    , bloomIntensity(1.0f)
+    , ssaoRadius(0.5f)
+    , toneMappingType(ToneMappingType::ACES)
     , exposure(1.0f)
     , visibilityBuffer(VK_NULL_HANDLE)
     , visibilityMemory(VK_NULL_HANDLE)
     , gpuCullingEnabled(true)
+    , frustumCullingEnabled(false)
+    , occlusionCullingEnabled(false)
+    , lodEnabled(false)
+    , renderStats_{}
     , ambientColor(0.1f, 0.1f, 0.1f)
     , ambientIntensity(0.1f)
 {
@@ -176,7 +187,7 @@ GPU3DScene::GPU3DScene(
 
 GPU3DScene::~GPU3DScene() {
     // Cleanup Vulkan resources
-    // TODO: Implement proper cleanup
+    // TODO.md: Implement proper cleanup
 }
 
 // ==================== Setup & Initialization ====================
@@ -193,7 +204,7 @@ void GPU3DScene::setupDeferredPipeline() {
 void GPU3DScene::initializePBRMaterials() {
     std::cout << "Initializing PBR materials..." << std::endl;
 
-    // TODO: Setup PBR material system
+    // TODO.md: Setup PBR material system
     // - Create material buffer
     // - Load default textures
     // - Setup shader bindings
@@ -236,7 +247,7 @@ void GPU3DScene::setEnvironmentMap(std::shared_ptr<EnvironmentMap> envMap) {
 }
 
 void GPU3DScene::updateLighting() {
-    // TODO: Update lighting buffers on GPU
+    // TODO.md: Update lighting buffers on GPU
     std::cout << "Updated lighting system with " << lights.size() << " lights" << std::endl;
 }
 
@@ -261,7 +272,7 @@ void GPU3DScene::renderWithPBR() {
 void GPU3DScene::computeGlobalIllumination() {
     std::cout << "Computing global illumination..." << std::endl;
 
-    // TODO: Implement GI computation
+    // TODO.md: Implement GI computation
     // Options:
     // - Screen-space GI
     // - Voxel-based GI
@@ -276,7 +287,7 @@ void GPU3DScene::computeGlobalIllumination() {
 void GPU3DScene::renderVolumetrics() {
     std::cout << "Rendering volumetric effects..." << std::endl;
 
-    // TODO: Implement volumetric rendering
+    // TODO.md: Implement volumetric rendering
     // - Volumetric fog
     // - Volumetric lighting (god rays)
     // - Participating media
@@ -290,46 +301,138 @@ void GPU3DScene::rayTraceScene() {
 
     std::cout << "Ray tracing scene..." << std::endl;
 
-    // TODO: Dispatch ray tracing shader
+    // TODO.md: Dispatch ray tracing shader
     // - Bind acceleration structures
     // - Bind shader binding table
     // - Dispatch rays
     // - Read back results
 }
 
+void GPU3DScene::enable_volumetric_lighting(bool enable) {
+    volumetricLightingEnabled = enable;
+}
+
+void GPU3DScene::enable_bloom(bool enable) {
+    bloomEnabled = enable;
+}
+
+void GPU3DScene::set_bloom_intensity(float intensity) {
+    bloomIntensity = intensity;
+}
+
+void GPU3DScene::enable_taa(bool enable) {
+    taaEnabled = enable;
+}
+
+void GPU3DScene::enable_ssao(bool enable) {
+    ssaoEnabled = enable;
+}
+
+void GPU3DScene::set_ssao_radius(float radius) {
+    ssaoRadius = radius;
+}
+
+void GPU3DScene::set_tone_mapping(ToneMappingType type) {
+    toneMappingType = type;
+    toneMappingEnabled = type != ToneMappingType::NONE;
+}
+
 // ==================== GPU Culling ====================
 
+void GPU3DScene::initializeCullingPipeline() {
+    // Get Vulkan resources from renderer
+    auto vulkan_renderer = std::dynamic_pointer_cast<class VulkanRenderer>(renderer);
+    if (!vulkan_renderer) {
+        spdlog::warn("Cannot initialize culling pipeline: no Vulkan renderer");
+        return;
+    }
+
+    // Create culling pipeline
+    culling_pipeline_ = std::make_unique<culling::GPUCullingPipeline>();
+
+    // Note: actual initialization will happen when we have access to Vulkan device
+    // This requires the renderer to expose device, physical_device, memory_pool, queue_family
+    // For now, the pipeline will use CPU fallback until properly initialized
+
+    spdlog::info("GPU culling pipeline created (will initialize on first use)");
+}
+
 void GPU3DScene::frustumCullGPU() {
-    if (!gpuCullingEnabled) return;
+    if (!gpuCullingEnabled || !frustumCullingEnabled) return;
 
-    std::cout << "Performing GPU frustum culling..." << std::endl;
+    // Use new GPU culling pipeline if available
+    if (culling_pipeline_ && culling_pipeline_->is_initialized()) {
+        // Update object bounds from scene mobjects
+        culling_pipeline_->update_object_bounds(getMobjectFamilyMembers());
 
-    // TODO: Dispatch compute shader for frustum culling
-    // - Build frustum planes from camera
-    // - Test all objects against frustum
-    // - Write visibility results to buffer
+        // Get view-projection matrix from camera
+        // Note: This requires camera to provide view-proj matrix
+        // For now, use identity matrix as placeholder
+        math::Mat4 view_proj = math::Mat4(1.0f);
+
+        // Execute frustum culling
+        culling_pipeline_->execute_frustum_culling(view_proj);
+
+        // Log stats
+        const auto& stats = culling_pipeline_->get_stats();
+        spdlog::debug("Frustum culling: {}/{} objects visible ({:.2f}ms)",
+                     stats.frustum_visible, stats.total_objects,
+                     stats.frustum_cull_time_ms);
+    } else {
+        // Fallback to CPU culling or no culling
+        spdlog::debug("GPU culling pipeline not initialized, skipping frustum cull");
+    }
+}
+
+void GPU3DScene::enable_frustum_culling(bool enable) {
+    frustumCullingEnabled = enable;
+    gpuCullingEnabled = gpuCullingEnabled || enable;
+
+    // Initialize culling pipeline if enabling and not yet created
+    if (enable && !culling_pipeline_) {
+        initializeCullingPipeline();
+    }
+
+    // Update pipeline config
+    if (culling_pipeline_) {
+        culling_pipeline_->enable_frustum_culling(enable);
+    }
 }
 
 void GPU3DScene::occlusionCullGPU() {
-    if (!gpuCullingEnabled) return;
+    if (!gpuCullingEnabled || !occlusionCullingEnabled) return;
 
-    std::cout << "Performing GPU occlusion culling..." << std::endl;
+    // Use new GPU culling pipeline if available
+    if (culling_pipeline_ && culling_pipeline_->is_initialized()) {
+        // Occlusion culling will be implemented in Phase 3
+        spdlog::debug("Occlusion culling requested (Phase 3 - not yet implemented)");
+    } else {
+        spdlog::debug("GPU culling pipeline not initialized, skipping occlusion cull");
+    }
+}
 
-    // TODO: Implement hierarchical Z-buffer occlusion culling
-    // - Render depth buffer of visible objects
-    // - Test remaining objects against depth buffer
-    // - Update visibility buffer
+void GPU3DScene::enable_occlusion_culling(bool enable) {
+    occlusionCullingEnabled = enable;
+    gpuCullingEnabled = gpuCullingEnabled || enable;
+
+    // Update pipeline config
+    if (culling_pipeline_) {
+        culling_pipeline_->enable_occlusion_culling(enable);
+    }
 }
 
 void GPU3DScene::LODSelectionGPU() {
-    if (!gpuCullingEnabled) return;
+    if (!gpuCullingEnabled || !lodEnabled) return;
 
-    std::cout << "Performing GPU LOD selection..." << std::endl;
+    spdlog::debug("Performing GPU LOD selection...");
 
-    // TODO: Compute shader for LOD selection
-    // - Calculate screen-space size of objects
-    // - Select appropriate LOD level
-    // - Write LOD indices to buffer
+    // TODO: Integrate with BVH for efficient distance calculation
+    // For now, LOD selection is handled per-mesh
+    renderStats_.lod_switches++;
+}
+
+void GPU3DScene::enable_lod(bool enable) {
+    lodEnabled = enable;
 }
 
 // ==================== Acceleration Structures ====================
@@ -337,8 +440,8 @@ void GPU3DScene::LODSelectionGPU() {
 void GPU3DScene::buildAccelerationStructures() {
     std::cout << "Building acceleration structures..." << std::endl;
 
-    // TODO: Build BLAS for each mesh
-    // TODO: Build TLAS from all BLAS instances
+    // TODO.md: Build BLAS for each mesh
+    // TODO.md: Build TLAS from all BLAS instances
 
     // Pseudo-code:
     // 1. For each mesh, build BLAS
@@ -351,7 +454,7 @@ void GPU3DScene::buildAccelerationStructures() {
 void GPU3DScene::updateAccelerationStructures() {
     if (!rayTracingEnabled) return;
 
-    // TODO: Update acceleration structures for dynamic objects
+    // TODO.md: Update acceleration structures for dynamic objects
     // - Rebuild BLAS for modified meshes
     // - Update TLAS with new transforms
 }
@@ -363,7 +466,7 @@ void GPU3DScene::applySSAO() {
 
     std::cout << "Applying SSAO..." << std::endl;
 
-    // TODO: Implement screen-space ambient occlusion
+    // TODO.md: Implement screen-space ambient occlusion
     // - Generate random sample kernel
     // - Sample depth buffer in hemisphere
     // - Compute occlusion factor
@@ -375,7 +478,7 @@ void GPU3DScene::applySSR() {
 
     std::cout << "Applying SSR..." << std::endl;
 
-    // TODO: Implement screen-space reflections
+    // TODO.md: Implement screen-space reflections
     // - Ray march in screen space
     // - Sample color buffer at intersection
     // - Blend with original color
@@ -386,7 +489,7 @@ void GPU3DScene::applyBloom() {
 
     std::cout << "Applying bloom..." << std::endl;
 
-    // TODO: Implement bloom effect
+    // TODO.md: Implement bloom effect
     // - Extract bright pixels
     // - Gaussian blur multiple times
     // - Blend with original image
@@ -397,7 +500,7 @@ void GPU3DScene::applyToneMapping() {
 
     std::cout << "Applying tone mapping..." << std::endl;
 
-    // TODO: Implement tone mapping
+    // TODO.md: Implement tone mapping
     // - ACES filmic tone mapping
     // - Exposure adjustment
     // - Gamma correction
@@ -408,7 +511,7 @@ void GPU3DScene::applyToneMapping() {
 void GPU3DScene::createGBuffer() {
     std::cout << "Creating G-Buffer..." << std::endl;
 
-    // TODO: Create G-Buffer textures
+    // TODO.md: Create G-Buffer textures
     // - Position (RGB32F)
     // - Normal (RGB16F)
     // - Albedo (RGBA8)
@@ -421,7 +524,7 @@ void GPU3DScene::createGBuffer() {
 void GPU3DScene::createRayTracingResources() {
     std::cout << "Creating ray tracing resources..." << std::endl;
 
-    // TODO: Create ray tracing pipeline
+    // TODO.md: Create ray tracing pipeline
     // - Ray generation shader
     // - Closest hit shader
     // - Miss shader
@@ -433,24 +536,24 @@ void GPU3DScene::createRayTracingResources() {
 void GPU3DScene::createCullingResources() {
     std::cout << "Creating culling resources..." << std::endl;
 
-    // TODO: Create visibility buffer and compute shaders
+    // TODO.md: Create visibility buffer and compute shaders
 
     std::cout << "Culling resources created" << std::endl;
 }
 
 void GPU3DScene::geometryPass() {
     // Render all objects to G-Buffer
-    // TODO: Bind G-Buffer framebuffer
-    // TODO: Render all visible meshes
-    // TODO: Store position, normal, albedo, roughness, metallic
+    // TODO.md: Bind G-Buffer framebuffer
+    // TODO.md: Render all visible meshes
+    // TODO.md: Store position, normal, albedo, roughness, metallic
 }
 
 void GPU3DScene::lightingPass() {
     // Compute lighting using G-Buffer data
-    // TODO: Bind G-Buffer textures
-    // TODO: For each light, compute contribution
-    // TODO: Add ambient and environment lighting
-    // TODO: Output to color buffer
+    // TODO.md: Bind G-Buffer textures
+    // TODO.md: For each light, compute contribution
+    // TODO.md: Add ambient and environment lighting
+    // TODO.md: Output to color buffer
 }
 
 void GPU3DScene::postProcessingPass() {

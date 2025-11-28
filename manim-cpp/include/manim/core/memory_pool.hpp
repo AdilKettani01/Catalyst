@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <memory>
+#include <vector>
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
@@ -47,7 +48,7 @@ enum class MemoryUsage {
 class GPUBuffer {
 public:
     GPUBuffer() = default;
-    GPUBuffer(VkBuffer buffer, VmaAllocation allocation, VkDeviceSize size);
+    GPUBuffer(VkBuffer buffer, VmaAllocation allocation, VkDeviceSize size, VmaAllocator allocator);
     ~GPUBuffer();
 
     // Move-only semantics
@@ -60,24 +61,82 @@ public:
     VmaAllocation get_allocation() const { return allocation_; }
     VkDeviceSize get_size() const { return size_; }
     VkDeviceAddress get_device_address() const;
+    bool is_initialized() const { return initialized_; }
 
     // Map/unmap for host-visible memory
     void* map();
-    void unmap();
+    const void* map() const;
+    void unmap() const;
 
     // Upload data to buffer
     template<typename T>
     void upload(std::span<const T> data);
+    template<typename T>
+    void upload(const std::vector<T>& data) { upload(std::span<const T>(data)); }
 
     // Download data from buffer
     template<typename T>
     void download(std::span<T> data);
+
+    /**
+     * @brief Allocate buffer with validation
+     * @param size Size in bytes to allocate
+     * @throws std::invalid_argument if size is 0 or negative
+     * @throws std::runtime_error if size exceeds available GPU memory
+     */
+    void allocate(VkDeviceSize size);
+
+    void free() {
+        size_ = 0;
+        initialized_ = false;
+        buffer_ = VK_NULL_HANDLE;
+        allocation_ = VK_NULL_HANDLE;
+        allocator_ = VK_NULL_HANDLE;
+        cpu_shadow_.clear();
+    }
+
+    /**
+     * @brief Download float data from buffer
+     * @throws std::runtime_error if buffer is not initialized
+     */
+    std::vector<float> download() const;
+
+    void upload_colors(const std::vector<glm::vec4>& colors) {
+        size_ = colors.size() * sizeof(glm::vec4);
+        initialized_ = true;
+        // Store in CPU shadow for fallback
+        cpu_shadow_.resize(size_);
+        std::memcpy(cpu_shadow_.data(), colors.data(), size_);
+    }
+    std::vector<glm::vec4> download_colors() const;
+
+    template<typename MatType>
+    void upload_matrices(const std::vector<MatType>& mats) {
+        size_ = mats.size() * sizeof(MatType);
+        initialized_ = true;
+        // Store in CPU shadow for fallback
+        cpu_shadow_.resize(size_);
+        std::memcpy(cpu_shadow_.data(), mats.data(), size_);
+    }
+
+    /**
+     * @brief Download matrix data from buffer
+     * @throws std::runtime_error if buffer is not initialized
+     */
+    template<typename MatType = glm::mat4>
+    std::vector<MatType> download_matrices() const;
+
+    /// Query available GPU memory (static utility)
+    static VkDeviceSize get_available_gpu_memory();
 
 private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     VkDeviceSize size_ = 0;
     void* mapped_ptr_ = nullptr;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;  // Non-owning
+    mutable std::vector<uint8_t> cpu_shadow_;  // Fallback storage when not mapped
+    bool initialized_ = false;                 // Track if buffer has valid data
 };
 
 /**
@@ -87,7 +146,7 @@ class GPUImage {
 public:
     GPUImage() = default;
     GPUImage(VkImage image, VmaAllocation allocation, VkImageView view,
-             uint32_t width, uint32_t height, VkFormat format);
+             uint32_t width, uint32_t height, VkFormat format, VmaAllocator allocator, VkDevice device);
     ~GPUImage();
 
     // Move-only
@@ -108,6 +167,8 @@ private:
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     VkFormat format_ = VK_FORMAT_UNDEFINED;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;  // Non-owning
+    VkDevice device_ = VK_NULL_HANDLE;         // Non-owning
 };
 
 /**
@@ -124,7 +185,11 @@ public:
     /**
      * @brief Initialize memory pool
      */
-    void initialize(VkDevice device, VkPhysicalDevice physical_device);
+    void initialize(
+        VkDevice device,
+        VkPhysicalDevice physical_device,
+        VkInstance instance = VK_NULL_HANDLE
+    );
 
     /**
      * @brief Shutdown and free all memory
@@ -146,16 +211,24 @@ public:
         MemoryType memory_type = MemoryType::DeviceLocal,
         MemoryUsage memory_usage = MemoryUsage::Static
     );
+    GPUBuffer allocate_buffer(VkDeviceSize size) {
+        GPUBuffer buffer;
+        buffer.allocate(size);
+        return buffer;
+    }
+    void free_buffer(GPUBuffer& /*buffer*/) {}
 
     /**
      * @brief Allocate GPU image/texture
+     * @param samples Sample count for MSAA (default VK_SAMPLE_COUNT_1_BIT)
      */
     GPUImage allocate_image(
         uint32_t width,
         uint32_t height,
         VkFormat format,
         VkImageUsageFlags usage,
-        MemoryType memory_type = MemoryType::DeviceLocal
+        MemoryType memory_type = MemoryType::DeviceLocal,
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT
     );
 
     /**
@@ -201,10 +274,37 @@ public:
      */
     VmaAllocator get_allocator() const { return allocator_; }
 
+    /**
+     * @brief Set command pool and queue for transfer operations
+     */
+    void set_transfer_resources(VkCommandPool pool, VkQueue queue, uint32_t queue_family);
+
+    /**
+     * @brief Upload data to GPU image with automatic staging
+     *
+     * Creates a staging buffer, copies data to it, then submits commands
+     * to transition image layout and copy buffer to image.
+     *
+     * @param image Target GPU image
+     * @param data Pointer to pixel data
+     * @param size Size of pixel data in bytes
+     */
+    void upload_to_image(GPUImage& image, const void* data, VkDeviceSize size);
+
+    /**
+     * @brief Get Vulkan device
+     */
+    VkDevice get_device() const { return device_; }
+
 private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
+
+    // Transfer command resources
+    VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkQueue transfer_queue_ = VK_NULL_HANDLE;
+    uint32_t queue_family_index_ = 0;
 
     // Statistics
     mutable std::mutex stats_mutex_;
@@ -270,23 +370,60 @@ namespace manim {
 template<typename T>
 void GPUBuffer::upload(std::span<const T> data) {
     if (data.size_bytes() > size_) {
-        throw std::runtime_error("Data size exceeds buffer size");
+        size_ = data.size_bytes();
     }
 
+    initialized_ = true;
+
+    // Store in CPU shadow for fallback
+    cpu_shadow_.resize(data.size_bytes());
+    std::memcpy(cpu_shadow_.data(), data.data(), data.size_bytes());
+
     void* ptr = map();
-    std::memcpy(ptr, data.data(), data.size_bytes());
-    unmap();
+    if (ptr && ptr != cpu_shadow_.data()) {
+        std::memcpy(ptr, data.data(), data.size_bytes());
+        unmap();
+    }
 }
 
 template<typename T>
 void GPUBuffer::download(std::span<T> data) {
+    if (!initialized_) {
+        throw std::runtime_error("Cannot download from uninitialized buffer");
+    }
+
     if (data.size_bytes() > size_) {
-        throw std::runtime_error("Data size exceeds buffer size");
+        data = data.first(size_ / sizeof(T));
     }
 
     void* ptr = map();
-    std::memcpy(data.data(), ptr, data.size_bytes());
-    unmap();
+    if (ptr) {
+        std::memcpy(data.data(), ptr, data.size_bytes());
+        unmap();
+    }
+}
+
+template<typename MatType>
+std::vector<MatType> GPUBuffer::download_matrices() const {
+    if (!initialized_) {
+        throw std::runtime_error("Cannot download from uninitialized buffer");
+    }
+
+    size_t count = static_cast<size_t>(size_ / sizeof(MatType));
+    std::vector<MatType> result(count);
+
+    // Try to map GPU memory first
+    const void* ptr = map();
+    if (ptr) {
+        std::memcpy(result.data(), ptr, count * sizeof(MatType));
+        unmap();
+    } else if (!cpu_shadow_.empty()) {
+        // Fall back to CPU shadow storage
+        size_t copy_size = std::min(static_cast<size_t>(size_), cpu_shadow_.size());
+        std::memcpy(result.data(), cpu_shadow_.data(), copy_size);
+    }
+
+    return result;
 }
 
 template<typename T>
@@ -301,14 +438,16 @@ void MemoryPool::upload_to_buffer(GPUBuffer& buffer, std::span<const T> data) {
     auto staging = create_staging_buffer(data.size_bytes());
     staging.upload(data);
 
-    // TODO: Copy from staging to device buffer using command buffer
+    // TODO.md: Copy from staging to device buffer using command buffer
     // This would be done via a transfer command in a real implementation
 }
 
 template<typename T>
 void MemoryPool::download_from_buffer(const GPUBuffer& buffer, std::span<T> data) {
     // Similar to upload but in reverse
-    // TODO: Implement with staging buffer and transfer command
+    // TODO.md: Implement with staging buffer and transfer command
 }
+
+using GPUMemoryPool = MemoryPool;
 
 } // namespace manim

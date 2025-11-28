@@ -141,7 +141,7 @@ class OpenGLSurface(OpenGLMobject):
         self.set_points(np.vstack(point_lists))
 
     def compute_triangle_indices(self):
-        # TODO, if there is an event which changes
+        # TODO.md, if there is an event which changes
         # the resolution of the surface, make sure
         # this is called.
         nu, nv = self.resolution

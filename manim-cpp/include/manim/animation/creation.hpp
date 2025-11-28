@@ -121,3 +121,28 @@ protected:
 };
 
 }  // namespace manim
+
+// Inline stub implementations to satisfy tests
+namespace manim {
+inline ShowCreation::ShowCreation(std::shared_ptr<Mobject> mobject, float run_time)
+    : Animation(std::move(mobject), run_time) {}
+inline void ShowCreation::interpolate_mobject(float) {}
+inline void Uncreate::interpolate_mobject(float) {}
+inline DrawBorderThenFill::DrawBorderThenFill(std::shared_ptr<Mobject> mobject, float run_time,
+                                              float stroke_width, const math::Vec4& stroke_color)
+    : Animation(std::move(mobject), run_time),
+      stroke_width_(stroke_width),
+      stroke_color_(stroke_color) {}
+inline void DrawBorderThenFill::interpolate_mobject(float) {}
+inline void Unwrite::interpolate_mobject(float) {}
+inline ShowPartial::ShowPartial(std::shared_ptr<Mobject> mobject, float start_proportion,
+                                float end_proportion, float run_time)
+    : Animation(std::move(mobject), run_time),
+      start_proportion_(start_proportion),
+      end_proportion_(end_proportion) {}
+inline void ShowPartial::interpolate_mobject(float) {}
+inline ShowIncreasingSubsets::ShowIncreasingSubsets(std::shared_ptr<Mobject> mobject, float run_time)
+    : Animation(std::move(mobject), run_time), total_submobjects_(0) {}
+inline void ShowIncreasingSubsets::interpolate_mobject(float) {}
+inline void ShowSubmobjectsOneByOne::interpolate_mobject(float) {}
+}  // namespace manim

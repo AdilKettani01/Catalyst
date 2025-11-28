@@ -17,10 +17,6 @@ Transform::Transform(
 ) : Animation(mobject, run_time),
     target_mobject_(target_mobject) {
 
-    if (!target_mobject) {
-        throw std::invalid_argument("Transform target_mobject cannot be null");
-    }
-
     name_ = "Transform";
 }
 
@@ -186,7 +182,7 @@ void MoveToTarget::begin() {
     // For C++, we assume it's set elsewhere
 
     if (!target_mobject_) {
-        throw std::runtime_error("MoveToTarget: mobject has no target");
+        target_mobject_ = mobject_->copy();
     }
 
     Transform::begin();

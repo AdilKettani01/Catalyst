@@ -71,6 +71,8 @@ public:
 
     Ellipse& set_width(float width);
     Ellipse& set_height(float height);
+    float get_width() const { return width_; }
+    float get_height() const { return height_; }
 
     Ptr copy() const override {
         auto copied = std::make_shared<Ellipse>(width_, height_, num_segments_);
@@ -126,6 +128,9 @@ public:
         float outer_radius = 1.0f,
         uint32_t num_segments = 64
     );
+
+    float get_inner_radius() const { return inner_radius_; }
+    float get_outer_radius() const { return outer_radius_; }
 
     Ptr copy() const override {
         auto copied = std::make_shared<Annulus>(inner_radius_, outer_radius_, num_segments_);

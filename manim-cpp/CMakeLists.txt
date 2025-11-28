@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ManimCPP VERSION 0.1.0 LANGUAGES CXX C)
+project(Catalyst VERSION 0.1.0 LANGUAGES CXX C)
 
 # ==============================================================================
 # Project Configuration
@@ -147,6 +147,10 @@ function(compile_shader TARGET SHADER)
     get_filename_component(SHADER_NAME ${SHADER} NAME)
     get_filename_component(SHADER_EXT ${SHADER} EXT)
 
+    # Get relative path from shaders directory to preserve subdirectory structure
+    file(RELATIVE_PATH SHADER_REL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${SHADER})
+    get_filename_component(SHADER_REL_DIR ${SHADER_REL_PATH} DIRECTORY)
+
     # Determine shader stage
     if(SHADER_EXT STREQUAL ".vert")
         set(STAGE "vert")
@@ -170,14 +174,21 @@ function(compile_shader TARGET SHADER)
         message(FATAL_ERROR "Unknown shader type: ${SHADER_EXT}")
     endif()
 
-    set(SPIRV_OUTPUT ${CMAKE_BINARY_DIR}/shaders/${SHADER_NAME}.spv)
+    # Preserve directory structure in output
+    if(SHADER_REL_DIR)
+        set(SPIRV_OUTPUT ${CMAKE_BINARY_DIR}/shaders/${SHADER_REL_DIR}/${SHADER_NAME}.spv)
+        set(OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders/${SHADER_REL_DIR})
+    else()
+        set(SPIRV_OUTPUT ${CMAKE_BINARY_DIR}/shaders/${SHADER_NAME}.spv)
+        set(OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
+    endif()
 
     add_custom_command(
         OUTPUT ${SPIRV_OUTPUT}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/shaders
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${OUTPUT_DIR}
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.2 -S ${STAGE} ${SHADER} -o ${SPIRV_OUTPUT}
         DEPENDS ${SHADER}
-        COMMENT "Compiling shader: ${SHADER_NAME}"
+        COMMENT "Compiling shader: ${SHADER_REL_PATH}"
     )
 
     target_sources(${TARGET} PRIVATE ${SPIRV_OUTPUT})
@@ -196,13 +207,20 @@ file(GLOB_RECURSE MANIM_SOURCES
     "src/scene/*.cpp"
     "src/camera/*.cpp"
     "src/utils/*.cpp"
+    "src/text/*.cpp"
+    "src/culling/*.cpp"
+)
+
+list(APPEND MANIM_SOURCES
+    src/cli/config.cpp
+    src/cli/gpu_detector.cpp
 )
 
 # Create main library
-add_library(manim ${MANIM_SOURCES})
+add_library(catalyst ${MANIM_SOURCES})
 
 # Include directories
-target_include_directories(manim
+target_include_directories(catalyst
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -211,7 +229,7 @@ target_include_directories(manim
 )
 
 # Link dependencies
-target_link_libraries(manim
+target_link_libraries(catalyst
     PUBLIC
         Vulkan::Vulkan
         glfw
@@ -222,24 +240,27 @@ target_link_libraries(manim
         tomlplusplus::tomlplusplus
         ${FFMPEG_LIBRARIES}
         Freetype::Freetype
-        ${HARFBUZZ_LIBRARIES}
+        harfbuzz::harfbuzz
 )
+
+# Add HarfBuzz include directories explicitly
+target_include_directories(catalyst PUBLIC ${HARFBUZZ_INCLUDE_DIRS})
 
 # Platform-specific libraries
 if(WIN32)
-    target_link_libraries(manim PRIVATE d3d12 dxgi d3dcompiler)
+    target_link_libraries(catalyst PRIVATE d3d12 dxgi d3dcompiler)
 elseif(APPLE)
-    target_link_libraries(manim PRIVATE "-framework Metal" "-framework MetalKit")
+    target_link_libraries(catalyst PRIVATE "-framework Metal" "-framework MetalKit")
 endif()
 
 # CUDA support
 if(MANIM_ENABLE_CUDA)
-    target_link_libraries(manim PRIVATE CUDA::cudart CUDA::cuda_driver)
+    target_link_libraries(catalyst PRIVATE CUDA::cudart CUDA::cuda_driver)
 endif()
 
 # OpenCL support
 if(MANIM_ENABLE_OPENCL)
-    target_link_libraries(manim PRIVATE OpenCL::OpenCL)
+    target_link_libraries(catalyst PRIVATE OpenCL::OpenCL)
 endif()
 
 # Compile shaders
@@ -262,7 +283,7 @@ if(MANIM_ENABLE_RAYTRACING)
 endif()
 
 foreach(SHADER ${SHADER_SOURCES})
-    compile_shader(manim ${SHADER})
+    compile_shader(catalyst ${SHADER})
 endforeach()
 
 # ==============================================================================
@@ -270,7 +291,7 @@ endforeach()
 # ==============================================================================
 
 add_executable(manim-cli src/cli/main.cpp)
-target_link_libraries(manim-cli PRIVATE manim)
+target_link_libraries(manim-cli PRIVATE catalyst)
 set_target_properties(manim-cli PROPERTIES OUTPUT_NAME manim)
 
 # ==============================================================================
@@ -286,7 +307,7 @@ if(MANIM_BUILD_TESTS)
     add_executable(manim_tests ${TEST_SOURCES})
     target_link_libraries(manim_tests
         PRIVATE
-            manim
+            catalyst
             GTest::gtest
             GTest::gtest_main
     )
@@ -301,7 +322,7 @@ if(MANIM_BUILD_TESTS)
         add_executable(system_verification tests/validation/system_verification.cpp)
         target_link_libraries(system_verification
             PRIVATE
-                manim
+                catalyst
                 GTest::gtest
                 GTest::gtest_main
         )
@@ -313,7 +334,7 @@ if(MANIM_BUILD_TESTS)
         add_executable(gpu_3d_integration_tests tests/validation/gpu_3d_integration_tests.cpp)
         target_link_libraries(gpu_3d_integration_tests
             PRIVATE
-                manim
+                catalyst
                 GTest::gtest
                 GTest::gtest_main
         )
@@ -327,7 +348,7 @@ if(MANIM_BUILD_TESTS)
             add_executable(performance_benchmarks tests/validation/performance_benchmarks.cpp)
             target_link_libraries(performance_benchmarks
                 PRIVATE
-                    manim
+                    catalyst
                     benchmark::benchmark
             )
         endif()
@@ -346,11 +367,18 @@ if(MANIM_BUILD_BENCHMARKS)
     add_executable(manim_benchmarks ${BENCHMARK_SOURCES})
     target_link_libraries(manim_benchmarks
         PRIVATE
-            manim
+            catalyst
             benchmark::benchmark
             benchmark::benchmark_main
     )
 endif()
+
+# ==============================================================================
+# Examples
+# ==============================================================================
+
+add_executable(gpu_render_to_file examples/gpu_render_to_file.cpp)
+target_link_libraries(gpu_render_to_file PRIVATE catalyst)
 
 # ==============================================================================
 # Python Bindings
@@ -362,7 +390,7 @@ if(MANIM_BUILD_PYTHON_BINDINGS)
 
     # Create Python module named 'manim_cpp'
     pybind11_add_module(manim_cpp bindings/python/bindings.cpp)
-    target_link_libraries(manim_cpp PRIVATE manim)
+    target_link_libraries(manim_cpp PRIVATE catalyst)
 
     # Set output directory to match Python package structure
     set_target_properties(manim_cpp PROPERTIES
@@ -391,8 +419,8 @@ endif()
 # Installation
 # ==============================================================================
 
-install(TARGETS manim manim-cli
-    EXPORT ManimTargets
+install(TARGETS catalyst manim-cli
+    EXPORT CatalystTargets
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -403,14 +431,14 @@ install(DIRECTORY include/manim
 )
 
 install(DIRECTORY ${CMAKE_BINARY_DIR}/shaders
-    DESTINATION share/manim
+    DESTINATION share/catalyst
 )
 
 # Export targets
-install(EXPORT ManimTargets
-    FILE ManimTargets.cmake
-    NAMESPACE Manim::
-    DESTINATION lib/cmake/Manim
+install(EXPORT CatalystTargets
+    FILE CatalystTargets.cmake
+    NAMESPACE Catalyst::
+    DESTINATION lib/cmake/Catalyst
 )
 
 # ==============================================================================
@@ -418,7 +446,7 @@ install(EXPORT ManimTargets
 # ==============================================================================
 
 message(STATUS "")
-message(STATUS "Manim C++ Configuration Summary")
+message(STATUS "Catalyst Configuration Summary")
 message(STATUS "================================")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "manim/core/types.h"
+#include "manim/scene/scene.h"
+#include "manim/renderer/renderer.hpp"
 #include <vector>
 #include <memory>
 #include <unordered_map>
@@ -340,7 +342,7 @@ public:
     /**
      * @brief Override render to apply optimizations
      */
-    bool render(bool preview = false) override;
+    bool render(bool preview = false);
 
     /**
      * @brief Get scene optimizer

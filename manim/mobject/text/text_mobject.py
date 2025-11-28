@@ -606,7 +606,7 @@ class Text(SVGMobject):
 
     @font_size.setter
     def font_size(self, font_val: float) -> None:
-        # TODO: use pango's font size scaling.
+        # TODO.md: use pango's font size scaling.
         if font_val <= 0:
             raise ValueError("font_size must be greater than 0.")
         else:
@@ -1317,7 +1317,7 @@ class MarkupText(SVGMobject):
 
     @font_size.setter
     def font_size(self, font_val: float) -> None:
-        # TODO: use pango's font size scaling.
+        # TODO.md: use pango's font size scaling.
         if font_val <= 0:
             raise ValueError("font_size must be greater than 0.")
         else:

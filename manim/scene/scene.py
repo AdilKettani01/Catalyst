@@ -208,7 +208,7 @@ class Scene:
 
         if renderer is None:
             self.renderer: CairoRenderer | OpenGLRenderer = CairoRenderer(
-                # TODO: Is it a suitable approach to make an instance of
+                # TODO.md: Is it a suitable approach to make an instance of
                 # the self.camera_class here?
                 camera_class=self.camera_class,
                 skip_animations=self.skip_animations,
@@ -218,7 +218,7 @@ class Scene:
         self.renderer.init_scene(self)
 
         self.mobjects: list[Mobject] = []
-        # TODO, remove need for foreground mobjects
+        # TODO.md, remove need for foreground mobjects
         self.foreground_mobjects: list[Mobject] = []
         if self.random_seed is not None:
             random.seed(self.random_seed)
@@ -262,7 +262,7 @@ class Scene:
             pass
         except RerunSceneException:
             self.remove(*self.mobjects)
-            # TODO: The CairoRenderer does not have the method clear_screen()
+            # TODO.md: The CairoRenderer does not have the method clear_screen()
             self.renderer.clear_screen()  # type: ignore[union-attr]
             self.renderer.num_plays = 0
             return True
@@ -758,7 +758,7 @@ class Scene:
         add_safe_mobjects_from_list(mobjects, set(to_remove))
         return new_mobjects
 
-    # TODO, remove this, and calls to this
+    # TODO.md, remove this, and calls to this
     def add_foreground_mobjects(self, *mobjects: Mobject) -> Scene:
         """
         Adds mobjects to the foreground, and internally to the list
@@ -1163,7 +1163,7 @@ class Scene:
             and config.renderer == RendererType.OPENGL
             and threading.current_thread().name != "MainThread"
         ):
-            # TODO: are these actually being used?
+            # TODO.md: are these actually being used?
             kwargs.update(
                 {
                     "subcaption": subcaption,
@@ -1283,7 +1283,7 @@ class Scene:
         self, None
             None if there is nothing to play, or self otherwise.
         """
-        # NOTE TODO : returns statement of this method are wrong. It should return nothing, as it makes a little sense to get any information from this method.
+        # NOTE TODO.md : returns statement of this method are wrong. It should return nothing, as it makes a little sense to get any information from this method.
         # The return are kept to keep webgl renderer from breaking.
         if len(animations) == 0:
             raise ValueError("Called Scene.play with no animations")
@@ -1362,7 +1362,7 @@ class Scene:
             animation.clean_up_from_scene(self)
         if not self.renderer.skip_animations:
             self.update_mobjects(0)
-        # TODO: The OpenGLRenderer does not have the property static.image.
+        # TODO.md: The OpenGLRenderer does not have the property static.image.
         self.renderer.static_image = None  # type: ignore[union-attr]
         # Closing the progress bar at the end of the play.
         self.time_progression.close()
@@ -1508,7 +1508,7 @@ class Scene:
                         config["from_animation_number"] = action.kwargs[
                             "from_animation_number"
                         ]
-                    # # TODO: This option only makes sense if interactive_embed() is run at the
+                    # # TODO.md: This option only makes sense if interactive_embed() is run at the
                     # # end of a scene by default.
                     # if "upto_animation_number" in action.kwargs:
                     #     config["upto_animation_number"] = action.kwargs[

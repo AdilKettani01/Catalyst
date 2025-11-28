@@ -26,12 +26,12 @@ void VectorSpaceScene::addVector(std::shared_ptr<Vector> vector) {
 
 void VectorSpaceScene::addBasisVectors() {
     std::cout << "Adding basis vectors" << std::endl;
-    // TODO: Create and add i, j, k basis vectors
+    // TODO.md: Create and add i, j, k basis vectors
 }
 
 void VectorSpaceScene::applyLinearTransformation(const Mat4& matrix, double duration) {
     std::cout << "Applying linear transformation" << std::endl;
-    // TODO: Animate transformation of coordinate system and vectors
+    // TODO.md: Animate transformation of coordinate system and vectors
 }
 
 } // namespace manim

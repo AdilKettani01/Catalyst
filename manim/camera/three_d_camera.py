@@ -359,7 +359,7 @@ class ThreeDCamera(Camera):
         self,
         mobject: Mobject,
         points: Point3D_Array,
-    ) -> Point3D_Array:  # TODO: Write Docstrings for this Method.
+    ) -> Point3D_Array:  # TODO.md: Write Docstrings for this Method.
         points = super().transform_points_pre_display(mobject, points)
         fixed_orientation = mobject in self.fixed_orientation_mobjects
         fixed_in_frame = mobject in self.fixed_in_frame_mobjects

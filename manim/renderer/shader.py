@@ -92,7 +92,7 @@ class Object3D:
         self.add(*children)
         self.init_updaters()
 
-    # TODO: Use path_func.
+    # TODO.md: Use path_func.
     def interpolate(self, start: Object3D, end: Object3D, alpha: float, _: Any) -> None:
         self.model_matrix = (1 - alpha) * start.model_matrix + alpha * end.model_matrix
         self.normal_matrix = (
@@ -322,7 +322,7 @@ class Mesh(Object3D):
         copy.skip_render = self.skip_render
         copy.model_matrix = self.model_matrix.copy()
         copy.normal_matrix = self.normal_matrix.copy()
-        # TODO: Copy updaters?
+        # TODO.md: Copy updaters?
         return copy
 
     def set_uniforms(self, renderer: OpenGLRenderer) -> None:

@@ -1,0 +1,117 @@
+#version 450
+
+// BVH refit shader - updates AABBs bottom-up without changing tree structure
+// Efficient for animated scenes with small object movements
+
+layout(local_size_x = 256) in;
+
+// BVH node structure (32 bytes)
+struct BVHNode {
+    vec3 aabb_min;
+    uint left;          // Left child or first primitive (if leaf)
+    vec3 aabb_max;
+    uint right;         // Right child or primitive count with MSB set (if leaf)
+};
+
+// Object bounds
+struct ObjectBounds {
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 sphere;
+};
+
+// Input: Updated object bounds
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Sorted primitive indices (leaf to object mapping)
+layout(std430, binding = 1) readonly buffer SortedIndices {
+    uint sorted_indices[];
+};
+
+// In/Out: BVH nodes
+layout(std430, binding = 2) buffer BVHNodes {
+    BVHNode nodes[];
+};
+
+// Atomic counters for bottom-up propagation
+layout(std430, binding = 3) buffer AtomicCounters {
+    uint counters[];
+};
+
+// Parent indices for each node (computed during build)
+layout(std430, binding = 4) readonly buffer ParentIndices {
+    uint parents[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_internal_nodes;
+    uint num_leaves;
+} pc;
+
+// Check if node is a leaf (MSB of right child set)
+bool is_leaf(BVHNode node) {
+    return (node.right & 0x80000000u) != 0;
+}
+
+// Get primitive count from leaf node
+uint get_primitive_count(BVHNode node) {
+    return node.right & 0x7FFFFFFFu;
+}
+
+void main() {
+    uint leaf_idx = gl_GlobalInvocationID.x;
+
+    if (leaf_idx >= pc.num_leaves) {
+        return;
+    }
+
+    // Leaf nodes are stored after internal nodes
+    uint node_idx = pc.num_internal_nodes + leaf_idx;
+
+    // Get the object index this leaf represents
+    uint obj_idx = sorted_indices[leaf_idx];
+
+    // Update leaf AABB from object bounds
+    ObjectBounds obj = objects[obj_idx];
+    nodes[node_idx].aabb_min = obj.aabb_min.xyz;
+    nodes[node_idx].aabb_max = obj.aabb_max.xyz;
+
+    // Propagate up the tree using atomics
+    // Each internal node waits for both children before updating
+
+    uint current = node_idx;
+    uint parent_idx = parents[current];
+
+    while (parent_idx != 0xFFFFFFFF) {
+        // Atomically increment counter for this parent
+        // First thread to arrive returns 0, second returns 1
+        uint count = atomicAdd(counters[parent_idx], 1);
+
+        if (count == 0) {
+            // First child to arrive - wait for sibling
+            return;
+        }
+
+        // Second child arrived - safe to update parent's AABB
+        // Reset counter for next frame
+        counters[parent_idx] = 0;
+
+        // Get children bounds
+        BVHNode parent = nodes[parent_idx];
+        uint left_child = parent.left;
+        uint right_child = parent.right;
+
+        BVHNode left_node = nodes[left_child];
+        BVHNode right_node = nodes[right_child];
+
+        // Compute union of children AABBs
+        nodes[parent_idx].aabb_min = min(left_node.aabb_min, right_node.aabb_min);
+        nodes[parent_idx].aabb_max = max(left_node.aabb_max, right_node.aabb_max);
+
+        // Move up to grandparent
+        current = parent_idx;
+        parent_idx = parents[current];
+    }
+}

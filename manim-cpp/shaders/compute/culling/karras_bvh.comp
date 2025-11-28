@@ -1,0 +1,159 @@
+#version 450
+
+// Karras BVH Construction Shader
+// Builds binary radix tree from sorted Morton codes in parallel
+// Based on Karras 2012: "Maximizing Parallelism in the Construction of BVHs"
+// Each thread computes one internal node independently
+
+layout(local_size_x = 256) in;
+
+// Input: Sorted Morton code + index pairs
+layout(std430, binding = 0) readonly buffer SortedMortonCodes {
+    uvec2 sorted_morton[];  // x = morton_code, y = object_index
+};
+
+// Output: BVH nodes
+struct BVHNode {
+    vec3 aabb_min;
+    uint left;          // Left child or first primitive (if leaf)
+    vec3 aabb_max;
+    uint right;         // Right child or primitive count with MSB set (if leaf)
+};
+
+layout(std430, binding = 1) buffer BVHNodes {
+    BVHNode nodes[];
+};
+
+// Output: Parent indices for refit propagation
+layout(std430, binding = 2) writeonly buffer ParentIndices {
+    uint parents[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_leaves;      // Number of leaf nodes (= number of objects)
+    uint padding[3];
+} pc;
+
+// Count leading zeros in 32-bit integer
+uint clz(uint x) {
+    if (x == 0) return 32;
+    uint n = 0;
+    if ((x & 0xFFFF0000u) == 0u) { n += 16u; x <<= 16; }
+    if ((x & 0xFF000000u) == 0u) { n += 8u;  x <<= 8;  }
+    if ((x & 0xF0000000u) == 0u) { n += 4u;  x <<= 4;  }
+    if ((x & 0xC0000000u) == 0u) { n += 2u;  x <<= 2;  }
+    if ((x & 0x80000000u) == 0u) { n += 1u; }
+    return n;
+}
+
+// Compute delta (longest common prefix length) between keys i and j
+// Returns -1 if j is out of range
+int delta(int i, int j) {
+    if (j < 0 || j >= int(pc.num_leaves)) {
+        return -1;
+    }
+
+    uint key_i = sorted_morton[i].x;
+    uint key_j = sorted_morton[j].x;
+
+    // If keys are equal, use index to break ties
+    if (key_i == key_j) {
+        uint xor_idx = uint(i) ^ uint(j);
+        return 32 + int(32u - clz(xor_idx));
+    }
+
+    // Count leading zeros in XOR of keys
+    return int(32u - clz(key_i ^ key_j));
+}
+
+// Find the split position for internal node i using binary search
+uint find_split(int i, int direction, int d_min, int l_max) {
+    int split = i;
+    int stride = l_max;
+
+    do {
+        stride = (stride + 1) >> 1;  // ceil(stride / 2)
+        int new_split = split + direction * stride;
+
+        if (new_split >= 0 && new_split < int(pc.num_leaves)) {
+            int d_split = delta(i, new_split);
+            if (d_split > d_min) {
+                split = new_split;
+            }
+        }
+    } while (stride > 1);
+
+    return uint(split);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Only process internal nodes (there are num_leaves - 1 of them)
+    uint num_internal = pc.num_leaves - 1u;
+    if (idx >= num_internal) {
+        return;
+    }
+
+    int i = int(idx);
+
+    // Determine the direction of the range
+    int d_left = delta(i, i - 1);
+    int d_right = delta(i, i + 1);
+    int direction = (d_right - d_left) >= 0 ? 1 : -1;
+
+    // Compute the minimum delta (upper bound for range)
+    int d_min = delta(i, i - direction);
+
+    // Find the upper bound of the range (l_max)
+    int l_max = 2;
+    while (delta(i, i + direction * l_max) > d_min) {
+        l_max *= 2;
+    }
+
+    // Find the other end of the range using binary search
+    int l = 0;
+    int t = l_max >> 1;
+    while (t > 0) {
+        int new_l = l + t;
+        if (delta(i, i + direction * new_l) > d_min) {
+            l = new_l;
+        }
+        t >>= 1;
+    }
+
+    int j = i + direction * l;
+
+    // Find the split position
+    int d_node = delta(i, j);
+    int s = int(find_split(i, direction, d_node, l));
+
+    // Compute child indices
+    // Internal nodes: [0, num_internal-1]
+    // Leaf nodes: [num_internal, 2*num_internal]
+    uint left_child;
+    if (min(i, j) == s) {
+        // Left child is a leaf
+        left_child = num_internal + uint(s);
+    } else {
+        // Left child is an internal node
+        left_child = uint(s);
+    }
+
+    uint right_child;
+    if (max(i, j) == s + 1) {
+        // Right child is a leaf
+        right_child = num_internal + uint(s + 1);
+    } else {
+        // Right child is an internal node
+        right_child = uint(s + 1);
+    }
+
+    // Write node data (AABBs will be filled by refit pass)
+    nodes[idx].left = left_child;
+    nodes[idx].right = right_child;
+
+    // Write parent indices for children
+    parents[left_child] = idx;
+    parents[right_child] = idx;
+}

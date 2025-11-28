@@ -1,0 +1,72 @@
+#version 450
+// prefix_sum.comp - Parallel exclusive prefix sum (Blelloch scan algorithm)
+// Computes the prefix sum of histogram data for radix sort scatter offsets
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer DataBuffer {
+    uint data[];
+};
+
+layout(push_constant) uniform Constants {
+    uint num_elements;
+    uint stride;        // For multi-pass prefix sum
+} constants;
+
+// Shared memory for work-efficient parallel scan
+// We process 512 elements per workgroup (2 per thread)
+shared uint temp[512];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_WorkGroupID.x * 512;  // Base index for this workgroup
+    uint offset = 1;
+
+    // Load data into shared memory (2 elements per thread)
+    uint ai = tid;
+    uint bi = tid + 256;
+
+    uint ai_global = gid + ai;
+    uint bi_global = gid + bi;
+
+    temp[ai] = (ai_global < constants.num_elements) ? data[ai_global] : 0;
+    temp[bi] = (bi_global < constants.num_elements) ? data[bi_global] : 0;
+
+    // Up-sweep (reduce) phase
+    for (uint d = 256; d > 0; d >>= 1) {
+        barrier();
+        if (tid < d) {
+            uint ai2 = offset * (2 * tid + 1) - 1;
+            uint bi2 = offset * (2 * tid + 2) - 1;
+            temp[bi2] += temp[ai2];
+        }
+        offset *= 2;
+    }
+
+    // Clear the last element (for exclusive scan)
+    if (tid == 0) {
+        temp[511] = 0;
+    }
+
+    // Down-sweep phase
+    for (uint d = 1; d < 512; d *= 2) {
+        offset >>= 1;
+        barrier();
+        if (tid < d) {
+            uint ai2 = offset * (2 * tid + 1) - 1;
+            uint bi2 = offset * (2 * tid + 2) - 1;
+            uint t = temp[ai2];
+            temp[ai2] = temp[bi2];
+            temp[bi2] += t;
+        }
+    }
+    barrier();
+
+    // Write results back to global memory
+    if (ai_global < constants.num_elements) {
+        data[ai_global] = temp[ai];
+    }
+    if (bi_global < constants.num_elements) {
+        data[bi_global] = temp[bi];
+    }
+}

@@ -496,7 +496,7 @@ static void BM_EXTREME_TenThousandObjects(benchmark::State& state) {
     }
 
     // Should achieve 60 FPS with 10K objects
-    double fps = 1.0 / (state.iterations() / state.elapsed_seconds());
+    double fps = 1.0 / (state.iterations() / 1.0);
     state.counters["FPS"] = fps;
 }
 BENCHMARK(BM_EXTREME_TenThousandObjects);

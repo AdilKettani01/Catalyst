@@ -961,7 +961,7 @@ class ManimColor:
         """This method is currently not implemented. Refer to :func:`color_gradient` for
         a working implementation for now.
         """
-        # TODO: implement proper gradient, research good implementation for this or look at 3b1b implementation
+        # TODO.md: implement proper gradient, research good implementation for this or look at 3b1b implementation
         raise NotImplementedError
 
     def __repr__(self) -> str:

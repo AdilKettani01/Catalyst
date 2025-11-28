@@ -174,7 +174,7 @@ def parse_module_attributes() -> tuple[AliasDocsDict, DataDict, TypeVarDict]:
                     and node.value is not None
                 )
                 if is_type_alias or is_annotated_assignment_with_value:
-                    # TODO: ast.TypeAlias does not exist before Python 3.12, and that
+                    # TODO.md: ast.TypeAlias does not exist before Python 3.12, and that
                     # could be the reason why MyPy does not recognize these as
                     # attributes of node.
                     alias_name = node.name.id if is_type_alias else node.target.id

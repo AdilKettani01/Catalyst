@@ -29,7 +29,7 @@ public:
     void upload_to_gpu(GPUAnimationEngine& engine) override;
     void interpolate_on_gpu(float t, VkCommandBuffer cmd) override;
 
-protected:
+public:
     void begin() override;
     void interpolate_mobject(float alpha) override;
 

@@ -227,7 +227,7 @@ class Line(TipableVMobject):
         """
         curr_start, curr_end = self.get_start_and_end()
         if np.all(curr_start == curr_end):
-            # TODO, any problems with resetting
+            # TODO.md, any problems with resetting
             # these attrs?
             self.start = np.asarray(start)
             self.end = np.asarray(end)
@@ -597,7 +597,7 @@ class Arrow(Line):
         self.max_stroke_width_to_length_ratio = max_stroke_width_to_length_ratio
         tip_shape = kwargs.pop("tip_shape", ArrowTriangleFilledTip)
         super().__init__(*args, buff=buff, stroke_width=stroke_width, **kwargs)  # type: ignore[misc]
-        # TODO, should this be affected when
+        # TODO.md, should this be affected when
         # Arrow.set_stroke is called?
         self.initial_stroke_width = self.stroke_width
         self.add_tip(tip_shape=tip_shape)

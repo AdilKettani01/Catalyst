@@ -1,0 +1,133 @@
+#version 450
+
+// Contribution culling - removes objects that are too small on screen
+// This is an early-out optimization that runs before full occlusion testing
+// Objects smaller than a pixel threshold are culled as they contribute
+// negligibly to the final image
+
+layout(local_size_x = 256) in;
+
+// Object bounds (must match CPU structure)
+struct ObjectBounds {
+    vec4 aabb_min;      // xyz = min corner, w = flags
+    vec4 aabb_max;      // xyz = max corner, w = object_id
+    vec4 sphere;        // xyz = center, w = radius
+};
+
+// Input: Object bounds
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Input: Frustum-visible indices (from frustum cull pass)
+layout(std430, binding = 1) readonly buffer FrustumVisibleBuffer {
+    uint frustum_visible[];
+};
+
+// Output: Contribution-visible indices
+layout(std430, binding = 2) writeonly buffer ContributionVisibleBuffer {
+    uint contribution_visible[];
+};
+
+// Output: Atomic counter for compaction
+layout(std430, binding = 3) buffer AtomicCounter {
+    uint visible_count;
+};
+
+// Configuration
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    vec2 screen_size;           // Viewport dimensions
+    float min_screen_size;      // Minimum screen-space size in pixels (e.g., 2.0)
+    float max_screen_distance;  // Maximum distance for tiny object culling
+    uint num_frustum_visible;
+    uint flags;                 // Bit 0: use distance-based threshold scaling
+    uint padding[2];
+} pc;
+
+// Flags
+const uint FLAG_DISTANCE_SCALING = 0x01;
+
+// Project bounding sphere to screen and calculate approximate screen coverage
+// Returns screen-space diameter in pixels
+float calculate_screen_size(vec3 center, float radius) {
+    // Transform center to clip space
+    vec4 clip_center = pc.view_proj * vec4(center, 1.0);
+
+    // Object behind camera - treat as visible (edge case)
+    if (clip_center.w <= 0.0) {
+        return pc.min_screen_size * 2.0; // Force visible
+    }
+
+    // Perspective divide to get NDC
+    float inv_w = 1.0 / clip_center.w;
+
+    // Project a point offset by radius to get approximate screen size
+    // This is an approximation - exact sphere projection would be more complex
+    vec4 clip_edge = pc.view_proj * vec4(center + vec3(radius, 0.0, 0.0), 1.0);
+
+    // Screen-space radius (approximate)
+    // For perspective projection, screen size = (radius / distance) * screen_height
+    float screen_radius = (radius * inv_w) * pc.screen_size.y * 0.5;
+
+    // Return diameter
+    return screen_radius * 2.0;
+}
+
+// Calculate distance from camera (used for distance-based threshold scaling)
+float calculate_camera_distance(vec3 center) {
+    // Extract camera position from inverse view matrix
+    // For view_proj, we can approximate distance as w component after projection
+    vec4 clip = pc.view_proj * vec4(center, 1.0);
+    return clip.w; // w = -z_view for standard perspective projection
+}
+
+// Calculate adaptive threshold based on distance
+// Farther objects can have smaller thresholds (they naturally contribute less)
+float calculate_adaptive_threshold(float distance) {
+    if ((pc.flags & FLAG_DISTANCE_SCALING) == 0) {
+        return pc.min_screen_size;
+    }
+
+    // Scale threshold: nearby objects need larger threshold to be visible
+    // Far objects can be smaller and still matter
+    float distance_factor = clamp(distance / pc.max_screen_distance, 0.1, 1.0);
+    return pc.min_screen_size * distance_factor;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= pc.num_frustum_visible) {
+        return;
+    }
+
+    // Get original object index from frustum-visible list
+    uint obj_idx = frustum_visible[idx];
+
+    // Load object bounds
+    ObjectBounds obj = objects[obj_idx];
+
+    // Extract bounding sphere
+    vec3 center = obj.sphere.xyz;
+    float radius = obj.sphere.w;
+
+    // Calculate screen-space size
+    float screen_size = calculate_screen_size(center, radius);
+
+    // Calculate adaptive threshold if enabled
+    float threshold = pc.min_screen_size;
+    if ((pc.flags & FLAG_DISTANCE_SCALING) != 0) {
+        float distance = calculate_camera_distance(center);
+        threshold = calculate_adaptive_threshold(distance);
+    }
+
+    // Object passes contribution test if screen size >= threshold
+    bool visible = screen_size >= threshold;
+
+    if (visible) {
+        // Atomically add to visible list
+        uint slot = atomicAdd(visible_count, 1);
+        contribution_visible[slot] = obj_idx;
+    }
+}

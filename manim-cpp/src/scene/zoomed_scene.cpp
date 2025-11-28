@@ -30,18 +30,18 @@ void ZoomedScene::activateZooming(
     std::cout << "  Zoom factor: " << zoomFactor << std::endl;
     std::cout << "  Position: (" << zoomedPosition.x << ", " << zoomedPosition.y << ")" << std::endl;
 
-    // TODO: Create zoomed frame rectangle
-    // TODO: Create zoomed display frame
-    // TODO: Create zoomed camera
-    // TODO: Add frames to scene
+    // TODO.md: Create zoomed frame rectangle
+    // TODO.md: Create zoomed display frame
+    // TODO.md: Create zoomed camera
+    // TODO.md: Add frames to scene
 }
 
 void ZoomedScene::deactivateZooming() {
     zoomActive = false;
     std::cout << "Deactivating zoom" << std::endl;
 
-    // TODO: Remove zoom frames
-    // TODO: Cleanup zoomed camera
+    // TODO.md: Remove zoom frames
+    // TODO.md: Cleanup zoomed camera
 }
 
 } // namespace manim

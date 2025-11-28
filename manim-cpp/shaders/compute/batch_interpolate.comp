@@ -1,0 +1,93 @@
+#version 450
+
+/**
+ * GPU-accelerated batch point interpolation
+ *
+ * Interpolates between start and end points for animation groups.
+ * Supports:
+ * - Single alpha for all points
+ * - Per-animation alphas for animation groups
+ * - Rate function lookup table sampling
+ */
+
+layout(local_size_x = 256) in;
+
+// Input start points (vec4 for alignment, w unused)
+layout(std430, binding = 0) readonly buffer StartPoints {
+    vec4 start_points[];
+};
+
+// Input end points
+layout(std430, binding = 1) readonly buffer EndPoints {
+    vec4 end_points[];
+};
+
+// Output interpolated points
+layout(std430, binding = 2) writeonly buffer OutPoints {
+    vec4 out_points[];
+};
+
+// Per-animation alpha values (for animation groups)
+layout(std430, binding = 3) readonly buffer AlphaValues {
+    float alphas[];
+};
+
+// Rate function lookup table (1024 samples from 0 to 1)
+layout(std430, binding = 4) readonly buffer RateFuncLUT {
+    float rate_lut[];
+};
+
+// Push constants
+layout(push_constant) uniform Constants {
+    float global_alpha;       // Global alpha for single-alpha mode
+    uint num_points;          // Total number of points
+    uint batch_mode;          // 0 = single alpha, 1 = per-animation alpha
+    uint points_per_anim;     // Points per animation (for batch mode)
+    uint use_rate_func;       // 0 = no rate func, 1 = use LUT
+    uint lut_size;            // Size of rate function LUT
+} constants;
+
+// Sample rate function from lookup table
+float sample_rate_func(float alpha) {
+    if (constants.use_rate_func == 0) {
+        return alpha;
+    }
+
+    // Clamp alpha to [0, 1]
+    alpha = clamp(alpha, 0.0, 1.0);
+
+    // Linear interpolation in LUT
+    float idx_f = alpha * float(constants.lut_size - 1);
+    uint idx0 = uint(floor(idx_f));
+    uint idx1 = min(idx0 + 1, constants.lut_size - 1);
+    float frac = idx_f - float(idx0);
+
+    return mix(rate_lut[idx0], rate_lut[idx1], frac);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= constants.num_points) {
+        return;
+    }
+
+    // Determine which alpha to use
+    float alpha;
+    if (constants.batch_mode == 0) {
+        // Single alpha for all points
+        alpha = constants.global_alpha;
+    } else {
+        // Per-animation alpha
+        uint anim_idx = idx / constants.points_per_anim;
+        alpha = alphas[anim_idx];
+    }
+
+    // Apply rate function
+    alpha = sample_rate_func(alpha);
+
+    // Interpolate between start and end
+    vec4 start = start_points[idx];
+    vec4 end = end_points[idx];
+    out_points[idx] = mix(start, end, alpha);
+}

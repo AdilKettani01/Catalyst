@@ -85,7 +85,7 @@ class OpenGLVMobject(OpenGLMobject):
     stroke_shader_folder = "quadratic_bezier_stroke"
     fill_shader_folder = "quadratic_bezier_fill"
 
-    # TODO: although these are called "rgba" in singular, they are used as
+    # TODO.md: although these are called "rgba" in singular, they are used as
     # FloatRGBA_Arrays and should be called instead "rgbas" in plural for consistency.
     # The same should probably apply for "stroke_width" and "unit_normal".
     fill_rgba = _Data()
@@ -107,7 +107,7 @@ class OpenGLVMobject(OpenGLMobject):
         make_smooth_after_applying_functions: float = False,
         background_image_file: str | None = None,
         # This is within a pixel
-        # TODO, do we care about accounting for
+        # TODO.md, do we care about accounting for
         # varying zoom levels?
         tolerance_for_point_equality: float = 1e-8,
         n_points_per_curve: int = 3,
@@ -134,7 +134,7 @@ class OpenGLVMobject(OpenGLMobject):
         self.make_smooth_after_applying_functions = make_smooth_after_applying_functions
         self.background_image_file = background_image_file
         # This is within a pixel
-        # TODO, do we care about accounting for
+        # TODO.md, do we care about accounting for
         # varying zoom levels?
         self.tolerance_for_point_equality = tolerance_for_point_equality
         self.n_points_per_curve = n_points_per_curve
@@ -397,7 +397,7 @@ class OpenGLVMobject(OpenGLMobject):
     def get_stroke_widths(self):
         return self.stroke_width
 
-    # TODO, it's weird for these to return the first of various lists
+    # TODO.md, it's weird for these to return the first of various lists
     # rather than the full information
     def get_fill_color(self):
         """
@@ -643,7 +643,7 @@ class OpenGLVMobject(OpenGLMobject):
                 anchors = np.vstack([subpath[::nppc], subpath[-1:]])
                 new_subpath = np.array(subpath)
                 if mode == "approx_smooth":
-                    # TODO: get_smooth_quadratic_bezier_handle_points is not defined
+                    # TODO.md: get_smooth_quadratic_bezier_handle_points is not defined
                     new_subpath[1::nppc] = get_smooth_quadratic_bezier_handle_points(
                         anchors,
                     )
@@ -1201,7 +1201,7 @@ class OpenGLVMobject(OpenGLMobject):
 
     # Alignment
     def align_points(self, vmobject):
-        # TODO: This shortcut can be a bit over eager. What if they have the same length, but different subpath lengths?
+        # TODO.md: This shortcut can be a bit over eager. What if they have the same length, but different subpath lengths?
         if self.get_num_points() == len(vmobject.points):
             return
 
@@ -1269,7 +1269,7 @@ class OpenGLVMobject(OpenGLMobject):
         for mob in self.get_family(recurse):
             if mob.get_num_curves() > 0:
                 new_points = mob.insert_n_curves_to_point_list(n, mob.points)
-                # TODO, this should happen in insert_n_curves_to_point_list
+                # TODO.md, this should happen in insert_n_curves_to_point_list
                 if mob.has_new_path_started():
                     new_points = np.vstack([new_points, mob.get_last_point()])
                 mob.set_points(new_points)
@@ -1475,7 +1475,7 @@ class OpenGLVMobject(OpenGLMobject):
         super().set_data(data)
         return self
 
-    # TODO, how to be smart about tangents here?
+    # TODO.md, how to be smart about tangents here?
     @triggers_refreshed_triangulation
     def apply_function(self, function, make_smooth=False, **kwargs):
         super().apply_function(function, **kwargs)

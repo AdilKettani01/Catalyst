@@ -1,0 +1,37 @@
+#version 450
+// float_to_sortable.comp - Convert floats to sortable uint32 (handles negatives)
+// For radix sort: floats need to be converted to a format that preserves ordering
+// when sorted as unsigned integers.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer DataBuffer {
+    uint data[];
+};
+
+layout(push_constant) uniform Constants {
+    uint num_elements;
+    uint direction;  // 0 = float->sortable, 1 = sortable->float
+} constants;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= constants.num_elements) return;
+
+    uint val = data[idx];
+
+    if (constants.direction == 0) {
+        // Float to sortable:
+        // For positive floats: flip the sign bit (0x80000000)
+        // For negative floats: flip all bits
+        // This makes the values sortable as unsigned integers
+        uint mask = uint(-int(val >> 31)) | 0x80000000u;
+        data[idx] = val ^ mask;
+    } else {
+        // Sortable to float: reverse the transformation
+        // If MSB is set, it was originally positive: flip only sign bit
+        // If MSB is clear, it was originally negative: flip all bits
+        uint mask = ((val >> 31) - 1) | 0x80000000u;
+        data[idx] = val ^ mask;
+    }
+}

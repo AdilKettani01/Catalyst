@@ -497,7 +497,7 @@ class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
         super().__init__(**kwargs)
 
     def generate_points(self) -> None:
-        # TODO: cache mobject in a re-importable way
+        # TODO.md: cache mobject in a re-importable way
 
         self.handle_commands()
 

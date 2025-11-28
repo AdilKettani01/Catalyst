@@ -62,6 +62,10 @@ public:
         const std::array<math::Vec3, 2>& anchors,
         const std::array<math::Vec3, 2>& handles
     );
+    void add_cubic_bezier_curve(const math::Vec3& p0, const math::Vec3& p1,
+                                const math::Vec3& p2, const math::Vec3& p3) {
+        add_cubic_bezier_curve({p0, p3}, {p1, p2});
+    }
 
     /**
      * @brief Add a line segment (straight Bezier curve)
@@ -72,6 +76,11 @@ public:
      * @brief Start a new subpath
      */
     void start_new_path(const math::Vec3& point);
+
+    void set_points_smoothly(const std::vector<math::Vec3>& points) {
+        set_points(points);
+        make_smooth();
+    }
 
     /**
      * @brief Close current path (connect last point to first)
@@ -105,6 +114,7 @@ public:
      * @brief Get tessellated vertices (after GPU evaluation)
      */
     const std::vector<math::Vec3>& get_tessellated_points() const;
+    void ensure_tessellation(uint32_t segments_per_curve);
 
     /**
      * @brief Update GPU buffers with current curve data
@@ -217,6 +227,40 @@ public:
     GPUStrokeData get_gpu_stroke_data() const;
     GPUFillData get_gpu_fill_data() const;
 
+    /**
+     * @brief Build fill geometry (world-space) using tessellated outline
+     */
+    void build_fill_geometry(const math::Mat4& world_transform,
+                             uint32_t segments_per_curve,
+                             std::vector<math::Vec3>& out_vertices,
+                             std::vector<uint32_t>& out_indices);
+
+    /**
+     * @brief Build stroke geometry (world-space quads) using tessellated outline
+     * @param stroke_width_world_override If > 0, use this as stroke width in world units
+     *        instead of stroke_width_ (useful for pixel-to-world conversion)
+     */
+    void build_stroke_geometry(const math::Mat4& world_transform,
+                               uint32_t segments_per_curve,
+                               std::vector<math::Vec3>& out_vertices,
+                               std::vector<uint32_t>& out_indices,
+                               float stroke_width_world_override = -1.0f);
+
+    // GPU buffers for fill/stroke (cached across frames)
+    void update_gpu_fill_buffers(MemoryPool& pool, const math::Mat4& world_transform);
+    void update_gpu_stroke_buffers(MemoryPool& pool, const math::Mat4& world_transform);
+
+    bool has_fill_buffers() const { return fill_vertex_buffer_.has_value() && fill_index_buffer_.has_value(); }
+    bool has_stroke_buffers() const { return stroke_vertex_buffer_.has_value() && stroke_index_buffer_.has_value(); }
+
+    const GPUBuffer* fill_vertex_buffer() const { return fill_vertex_buffer_ ? &(*fill_vertex_buffer_) : nullptr; }
+    const GPUBuffer* fill_index_buffer() const { return fill_index_buffer_ ? &(*fill_index_buffer_) : nullptr; }
+    uint32_t fill_index_count() const { return static_cast<uint32_t>(fill_indices_count_); }
+
+    const GPUBuffer* stroke_vertex_buffer() const { return stroke_vertex_buffer_ ? &(*stroke_vertex_buffer_) : nullptr; }
+    const GPUBuffer* stroke_index_buffer() const { return stroke_index_buffer_ ? &(*stroke_index_buffer_) : nullptr; }
+    uint32_t stroke_index_count() const { return static_cast<uint32_t>(stroke_indices_count_); }
+
     // Override copy from base class
     Ptr copy() const override;  // Implemented in vmobject.cpp
 
@@ -239,6 +283,15 @@ protected:
     std::optional<GPUBuffer> bezier_control_points_buffer_;
     std::optional<GPUBuffer> tessellated_vertices_buffer_;
     bool tessellation_dirty_{true};
+    uint32_t tessellation_segments_{8};
+
+    // Cached GPU buffers for rendering
+    std::optional<GPUBuffer> fill_vertex_buffer_;
+    std::optional<GPUBuffer> fill_index_buffer_;
+    std::optional<GPUBuffer> stroke_vertex_buffer_;
+    std::optional<GPUBuffer> stroke_index_buffer_;
+    size_t fill_indices_count_ = 0;
+    size_t stroke_indices_count_ = 0;
 
 private:
     // Fill properties

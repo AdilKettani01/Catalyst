@@ -296,7 +296,7 @@ class ImageMobject(AbstractImageMobject):
         }
 
 
-# TODO, add the ability to have the dimensions/orientation of this
+# TODO.md, add the ability to have the dimensions/orientation of this
 # mobject more strongly tied to the frame of the camera it contains,
 # in the case where that's a MovingCamera
 
@@ -319,7 +319,7 @@ class ImageMobjectFromCamera(AbstractImageMobject):
         self.pixel_array = self.camera.pixel_array
         super().__init__(scale_to_resolution=False, **kwargs)
 
-    # TODO: Get rid of this.
+    # TODO.md: Get rid of this.
     def get_pixel_array(self):
         self.pixel_array = self.camera.pixel_array
         return self.pixel_array

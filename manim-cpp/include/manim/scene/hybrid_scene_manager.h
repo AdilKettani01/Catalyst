@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include "manim/scene/scene.h"
 
 namespace manim {
 
@@ -78,6 +79,28 @@ class HybridSceneManager {
 public:
     HybridSceneManager();
     ~HybridSceneManager();
+
+    enum class DistributionStrategy {
+        Auto,      // Automatic based on workload
+        CPUOnly,   // Force CPU rendering
+        GPUOnly,   // Force GPU rendering
+        Balanced   // Manual 50/50 split
+    };
+
+    struct PerformanceMetrics {
+        float cpu_usage = 0.0f;
+        float gpu_usage = 0.0f;
+        float frame_time = 0.0f;
+        uint32_t draw_calls = 0;
+        uint32_t triangles = 0;
+    };
+
+    void add_scene(std::shared_ptr<Scene> scene);
+    void remove_scene(std::shared_ptr<Scene> scene);
+    void update(float dt);
+    void render();
+    void set_distribution_strategy(DistributionStrategy strategy);
+    PerformanceMetrics get_metrics() const;
 
     // Disable copy, enable move
     HybridSceneManager(const HybridSceneManager&) = delete;
@@ -252,6 +275,9 @@ private:
     };
 
     PerformanceStats performanceStats;
+    std::vector<std::shared_ptr<Scene>> scenes_;
+    DistributionStrategy strategy_ = DistributionStrategy::Auto;
+    PerformanceMetrics metrics_{};
 
     // Configuration
     float targetCPULoad;
@@ -275,6 +301,9 @@ private:
     bool shouldOffloadToGPU(const ComplexityMetrics& metrics) const;
     void initializeWorkerThreads();
     void shutdownWorkerThreads();
+    void distribute_workload();
+    void process_cpu_tasks();
+    void process_gpu_tasks();
 };
 
 /**
@@ -294,7 +323,7 @@ public:
     /**
      * @brief Override render to use hybrid manager
      */
-    bool render(bool preview = false) override;
+    bool render(bool preview = false);
 
     /**
      * @brief Get hybrid scene manager

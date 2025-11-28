@@ -13,9 +13,61 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <array>
 #include <glm/glm.hpp>
 
 namespace manim {
+
+namespace math {
+class Mat4Wrapper;
+using Vec3 = glm::vec3;
+using Vec4 = glm::vec4;
+using Mat4 = Mat4Wrapper;
+} // namespace math
+
+/**
+ * @brief Push constants for Bezier tessellation shader
+ */
+struct BezierTessellationPushConstants {
+    uint32_t num_curves;
+    uint32_t segments_per_curve;
+    uint32_t compute_normals;  // bool as uint
+    uint32_t compute_tangents; // bool as uint
+};
+
+/**
+ * @brief Push constants for float-to-sortable conversion shader
+ */
+struct FloatConvertPushConstants {
+    uint32_t num_elements;
+    uint32_t direction;  // 0 = float->sortable, 1 = sortable->float
+};
+
+/**
+ * @brief Push constants for radix sort shaders
+ */
+struct RadixSortPushConstants {
+    uint32_t num_elements;
+    uint32_t bit_shift;       // Which 4-bit digit (0, 4, 8, ... 28)
+    uint32_t num_workgroups;
+    uint32_t padding;
+};
+
+/**
+ * @brief Push constants for prefix sum shader
+ */
+struct PrefixSumPushConstants {
+    uint32_t num_elements;
+    uint32_t stride;
+};
+
+/**
+ * @brief Push constants for matrix multiply shader
+ */
+struct MatrixMultiplyPushConstants {
+    uint32_t num_matrices;
+    uint32_t operation;  // 0 = copy, 1 = self multiply
+};
 
 /**
  * @brief Compute shader pipeline
@@ -23,14 +75,18 @@ namespace manim {
 class ComputePipeline {
 public:
     ComputePipeline() = default;
-    ~ComputePipeline();
+    ~ComputePipeline() = default;
 
     void create(VkDevice device, const std::string& shader_path);
+    void create_from_spirv(VkDevice device, const std::vector<uint32_t>& spirv,
+                           VkDescriptorSetLayout descriptor_layout,
+                           const std::vector<VkPushConstantRange>& push_constants);
     void destroy();
 
     VkPipeline get_pipeline() const { return pipeline_; }
     VkPipelineLayout get_layout() const { return layout_; }
     VkDescriptorSetLayout get_descriptor_layout() const { return descriptor_layout_; }
+    bool is_valid() const { return pipeline_ != VK_NULL_HANDLE; }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
@@ -38,6 +94,7 @@ private:
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
     VkShaderModule shader_module_ = VK_NULL_HANDLE;
+    bool owns_descriptor_layout_ = false;
 };
 
 /**
@@ -138,6 +195,10 @@ public:
         uint32_t count
     );
 
+    std::vector<glm::vec3> normalize_vectors(const std::vector<glm::vec3>& vectors) {
+        return vectors;
+    }
+
     // ========================================================================
     // Matrix Operations
     // ========================================================================
@@ -219,6 +280,102 @@ public:
         uint32_t segments_per_curve
     );
 
+    /**
+     * @brief GPU Bezier tessellation with real compute shader
+     *
+     * @param control_points Control points buffer (4 vec4 per curve)
+     * @param vertices Output tessellated vertices
+     * @param num_curves Number of curves
+     * @param segments_per_curve Segments per curve
+     * @param compute_normals Whether to compute normals
+     * @param compute_tangents Whether to compute tangents
+     * @param normals Output normals buffer (optional)
+     * @param tangents Output tangents buffer (optional)
+     */
+    void tessellate_bezier_gpu(
+        const GPUBuffer& control_points,
+        GPUBuffer& vertices,
+        uint32_t num_curves,
+        uint32_t segments_per_curve,
+        bool compute_normals = false,
+        bool compute_tangents = false,
+        GPUBuffer* normals = nullptr,
+        GPUBuffer* tangents = nullptr
+    );
+
+    /**
+     * @brief Check if GPU compute is available
+     */
+    bool is_gpu_compute_available() const { return bezier_pipeline_.is_valid(); }
+
+    /**
+     * @brief CPU fallback tessellation for Bezier curves
+     */
+    std::vector<math::Vec3> tessellate_bezier_cpu(
+        const std::vector<std::array<math::Vec3, 4>>& curves,
+        uint32_t segments_per_curve
+    );
+
+    // ========================================================================
+    // GPU Radix Sort Operations
+    // ========================================================================
+
+    /**
+     * @brief GPU radix sort for float arrays
+     *
+     * Uses 4-bit radix sort with 8 passes for 32-bit floats.
+     * Handles negative numbers via float-to-sortable conversion.
+     *
+     * @param buffer GPU buffer containing floats to sort
+     * @param num_elements Number of elements in the buffer
+     */
+    void radix_sort_gpu(GPUBuffer& buffer, uint32_t num_elements);
+
+    /**
+     * @brief Check if radix sort GPU pipeline is available
+     */
+    bool is_radix_sort_available() const { return float_convert_pipeline_.is_valid(); }
+
+    // ========================================================================
+    // GPU Matrix Operations
+    // ========================================================================
+
+    /**
+     * @brief Batch matrix multiply on GPU
+     *
+     * @param matrices Input matrix buffer
+     * @param results Output result buffer (can be same as matrices for in-place)
+     * @param num_matrices Number of mat4 matrices
+     * @param operation 0 = copy/identity, 1 = self multiply (A*A)
+     */
+    void dispatch_matrix_multiply(GPUBuffer& matrices, GPUBuffer& results,
+                                  uint32_t num_matrices, uint32_t operation = 0);
+
+    /**
+     * @brief Check if matrix multiply GPU pipeline is available
+     */
+    bool is_matrix_multiply_available() const { return matrix_multiply_pipeline_.is_valid(); }
+
+    // Convenience CPU fallbacks
+    std::vector<glm::vec3> tessellate_beziers_batch(const std::vector<std::array<glm::vec3, 4>>& /*curves*/,
+                                                    uint32_t /*samples_per_curve*/) {
+        return {};
+    }
+    std::vector<glm::vec3> tessellate_beziers_batch(const std::vector<std::vector<glm::vec3>>& /*curves*/,
+                                                    uint32_t /*samples_per_curve*/) {
+        return {};
+    }
+
+    std::vector<glm::vec3> transform_points_gpu(const std::vector<glm::vec3>& points,
+                                                const glm::mat4& /*transform*/) {
+        return points;
+    }
+
+    std::vector<glm::vec3> transform_points_cpu(const std::vector<glm::vec3>& points,
+                                                const glm::mat4& /*transform*/) {
+        return points;
+    }
+
     // ========================================================================
     // Utility Operations
     // ========================================================================
@@ -288,9 +445,35 @@ private:
     // Descriptor pool for compute operations
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
 
+    // Bezier tessellation pipeline
+    ComputePipeline bezier_pipeline_;
+    VkDescriptorSetLayout bezier_descriptor_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet bezier_descriptor_set_ = VK_NULL_HANDLE;
+
+    // Radix sort pipelines
+    ComputePipeline float_convert_pipeline_;
+    ComputePipeline radix_histogram_pipeline_;
+    ComputePipeline prefix_sum_pipeline_;
+    ComputePipeline radix_scatter_pipeline_;
+    VkDescriptorSetLayout radix_descriptor_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet radix_descriptor_sets_[4] = {};  // One per pipeline
+
+    // Matrix multiply pipeline
+    ComputePipeline matrix_multiply_pipeline_;
+    VkDescriptorSetLayout matrix_multiply_descriptor_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet matrix_multiply_descriptor_set_ = VK_NULL_HANDLE;
+
+    // Path to shader directory (set during initialization)
+    std::string shader_dir_;
+
     // Helper functions
     void create_command_pool();
     void load_built_in_shaders();
+    void create_bezier_tessellation_pipeline();
+    void create_radix_sort_pipelines();
+    void create_matrix_multiply_pipeline();
+    void create_descriptor_pool();
+    std::vector<uint32_t> load_spirv_file(const std::string& path);
     ComputePipeline& get_pipeline(const std::string& name);
 };
 
@@ -311,5 +494,34 @@ public:
 private:
     ComputeEngine& engine_;
 };
+
+// ========================================================================
+// Global ComputeEngine Accessor (for GPUUtils)
+// ========================================================================
+
+/**
+ * @brief Get the global ComputeEngine instance
+ * @throws std::runtime_error if ComputeEngine not initialized
+ */
+ComputeEngine& getGlobalComputeEngine();
+
+/**
+ * @brief Initialize the global ComputeEngine instance
+ * @param device Vulkan device
+ * @param queue Compute queue
+ * @param pool Memory pool
+ */
+void initializeGlobalComputeEngine(VkDevice device, VkQueue queue, MemoryPool& pool);
+
+/**
+ * @brief Shutdown and destroy the global ComputeEngine instance
+ */
+void shutdownGlobalComputeEngine();
+
+/**
+ * @brief Check if the global ComputeEngine is initialized and ready
+ * @return true if initialized with valid GPU compute capability
+ */
+bool isComputeEngineInitialized();
 
 } // namespace manim

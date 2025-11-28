@@ -17,7 +17,7 @@ def _make_test_scene_class(
     construct_test: Callable[[Scene], None],
     test_renderer: CairoRenderer | OpenGLRenderer | None,
 ) -> type[Scene]:
-    # TODO: Get the type annotation right for the base_scene argument.
+    # TODO.md: Get the type annotation right for the base_scene argument.
     class _TestedScene(base_scene):  # type: ignore[valid-type, misc]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, renderer=test_renderer, **kwargs)

@@ -35,6 +35,26 @@ PI = manim_cpp.PI
 TAU = manim_cpp.TAU
 DEGREES = manim_cpp.DEGREES
 
+# Vector3 alias
+Vector3 = manim_cpp.Vector3
+
+# Color constants
+RED = manim_cpp.RED
+GREEN = manim_cpp.GREEN
+BLUE = manim_cpp.BLUE
+YELLOW = manim_cpp.YELLOW
+PURPLE = manim_cpp.PURPLE
+ORANGE = manim_cpp.ORANGE
+WHITE = manim_cpp.WHITE
+BLACK = manim_cpp.BLACK
+GREY = manim_cpp.GREY
+GRAY = manim_cpp.GRAY
+PINK = manim_cpp.PINK
+TEAL = manim_cpp.TEAL
+
+# Color class
+Color = manim_cpp.Color
+
 # ==================== Export mobject classes ====================
 
 # Base mobjects
@@ -47,12 +67,29 @@ Dot = manim_cpp.Dot
 Ellipse = manim_cpp.Ellipse
 Arc = manim_cpp.Arc
 Annulus = manim_cpp.Annulus
+Rectangle = manim_cpp.Rectangle
+Square = manim_cpp.Square
+Polygon = manim_cpp.Polygon
+
+# Point cloud mobjects
+PointCloudMobject = manim_cpp.PointCloudMobject
+PMobject = manim_cpp.PMobject  # Alias
+BillboardMode = manim_cpp.BillboardMode
 
 # Constants
 DEFAULT_DOT_RADIUS = manim_cpp.DEFAULT_DOT_RADIUS
 
+# Text mobjects
+Text = manim_cpp.Text
+Tex = manim_cpp.Tex
+MathTex = manim_cpp.MathTex
+TextWeight = manim_cpp.TextWeight
+TextAlignment = manim_cpp.TextAlignment
+
 # 3D mobjects
-Mesh = manim_cpp.Mesh
+GPUMesh = manim_cpp.GPUMesh
+Mesh = manim_cpp.Mesh  # Alias
+Sphere = manim_cpp.Sphere
 Surface = manim_cpp.Surface
 Volume = manim_cpp.Volume
 
@@ -89,6 +126,20 @@ MoveToTarget = manim_cpp.MoveToTarget
 ApplyFunction = manim_cpp.ApplyFunction
 ApplyMatrix = manim_cpp.ApplyMatrix
 ApplyComplexFunction = manim_cpp.ApplyComplexFunction
+
+# Animation composition
+AnimationGroup = manim_cpp.AnimationGroup
+Succession = manim_cpp.Succession
+LaggedStart = manim_cpp.LaggedStart
+
+# Movement animations
+MoveAlongPath = manim_cpp.MoveAlongPath
+MoveTo = manim_cpp.MoveTo
+Shift = manim_cpp.Shift
+Homotopy = manim_cpp.Homotopy
+ComplexHomotopy = manim_cpp.ComplexHomotopy
+ApplyPointwiseFunction = manim_cpp.ApplyPointwiseFunction
+ApplyComplexPointwiseFunction = manim_cpp.ApplyComplexPointwiseFunction
 
 # ==================== Export scene classes ====================
 
@@ -136,6 +187,23 @@ get_config = manim_cpp.get_config
 check_gpu_available = manim_cpp.check_gpu_available
 get_gpu_info = manim_cpp.get_gpu_info
 
+# ==================== Culling/Optimization API ====================
+
+# Culling submodule
+culling = manim_cpp.culling
+
+# ==================== GPU Utilities ====================
+
+# GPU types
+GPUDeviceInfo = manim_cpp.GPUDeviceInfo
+PBRMaterial = manim_cpp.PBRMaterial
+GPUParticleSystem = manim_cpp.GPUParticleSystem
+ParticleEmitterConfig = manim_cpp.ParticleEmitterConfig
+
+# GPU utility functions
+transform_points_gpu = manim_cpp.transform_points_gpu
+rotation_matrix = manim_cpp.rotation_matrix
+
 # ==================== Version and metadata ====================
 
 __version__ = manim_cpp.__version__
@@ -156,7 +224,7 @@ DL = Vec3(-1, -1, 0)
 
 __all__ = [
     # Core types
-    'Vec3', 'Vec4', 'Mat4',
+    'Vec3', 'Vec4', 'Mat4', 'Vector3', 'Color',
 
     # Constants
     'ORIGIN', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'IN', 'OUT',
@@ -164,10 +232,17 @@ __all__ = [
     'PI', 'TAU', 'DEGREES',
     'DEFAULT_DOT_RADIUS',
 
+    # Color constants
+    'RED', 'GREEN', 'BLUE', 'YELLOW', 'PURPLE', 'ORANGE',
+    'WHITE', 'BLACK', 'GREY', 'GRAY', 'PINK', 'TEAL',
+
     # Mobjects
     'Mobject', 'VMobject',
     'Circle', 'Dot', 'Ellipse', 'Arc', 'Annulus',
-    'Mesh', 'Surface', 'Volume',
+    'Rectangle', 'Square', 'Polygon',
+    'PointCloudMobject', 'PMobject', 'BillboardMode',
+    'Text', 'Tex', 'MathTex', 'TextWeight', 'TextAlignment',
+    'GPUMesh', 'Mesh', 'Sphere', 'Surface', 'Volume',
 
     # Animations
     'Animation',
@@ -179,11 +254,15 @@ __all__ = [
     'Transform', 'ReplacementTransform', 'TransformFromCopy',
     'ClockwiseTransform', 'CounterclockwiseTransform', 'MoveToTarget',
     'ApplyFunction', 'ApplyMatrix', 'ApplyComplexFunction',
+    'AnimationGroup', 'Succession', 'LaggedStart',
+    'MoveAlongPath', 'MoveTo', 'Shift',
+    'Homotopy', 'ComplexHomotopy',
+    'ApplyPointwiseFunction', 'ApplyComplexPointwiseFunction',
 
     # Scenes
     'Scene', 'ThreeDScene', 'GPU3DScene', 'MovingCameraScene',
     'VectorSpaceScene', 'ZoomedScene',
-    'Light', 'LightType',
+    'Light', 'LightType', 'PBRMaterial',
 
     # Utilities
     'bezier', 'color', 'rate_functions',
@@ -192,7 +271,15 @@ __all__ = [
 
     # Configuration
     'GPUBackend', 'QualityPreset', 'RenderConfig', 'GPUDetector',
+    'GPUDeviceInfo',
     'get_config', 'check_gpu_available', 'get_gpu_info',
+
+    # Culling/Optimization
+    'culling',
+
+    # GPU utilities
+    'GPUParticleSystem', 'ParticleEmitterConfig',
+    'transform_points_gpu', 'rotation_matrix',
 
     # Metadata
     '__version__', '__gpu_enabled__',

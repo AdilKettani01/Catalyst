@@ -110,7 +110,7 @@ def video_comparison(
                         raise AssertionError(
                             f"'{parent.name}' does not exist in '{parent.parent}' (which exists). ",
                         )
-            # TODO: use when pytest --set_test option
+            # TODO.md: use when pytest --set_test option
             # save_control_data_from_video(path_video_gen, control_data_file.stem)
             check_video_data(path_control_data, path_video_gen)
             return result

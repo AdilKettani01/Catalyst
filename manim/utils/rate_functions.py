@@ -114,7 +114,7 @@ import numpy as np
 from manim.utils.simple_functions import sigmoid
 
 
-# TODO: rewrite this to use ParamSpec when Python 3.9 is out of life
+# TODO.md: rewrite this to use ParamSpec when Python 3.9 is out of life
 class RateFunction(Protocol):
     def __call__(self, t: float, *args: Any, **kwargs: Any) -> float: ...
 
@@ -302,7 +302,7 @@ def lingering(t: float) -> float:
     def identity(t: float) -> float:
         return t
 
-    # TODO: Isn't this just 0.8 * t?
+    # TODO.md: Isn't this just 0.8 * t?
     return squish_rate_func(identity, 0, 0.8)(t)
 
 

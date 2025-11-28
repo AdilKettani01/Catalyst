@@ -247,11 +247,11 @@ GPUBezierEvaluator::GPUBezierEvaluator()
     , descriptorSet(VK_NULL_HANDLE)
 {
     std::cout << "GPU Bezier evaluator initialized" << std::endl;
-    // TODO: Initialize Vulkan resources
+    // TODO.md: Initialize Vulkan resources
 }
 
 GPUBezierEvaluator::~GPUBezierEvaluator() {
-    // TODO: Cleanup Vulkan resources
+    // TODO.md: Cleanup Vulkan resources
 }
 
 std::vector<Vec3> GPUBezierEvaluator::evaluateBatch(
@@ -260,7 +260,7 @@ std::vector<Vec3> GPUBezierEvaluator::evaluateBatch(
 ) {
     std::cout << "GPU batch evaluation of " << curves.size() << " curves" << std::endl;
 
-    // TODO: Implement GPU batch evaluation
+    // TODO.md: Implement GPU batch evaluation
     // For now, fallback to CPU
     return Bezier::evaluateBatch(curves, t_values);
 }
@@ -272,7 +272,7 @@ std::vector<Vec3> GPUBezierEvaluator::evaluateMultipleT(
     std::vector<Vec3> results;
     results.reserve(t_values.size());
 
-    // TODO: GPU implementation
+    // TODO.md: GPU implementation
     for (float t : t_values) {
         results.push_back(evaluate(controlPoints, t));
     }
@@ -287,7 +287,7 @@ std::vector<Vec3> GPUBezierEvaluator::derivativeBatch(
     std::vector<Vec3> results;
     results.reserve(curves.size());
 
-    // TODO: GPU implementation
+    // TODO.md: GPU implementation
     for (size_t i = 0; i < curves.size() && i < t_values.size(); ++i) {
         results.push_back(derivative(curves[i], t_values[i]));
     }
@@ -302,7 +302,7 @@ std::vector<std::vector<Vec3>> GPUBezierEvaluator::tessellateBatch(
     std::vector<std::vector<Vec3>> results;
     results.reserve(curves.size());
 
-    // TODO: GPU implementation
+    // TODO.md: GPU implementation
     for (const auto& curve : curves) {
         results.push_back(toPolyline(curve, pointsPerCurve));
     }
@@ -311,15 +311,15 @@ std::vector<std::vector<Vec3>> GPUBezierEvaluator::tessellateBatch(
 }
 
 void GPUBezierEvaluator::createBuffers(size_t maxCurves, size_t maxPoints) {
-    // TODO: Create Vulkan buffers
+    // TODO.md: Create Vulkan buffers
 }
 
 void GPUBezierEvaluator::createComputePipeline() {
-    // TODO: Create compute pipeline for Bezier evaluation
+    // TODO.md: Create compute pipeline for Bezier evaluation
 }
 
 void GPUBezierEvaluator::dispatchCompute(size_t numCurves, size_t numPoints) {
-    // TODO: Dispatch compute shader
+    // TODO.md: Dispatch compute shader
 }
 
 // ==================== Spline Functions ====================
@@ -378,7 +378,7 @@ std::vector<Vec3> bSpline(const std::vector<Vec3>& controlPoints,
                           size_t degree,
                           const std::vector<float>& knots,
                           const std::vector<float>& t_values) {
-    // TODO: Implement B-spline evaluation
+    // TODO.md: Implement B-spline evaluation
     std::vector<Vec3> results;
     results.reserve(t_values.size());
 

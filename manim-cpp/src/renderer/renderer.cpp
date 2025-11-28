@@ -13,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <chrono>
 
 namespace manim {
 
@@ -21,7 +22,6 @@ namespace manim {
 // ============================================================================
 
 Renderer::Renderer() = default;
-Renderer::~Renderer() = default;
 
 void Renderer::set_render_mode(RenderMode mode) {
     render_mode_ = mode;
@@ -47,7 +47,7 @@ bool Renderer::supports_mesh_shaders() const {
 }
 
 FrameStats Renderer::get_frame_stats() const {
-    return frame_stats_;
+    return stats_;
 }
 
 void Renderer::begin_frame_timing() {
@@ -58,11 +58,11 @@ void Renderer::end_frame_timing() {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - frame_timer_start_);
 
-    frame_stats_.frame_time_ms = duration.count() / 1000.0f;
-    frame_stats_.fps = 1000.0f / frame_stats_.frame_time_ms;
+    stats_.frame_time_ms = duration.count() / 1000.0f;
+    stats_.fps = 1000.0f / stats_.frame_time_ms;
 
     // Update frame counter
-    frame_stats_.frame_number++;
+    stats_.frame_number++;
 }
 
 // ============================================================================

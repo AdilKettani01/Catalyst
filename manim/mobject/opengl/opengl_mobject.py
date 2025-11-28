@@ -145,7 +145,7 @@ class OpenGLMobject:
         self,
         color: ParsableManimColor | Sequence[ParsableManimColor] = WHITE,
         opacity: float = 1,
-        dim: int = 3,  # TODO, get rid of this
+        dim: int = 3,  # TODO.md, get rid of this
         # Lighting parameters
         # Positive gloss up to 1 makes it reflect the light.
         gloss: float = 0.0,
@@ -174,7 +174,7 @@ class OpenGLMobject:
         )
 
         self.opacity: float | Iterable[float] = opacity
-        self.dim: int = dim  # TODO, get rid of this
+        self.dim: int = dim  # TODO.md, get rid of this
         # Lighting parameters
         # Positive gloss up to 1 makes it reflect the light.
         self.gloss = gloss
@@ -664,7 +664,7 @@ class OpenGLMobject:
         """
         return self.point_from_proportion(0.5)
 
-    # TODO: name is inconsistent with Mobject.apply_points_function_about_point()
+    # TODO.md: name is inconsistent with Mobject.apply_points_function_about_point()
     def apply_points_function(
         self,
         func: MultiMappingFunction,
@@ -1436,7 +1436,7 @@ class OpenGLMobject:
         if not shallow:
             return self.deepcopy()
 
-        # TODO, either justify reason for shallow copy, or
+        # TODO.md, either justify reason for shallow copy, or
         # remove this redundancy everywhere
         # return self.deepcopy()
 
@@ -1449,7 +1449,7 @@ class OpenGLMobject:
         for key in self.data:
             copy_mobject.data[key] = self.data[key].copy()
 
-        # TODO, are uniforms ever numpy arrays?
+        # TODO.md, are uniforms ever numpy arrays?
         copy_mobject.uniforms = dict(self.uniforms)
 
         copy_mobject.submobjects = []
@@ -2290,7 +2290,7 @@ class OpenGLMobject:
         opacity: float = 0.75,
         **kwargs: Any,
     ) -> Self:
-        # TODO, this does not behave well when the mobject has points,
+        # TODO.md, this does not behave well when the mobject has points,
         # since it gets displayed on top
         """Add a BackgroundRectangle as submobject.
 
@@ -2479,7 +2479,7 @@ class OpenGLMobject:
         )
 
     def get_z_index_reference_point(self) -> Point3D:
-        # TODO, better place to define default z_index_group?
+        # TODO.md, better place to define default z_index_group?
         z_index_group = getattr(self, "z_index_group", self)
         return z_index_group.get_center()
 
@@ -2857,7 +2857,7 @@ class OpenGLMobject:
     # Shader code manipulation
 
     def replace_shader_code(self, old_code: str, new_code: str) -> Self:
-        # TODO, will this work with VMobject structure, given
+        # TODO.md, will this work with VMobject structure, given
         # that it does not simpler return shader_wrappers of
         # family?
         for wrapper in self.get_shader_wrapper_list():
@@ -2885,11 +2885,11 @@ class OpenGLMobject:
         Pass in a glsl expression in terms of x, y and z which returns
         a float.
         """
-        # TODO, add a version of this which changes the point data instead
+        # TODO.md, add a version of this which changes the point data instead
         # of the shader code
         for char in "xyz":
             glsl_snippet = glsl_snippet.replace(char, "point." + char)
-        # TODO: get_colormap_list does not exist
+        # TODO.md: get_colormap_list does not exist
         #   See https://github.com/ManimCommunity/manim/issues/4176
         rgb_list = get_colormap_list(colormap)  # type: ignore[name-defined]
         self.set_color_by_code(

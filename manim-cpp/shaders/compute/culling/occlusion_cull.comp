@@ -1,0 +1,165 @@
+#version 450
+
+// Occlusion culling using Hierarchical Z-buffer (Hi-Z)
+// Tests object bounding boxes against depth pyramid for visibility
+// Conservative test: object is visible if ANY part might be visible
+
+layout(local_size_x = 256) in;
+
+// Object bounds (must match CPU structure)
+struct ObjectBounds {
+    vec4 aabb_min;      // xyz = min corner, w = unused
+    vec4 aabb_max;      // xyz = max corner, w = unused
+    vec4 sphere;        // xyz = center, w = radius (stores object_id)
+};
+
+// Input: Object bounds
+layout(std430, binding = 0) readonly buffer ObjectBoundsBuffer {
+    ObjectBounds objects[];
+};
+
+// Input: Frustum-visible indices (from frustum cull pass)
+layout(std430, binding = 1) readonly buffer FrustumVisibleIndices {
+    uint frustum_visible[];
+};
+
+// Output: Final visible indices (after occlusion)
+layout(std430, binding = 2) writeonly buffer FinalVisibleIndices {
+    uint final_visible[];
+};
+
+// Output: Atomic counter for compaction
+layout(std430, binding = 3) buffer AtomicCounter {
+    uint visible_count;
+};
+
+// Hi-Z depth pyramid
+layout(binding = 4) uniform sampler2D hiz_pyramid;
+
+// View-projection matrix for screen-space projection
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    vec2 screen_size;
+    uint num_frustum_visible;
+    uint hiz_mip_levels;
+} pc;
+
+// Project world-space point to clip space, return NDC.xy and depth
+vec3 project_point(vec3 world_pos) {
+    vec4 clip = pc.view_proj * vec4(world_pos, 1.0);
+    // Perspective divide
+    vec3 ndc = clip.xyz / clip.w;
+    return ndc;
+}
+
+// Get appropriate mip level based on projected screen size
+uint select_mip_level(vec2 screen_extent) {
+    // Select mip where one texel covers approximately the object's screen size
+    float max_extent = max(screen_extent.x, screen_extent.y);
+    // mip 0 = full res, each level is half
+    uint mip = uint(max(0.0, log2(max_extent)));
+    return min(mip, pc.hiz_mip_levels - 1);
+}
+
+// Sample Hi-Z at specific mip level
+float sample_hiz(vec2 uv, uint mip) {
+    return textureLod(hiz_pyramid, uv, float(mip)).r;
+}
+
+// Test if AABB is occluded by depth buffer
+// Returns true if potentially visible, false if definitely occluded
+bool test_occlusion(vec3 aabb_min, vec3 aabb_max) {
+    // Project all 8 corners of AABB to screen space
+    vec3 corners[8];
+    corners[0] = vec3(aabb_min.x, aabb_min.y, aabb_min.z);
+    corners[1] = vec3(aabb_max.x, aabb_min.y, aabb_min.z);
+    corners[2] = vec3(aabb_min.x, aabb_max.y, aabb_min.z);
+    corners[3] = vec3(aabb_max.x, aabb_max.y, aabb_min.z);
+    corners[4] = vec3(aabb_min.x, aabb_min.y, aabb_max.z);
+    corners[5] = vec3(aabb_max.x, aabb_min.y, aabb_max.z);
+    corners[6] = vec3(aabb_min.x, aabb_max.y, aabb_max.z);
+    corners[7] = vec3(aabb_max.x, aabb_max.y, aabb_max.z);
+
+    // Find screen-space bounding box and nearest depth
+    vec2 screen_min = vec2(1e10);
+    vec2 screen_max = vec2(-1e10);
+    float nearest_depth = 1.0;  // Start with farthest (1.0 in standard depth)
+    bool any_in_front = false;
+
+    for (int i = 0; i < 8; i++) {
+        vec3 ndc = project_point(corners[i]);
+
+        // Check if point is in front of camera
+        if (ndc.z > 0.0 && ndc.z < 1.0) {
+            any_in_front = true;
+
+            // Convert NDC to [0,1] UV coordinates
+            vec2 uv = ndc.xy * 0.5 + 0.5;
+            screen_min = min(screen_min, uv);
+            screen_max = max(screen_max, uv);
+
+            // Track nearest depth (smallest z in standard depth buffer)
+            nearest_depth = min(nearest_depth, ndc.z);
+        }
+    }
+
+    // If no corner is in front of camera, conservatively assume visible
+    // (object might be very close, straddling near plane)
+    if (!any_in_front) {
+        return true;
+    }
+
+    // Clamp screen bounds to valid range
+    screen_min = clamp(screen_min, vec2(0.0), vec2(1.0));
+    screen_max = clamp(screen_max, vec2(0.0), vec2(1.0));
+
+    // Compute screen-space extent in pixels
+    vec2 screen_extent = (screen_max - screen_min) * pc.screen_size;
+
+    // If object covers entire screen, it's definitely visible
+    if (screen_extent.x >= pc.screen_size.x || screen_extent.y >= pc.screen_size.y) {
+        return true;
+    }
+
+    // Select appropriate mip level
+    uint mip = select_mip_level(screen_extent);
+
+    // Sample Hi-Z at corners of screen-space bounding box
+    // Use maximum depth from all samples (conservative)
+    float hiz_depth = 0.0;
+    hiz_depth = max(hiz_depth, sample_hiz(screen_min, mip));
+    hiz_depth = max(hiz_depth, sample_hiz(vec2(screen_max.x, screen_min.y), mip));
+    hiz_depth = max(hiz_depth, sample_hiz(vec2(screen_min.x, screen_max.y), mip));
+    hiz_depth = max(hiz_depth, sample_hiz(screen_max, mip));
+
+    // Sample center as well for better accuracy
+    vec2 screen_center = (screen_min + screen_max) * 0.5;
+    hiz_depth = max(hiz_depth, sample_hiz(screen_center, mip));
+
+    // Object is occluded if its nearest point is farther than the depth buffer
+    // (standard depth: smaller = closer)
+    return nearest_depth <= hiz_depth;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= pc.num_frustum_visible) {
+        return;
+    }
+
+    // Get original object index from frustum-visible list
+    uint obj_idx = frustum_visible[idx];
+
+    // Load object bounds
+    ObjectBounds obj = objects[obj_idx];
+
+    // Test occlusion
+    bool visible = test_occlusion(obj.aabb_min.xyz, obj.aabb_max.xyz);
+
+    if (visible) {
+        // Atomically add to visible list
+        uint slot = atomicAdd(visible_count, 1);
+        final_visible[slot] = obj_idx;
+    }
+}

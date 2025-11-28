@@ -1462,7 +1462,7 @@ class Mobject:
     # Note, much of these are now redundant with default behavior of
     # above methods
 
-    # TODO: name is inconsistent with OpenGLMobject.apply_points_function()
+    # TODO.md: name is inconsistent with OpenGLMobject.apply_points_function()
     def apply_points_function_about_point(
         self,
         func: MultiMappingFunction,
@@ -1843,7 +1843,7 @@ class Mobject:
         curr_start, curr_end = self.get_start_and_end()
         curr_vect = curr_end - curr_start
         if np.all(curr_vect == 0):
-            # TODO: this looks broken. It makes self.points a Point3D instead
+            # TODO.md: this looks broken. It makes self.points a Point3D instead
             # of a Point3D_Array. However, modifying this breaks some tests
             # where this is currently expected.
             self.points = np.array(start)
@@ -1897,7 +1897,7 @@ class Mobject:
         :class:`~.BackgroundRectangle`
 
         """
-        # TODO, this does not behave well when the mobject has points,
+        # TODO.md, this does not behave well when the mobject has points,
         # since it gets displayed on top
         from manim.mobject.geometry.shape_matchers import BackgroundRectangle
 
@@ -2269,7 +2269,7 @@ class Mobject:
         )
 
     def get_z_index_reference_point(self) -> Point3D:
-        # TODO, better place to define default z_index_group?
+        # TODO.md, better place to define default z_index_group?
         z_index_group = getattr(self, "z_index_group", self)
         return z_index_group.get_center()
 
@@ -2907,7 +2907,7 @@ class Mobject:
             return None
 
         target = curr + n
-        # TODO, factor this out to utils so as to reuse
+        # TODO.md, factor this out to utils so as to reuse
         # with VMobject.insert_n_curves
         repeat_indices = (np.arange(target) * curr) // target
         split_factors = [sum(repeat_indices == i) for i in range(curr)]

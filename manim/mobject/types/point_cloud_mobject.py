@@ -247,7 +247,7 @@ class PMobject(Mobject, metaclass=ConvertToOpenGL):
             setattr(self, attr, partial_array)
 
 
-# TODO, Make the two implementations below non-redundant
+# TODO.md, Make the two implementations below non-redundant
 class Mobject1D(PMobject, metaclass=ConvertToOpenGL):
     def __init__(self, density: int = DEFAULT_POINT_DENSITY_1D, **kwargs: Any) -> None:
         self.density = density

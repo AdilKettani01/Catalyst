@@ -27,6 +27,10 @@ struct GPUDeviceInfo {
     int computeUnits;
     int maxWorkGroupSize;
     float performanceScore;     // Relative performance (0-100)
+    // snake_case aliases for tests
+    size_t total_memory_mb = 0;
+    size_t available_memory_mb = 0;
+    float performance_score = 0.0f;
 
     std::string toString() const;
 };
@@ -137,11 +141,13 @@ public:
      * @brief Detect all GPUs in the system
      */
     void detectGPUs();
+    void detect_gpus() { detectGPUs(); }
 
     /**
      * @brief Check Vulkan support
      */
     void checkVulkanSupport();
+    void check_vulkan_support() { checkVulkanSupport(); }
 
     /**
      * @brief Check OpenGL support
@@ -189,6 +195,7 @@ public:
      * @brief Benchmark specific GPU
      */
     BenchmarkResults benchmarkDevice(int deviceIndex);
+    void benchmark_gpu(int deviceIndex) { benchmarkDevice(deviceIndex); }
 
     /**
      * @brief Quick benchmark (< 1 second)
@@ -206,6 +213,7 @@ public:
      * @brief Recommend optimal settings based on hardware
      */
     RenderConfig recommendSettings() const;
+    RenderConfig recommend_settings() const { return recommendSettings(); }
 
     /**
      * @brief Recommend GPU backend
@@ -226,10 +234,12 @@ public:
      * @brief Get recommended GPU device
      */
     int getRecommendedDevice() const;
+    int get_recommended_device() const { return getRecommendedDevice(); }
 
     // ==================== Getters ====================
 
     const std::vector<GPUDeviceInfo>& getGPUs() const { return gpus; }
+    const std::vector<GPUDeviceInfo>& get_gpus() const { return gpus; }
     const VulkanCapabilities& getVulkanCaps() const { return vulkanCaps; }
     const OpenGLCapabilities& getOpenGLCaps() const { return openglCaps; }
     const DirectX12Capabilities& getDX12Caps() const { return dx12Caps; }
@@ -248,6 +258,7 @@ public:
      * @brief Print full system report
      */
     void printSystemReport() const;
+    void print_system_report() const { printSystemReport(); }
 
     /**
      * @brief Print GPU information
@@ -263,6 +274,7 @@ public:
      * @brief Print benchmark results
      */
     void printBenchmarkResults() const;
+    void print_benchmark_results() const { printBenchmarkResults(); }
 
     /**
      * @brief Print recommendations
@@ -311,11 +323,6 @@ private:
 };
 
 /**
- * @brief Global GPU detector instance
- */
-GPUDetector& getGPUDetector();
-
-/**
  * @brief Perform health check
  */
 struct HealthCheckResult {
@@ -340,5 +347,8 @@ HealthCheckResult checkGPUHealth();
 HealthCheckResult checkVulkanHealth();
 HealthCheckResult checkDependenciesHealth();
 HealthCheckResult checkSystemHealth();
+
+GPUDetector& getGPUDetector();
+HealthCheckResult runHealthCheck();
 
 } // namespace manim

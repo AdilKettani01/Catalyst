@@ -178,7 +178,7 @@ class ParametricFunction(VMobject, metaclass=ConvertToOpenGL):
             self.start_new_path(points[0])
             self.add_points_as_corners(points[1:])
         if self.use_smoothing:
-            # TODO: not in line with upstream, approx_smooth does not exist
+            # TODO.md: not in line with upstream, approx_smooth does not exist
             self.make_smooth()
         return self
 

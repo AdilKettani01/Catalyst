@@ -130,7 +130,28 @@ build/
 dist/
 
 /media_dir.txt
-# ^TODO: Remove the need for this with a proper config file
+# ^TODO.md: Remove the need for this with a proper config file
 
 # Ignore the built dependencies
 third_party/*
+
+# C++ build artifacts
+manim-cpp/build/
+*.ppm
+*.png
+*.o
+*.a
+*.spv
+
+# IDE and editor files
+.cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# vcpkg (do not track - users should clone separately)
+vcpkg/
+
+# Backup files
+*.tar.gz

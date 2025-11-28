@@ -1,0 +1,136 @@
+#version 450
+
+// Cluster/Meshlet culling compute shader
+// Performs per-meshlet visibility testing for mesh shader integration
+//
+// Culling passes:
+// 1. Cone culling - Entire meshlet facing away from camera
+// 2. Frustum culling - Meshlet bounding sphere vs frustum planes
+// 3. (Optional) Occlusion culling - Not implemented in this shader
+
+layout(local_size_x = 256) in;
+
+// Meshlet data structure (must match CPU)
+struct Meshlet {
+    uint vertex_offset;
+    uint vertex_count;
+    uint index_offset;
+    uint triangle_count;
+    vec4 bounding_sphere;    // xyz = center, w = radius
+    vec4 cone_apex;          // xyz = apex position, w = unused
+    vec4 cone_axis_cutoff;   // xyz = axis (normalized), w = cos(half_angle)
+};
+
+// Input: Meshlet data
+layout(std430, binding = 0) readonly buffer MeshletBuffer {
+    Meshlet meshlets[];
+};
+
+// Output: Visibility bitfield (for direct mesh shader access)
+layout(std430, binding = 1) writeonly buffer VisibilityBuffer {
+    uint visibility[];
+};
+
+// Output: Compacted visible indices
+layout(std430, binding = 2) writeonly buffer VisibleIndicesBuffer {
+    uint visible_indices[];
+};
+
+// Output: Atomic counter for compaction
+layout(std430, binding = 3) buffer AtomicCounter {
+    uint visible_count;
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    vec4 camera_position;       // xyz = camera pos, w = unused
+    vec4 frustum_planes[6];     // Pre-extracted frustum planes
+    uint meshlet_count;
+    uint flags;                 // Bit 0: cone culling, Bit 1: frustum, Bit 2: occlusion
+    uint padding[2];
+} pc;
+
+// Flags
+const uint FLAG_CONE_CULLING = 0x01;
+const uint FLAG_FRUSTUM_CULLING = 0x02;
+const uint FLAG_OCCLUSION_CULLING = 0x04;
+
+// Test if bounding sphere is inside frustum
+bool test_sphere_frustum(vec4 sphere) {
+    vec3 center = sphere.xyz;
+    float radius = sphere.w;
+
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = pc.frustum_planes[i];
+        float dist = dot(plane.xyz, center) + plane.w;
+
+        if (dist < -radius) {
+            return false;  // Completely outside this plane
+        }
+    }
+
+    return true;  // Inside or intersecting all planes
+}
+
+// Test if meshlet cone is backfacing
+// Returns true if the meshlet is facing away from camera (should be culled)
+bool test_cone_backface(vec4 cone_apex, vec4 cone_axis_cutoff) {
+    vec3 apex = cone_apex.xyz;
+    vec3 axis = cone_axis_cutoff.xyz;
+    float cutoff = cone_axis_cutoff.w;
+
+    // If cutoff is >= 1.0, cone culling is disabled for this meshlet
+    if (cutoff >= 1.0) {
+        return false;  // Don't cull
+    }
+
+    // Direction from apex to camera
+    vec3 camera_pos = pc.camera_position.xyz;
+    vec3 to_camera = normalize(camera_pos - apex);
+
+    // Dot product with cone axis
+    float dot_val = dot(to_camera, axis);
+
+    // If camera is outside the cone (dot < cutoff), meshlet is backfacing
+    return dot_val < cutoff;
+}
+
+void main() {
+    uint meshlet_id = gl_GlobalInvocationID.x;
+
+    if (meshlet_id >= pc.meshlet_count) {
+        return;
+    }
+
+    Meshlet m = meshlets[meshlet_id];
+
+    bool visible = true;
+
+    // Cone culling (backface)
+    if ((pc.flags & FLAG_CONE_CULLING) != 0 && visible) {
+        if (test_cone_backface(m.cone_apex, m.cone_axis_cutoff)) {
+            visible = false;
+        }
+    }
+
+    // Frustum culling
+    if ((pc.flags & FLAG_FRUSTUM_CULLING) != 0 && visible) {
+        if (!test_sphere_frustum(m.bounding_sphere)) {
+            visible = false;
+        }
+    }
+
+    // Set visibility bit
+    uint word_idx = meshlet_id / 32;
+    uint bit_idx = meshlet_id % 32;
+
+    if (visible) {
+        // Set visibility bit (atomic OR)
+        atomicOr(visibility[word_idx], 1u << bit_idx);
+
+        // Add to compacted visible list
+        uint slot = atomicAdd(visible_count, 1);
+        visible_indices[slot] = meshlet_id;
+    }
+}

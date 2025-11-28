@@ -1,0 +1,25 @@
+{
+  "name": "catalyst",
+  "version": "0.1.0",
+  "description": "Vulkan-accelerated rendering & culling library with CPU fallbacks",
+  "homepage": "https://github.com/AdilKettani01/Catalyst",
+  "license": "MIT",
+  "dependencies": [
+    "vulkan-memory-allocator",
+    "spdlog",
+    "cli11",
+    "tomlplusplus",
+    "glfw3",
+    "glm",
+    "eigen3",
+    "benchmark",
+    "gtest",
+    {
+      "name": "ffmpeg",
+      "features": ["avcodec", "avformat", "avutil", "swscale"]
+    },
+    "freetype",
+    "harfbuzz",
+    "pybind11"
+  ]
+}

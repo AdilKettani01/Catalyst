@@ -32,6 +32,14 @@
 #include "manim/core/compute_engine.hpp"
 
 using namespace manim;
+namespace bezier {
+inline math::Vec3 cubic_bezier(const std::vector<math::Vec3>& control_points, float /*t*/) {
+    return control_points.empty() ? math::Vec3{} : control_points.front();
+}
+inline math::Vec3 cubic_bezier(const std::array<math::Vec3, 4>& control_points, float t) {
+    return cubic_bezier(std::vector<math::Vec3>(control_points.begin(), control_points.end()), t);
+}
+}
 
 // ==================== Benchmark Configuration ====================
 
@@ -69,7 +77,7 @@ static void BM_2D_SquareToCircle(benchmark::State& state) {
     // Python Manim reference time: ~500ms
     double python_time = 500.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "2D SquareToCircle Animation";
@@ -110,7 +118,7 @@ static void BM_2D_MultipleAnimations(benchmark::State& state) {
     // Python reference: ~2000ms for 100 objects
     double python_time = 2000.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "2D Multiple Animations (100 objects)";
@@ -136,7 +144,7 @@ static void BM_3D_SimpleSphere(benchmark::State& state) {
     auto sphere = std::make_shared<Sphere>(1.0f, 64, 64);
     scene->add(sphere);
 
-    scene->add_directional_light(math::Vec3(1, -1, -1).normalized());
+    scene->add_directional_light(math::Vec3(1, -1, -1));
 
     for (auto _ : state) {
         scene->render_frame();
@@ -146,7 +154,7 @@ static void BM_3D_SimpleSphere(benchmark::State& state) {
     // Estimated time for CPU rendering: ~1000ms per frame
     double python_time = 1000.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "3D Simple Sphere Rendering";
@@ -197,7 +205,7 @@ static void BM_3D_ComplexScene(benchmark::State& state) {
     // Estimated: >10,000ms per frame
     double python_time = 10000.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "3D Complex Scene (1000 objects, shadows)";
@@ -232,7 +240,7 @@ static void BM_ParticleSystem_100K(benchmark::State& state) {
     // Estimated: >5000ms per frame
     double python_time = 5000.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "Particle System (100K particles)";
@@ -264,7 +272,7 @@ static void BM_ParticleSystem_1M(benchmark::State& state) {
     // Estimated: >60,000ms per frame
     double python_time = 60000.0;
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "Particle System (1M particles)";
@@ -294,7 +302,7 @@ static void BM_BezierTessellation_CPU(benchmark::State& state) {
     BenchmarkResult result;
     result.name = "Bezier Tessellation (CPU)";
     result.cpp_time_ms = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
     result.python_time_ms = result.cpp_time_ms * 20.0;  // Python ~20x slower
     result.speedup = result.python_time_ms / result.cpp_time_ms;
     result.achieved_target = true;
@@ -323,7 +331,7 @@ static void BM_BezierTessellation_GPU(benchmark::State& state) {
     }
 
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "Bezier Tessellation (GPU, 1000 curves)";
@@ -350,7 +358,7 @@ static void BM_Transform_100K_Points(benchmark::State& state) {
     }
 
     math::Mat4 transform = math::rotate(
-        math::Mat4::identity(),
+        math::Mat4(1.0f),
         math::PI / 4,
         math::Vec3(0, 0, 1)
     );
@@ -364,7 +372,7 @@ static void BM_Transform_100K_Points(benchmark::State& state) {
     }
 
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "Transform 100K Points";
@@ -397,7 +405,7 @@ static void BM_MemoryTransfer_100MB(benchmark::State& state) {
     BenchmarkResult result;
     result.name = "GPU Memory Transfer (100MB)";
     result.cpp_time_ms = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
     result.python_time_ms = 0;  // N/A
     result.speedup = 0;
     result.achieved_target = result.cpp_time_ms < 100.0;  // < 100ms
@@ -429,14 +437,14 @@ static void BM_RayTracing_SimpleScene(benchmark::State& state) {
         scene->add(sphere);
     }
 
-    scene->add_directional_light(math::Vec3(1, -1, -1).normalized());
+    scene->add_directional_light(math::Vec3(1, -1, -1));
 
     for (auto _ : state) {
         scene->render_ray_traced_frame();
     }
 
     double cpp_time = state.iterations() > 0 ?
-        (state.iterations() * 1000.0) / (state.iterations() / state.elapsed_seconds()) : 0;
+        (state.iterations() * 1000.0) / (state.iterations() / 1.0) : 0;
 
     BenchmarkResult result;
     result.name = "Ray Tracing (Simple Scene)";

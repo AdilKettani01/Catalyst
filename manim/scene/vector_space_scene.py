@@ -62,7 +62,7 @@ Y_COLOR = RED_C
 Z_COLOR = BLUE_D
 
 
-# TODO: Much of this scene type seems dependent on the coordinate system chosen.
+# TODO.md: Much of this scene type seems dependent on the coordinate system chosen.
 # That is, being centered at the origin with grid units corresponding to the
 # arbitrary space units.  Change it!
 #
@@ -138,7 +138,7 @@ class VectorScene(Scene):
         axes.fade(axes_dimness)
         self.add(axes)
 
-        # TODO
+        # TODO.md
         # error: Missing positional argument "scene" in call to "update_frame" of "CairoRenderer"  [call-arg]
         self.renderer.update_frame()  # type: ignore[call-arg]
         self.renderer.camera = Camera(self.renderer.get_frame())
@@ -161,7 +161,7 @@ class VectorScene(Scene):
             The Arrow representing the Vector.
         """
         return Arrow(
-            # TODO
+            # TODO.md
             # error: "VectorScene" has no attribute "plane"  [attr-defined]
             self.plane.coords_to_point(0, 0),  # type: ignore[attr-defined]
             self.plane.coords_to_point(*numerical_vector[:2]),  # type: ignore[attr-defined]
@@ -397,7 +397,7 @@ class VectorScene(Scene):
         x_coord: MathTex,
         x_line: Line,
         vector: Vector3DLike,
-    ) -> MathTex:  # TODO Write DocStrings for this.
+    ) -> MathTex:  # TODO.md Write DocStrings for this.
         x_coord.next_to(x_line, -np.sign(vector[1]) * UP)
         x_coord.set_color(X_COLOR)
         return x_coord
@@ -407,7 +407,7 @@ class VectorScene(Scene):
         y_coord: MathTex,
         y_line: Line,
         vector: Vector3DLike,
-    ) -> MathTex:  # TODO Write DocStrings for this.
+    ) -> MathTex:  # TODO.md Write DocStrings for this.
         y_coord.next_to(y_line, np.sign(vector[0]) * RIGHT)
         y_coord.set_color(Y_COLOR)
         return y_coord
@@ -469,7 +469,7 @@ class VectorScene(Scene):
             FadeOut(array.get_brackets()),
         ]
         self.play(*animations)
-        # TODO: Can we delete the line below? I don't think it have any purpose.
+        # TODO.md: Can we delete the line below? I don't think it have any purpose.
         # y_coord, _ = (anim.mobject for anim in animations)
         self.play(Create(y_line))
         self.play(Create(arrow))
@@ -563,7 +563,7 @@ class VectorScene(Scene):
 
         x_max = int(config["frame_x_radius"] + abs(vector_cleaned[0]))
         y_max = int(config["frame_y_radius"] + abs(vector_cleaned[1]))
-        # TODO:
+        # TODO.md:
         # I think that this should be a VGroup instead of a VMobject.
         dots = VMobject(
             *(  # type: ignore[arg-type]
@@ -750,7 +750,7 @@ class LinearTransformationScene(VectorScene):
         """
         self.add_special_mobjects(self.background_mobjects, *mobjects)
 
-    # TODO, this conflicts with Scene.add_foreground_mobject
+    # TODO.md, this conflicts with Scene.add_foreground_mobject
     # Please be aware that there is also the method Scene.add_foreground_mobjects.
     def add_foreground_mobject(self, *mobjects: Mobject) -> None:  # type: ignore[override]
         """
@@ -961,7 +961,7 @@ class LinearTransformationScene(VectorScene):
         :class:`~.MathTex`
             The MathTex of the label.
         """
-        # TODO: Clear up types in this function. This is currently a mess.
+        # TODO.md: Clear up types in this function. This is currently a mess.
         label_mob = self.label_vector(vector, label, **kwargs)
         if new_label:
             label_mob.target_text = new_label  # type: ignore[attr-defined]
@@ -1139,7 +1139,7 @@ class LinearTransformationScene(VectorScene):
             The animation of the movement.
         """
         for label in self.transformable_labels:
-            # TODO: This location and lines 933 and 335 are the only locations in
+            # TODO.md: This location and lines 933 and 335 are the only locations in
             # the code where the target_text property is referenced.
             target_text: MathTex | str = label.target_text  # type: ignore[assignment]
             label.target = self.get_vector_label(

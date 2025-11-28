@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         Vector3DLike,
     )
 
-# TODO
+# TODO.md
 # - Change cubic curve groups to have 4 points instead of 3
 # - Change sub_path idea accordingly
 # - No more mark_paths_closed, instead have the camera test
@@ -121,7 +121,7 @@ class VMobject(Mobject):
         make_smooth_after_applying_functions: bool = False,
         background_image: Image | str | None = None,
         shade_in_3d: bool = False,
-        # TODO, do we care about accounting for varying zoom levels?
+        # TODO.md, do we care about accounting for varying zoom levels?
         tolerance_for_point_equality: float = 1e-6,
         n_points_per_cubic_curve: int = 4,
         cap_style: CapStyleType = CapStyleType.AUTO,
@@ -159,7 +159,7 @@ class VMobject(Mobject):
         super().__init__(**kwargs)
         self.submobjects: list[VMobject]
 
-        # TODO: Find where color overwrites are happening and remove the color doubling
+        # TODO.md: Find where color overwrites are happening and remove the color doubling
         # if "color" in kwargs:
         #     fill_color = kwargs["color"]
         #     stroke_color = kwargs["color"]
@@ -428,7 +428,7 @@ class VMobject(Mobject):
             "stroke_width": self.get_stroke_width(),
         }
 
-        # TODO: FIX COLORS HERE
+        # TODO.md: FIX COLORS HERE
         if simple:
             ret["fill_color"] = self.get_fill_color()
             ret["fill_opacity"] = self.get_fill_opacity()
@@ -563,8 +563,8 @@ class VMobject(Mobject):
         """
         return self.get_fill_opacities()[0]
 
-    # TODO: Does this just do a copy?
-    # TODO: I have the feeling that this function should not return None, does that have any usage ?
+    # TODO.md: Does this just do a copy?
+    # TODO.md: I have the feeling that this function should not return None, does that have any usage ?
     def get_fill_colors(self) -> list[ManimColor | None]:
         return [
             ManimColor(rgba[:3]) if rgba.any() else None
@@ -819,7 +819,7 @@ class VMobject(Mobject):
         return self
 
     def clear_points(self) -> None:
-        # TODO: shouldn't this return self instead of None?
+        # TODO.md: shouldn't this return self instead of None?
         self.points = np.zeros((0, self.dim))
 
     def append_points(self, new_points: Point3DLike_Array) -> Self:
@@ -836,7 +836,7 @@ class VMobject(Mobject):
         :class:`VMobject`
             The VMobject itself, after appending ``new_points``.
         """
-        # TODO, check that number new points is a multiple of 4?
+        # TODO.md, check that number new points is a multiple of 4?
         # or else that if len(self.points) % 4 == 1, then
         # len(new_points) % 4 == 3?
         n = len(self.points)
@@ -883,7 +883,7 @@ class VMobject(Mobject):
         handle2: Point3DLike,
         anchor2: Point3DLike,
     ) -> None:
-        # TODO, check the len(self.points) % 4 == 0?
+        # TODO.md, check the len(self.points) % 4 == 0?
         self.append_points([anchor1, handle1, handle2, anchor2])
 
     # what type is curves?
@@ -989,7 +989,7 @@ class VMobject(Mobject):
         ValueError
             If 0 or more than 2 points are given.
         """
-        # TODO remove the value error and just add two parameters with one optional
+        # TODO.md remove the value error and just add two parameters with one optional
         if len(points) == 1:
             handle2 = None
             new_anchor = points[0]
@@ -1022,7 +1022,7 @@ class VMobject(Mobject):
         return self.points[-1]
 
     def is_closed(self) -> bool:
-        # TODO use consider_points_equals_2d ?
+        # TODO.md use consider_points_equals_2d ?
         return self.consider_points_equals(self.points[0], self.points[-1])
 
     def close_path(self) -> None:
@@ -1725,7 +1725,7 @@ class VMobject(Mobject):
         :meth:`~.Mobject.interpolate`, :meth:`~.Mobject.align_data`
         """
         self.align_rgbas(vmobject)
-        # TODO: This shortcut can be a bit over eager. What if they have the same length, but different subpath lengths?
+        # TODO.md: This shortcut can be a bit over eager. What if they have the same length, but different subpath lengths?
         if self.get_num_points() == vmobject.get_num_points():
             return
 

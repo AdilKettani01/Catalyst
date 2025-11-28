@@ -542,9 +542,194 @@ TEST(GPUPerformance, BatchOperations) {
     EXPECT_LT(duration.count(), 30000);  // < 30 seconds
 }
 
+// ==================== GPU Bezier Tessellation Tests ====================
+
+#include "manim/core/compute_engine.hpp"
+#include "manim/mobject/vmobject.hpp"
+
+class GPUBezierTessellationTest : public ::testing::Test {
+protected:
+    bool has_gpu = false;
+
+    void SetUp() override {
+        has_gpu = GPUUtils::is_gpu_available();
+    }
+};
+
+TEST_F(GPUBezierTessellationTest, CPUTessellation) {
+    // CPU tessellation should always work
+    ComputeEngine engine;
+    engine.initialize(VK_NULL_HANDLE, VK_NULL_HANDLE, *(MemoryPool*)nullptr);
+
+    std::vector<std::array<math::Vec3, 4>> curves = {
+        {math::Vec3(0, 0, 0), math::Vec3(0.33f, 1, 0), math::Vec3(0.66f, 1, 0), math::Vec3(1, 0, 0)},
+        {math::Vec3(1, 0, 0), math::Vec3(1.33f, -1, 0), math::Vec3(1.66f, -1, 0), math::Vec3(2, 0, 0)}
+    };
+
+    auto result = engine.tessellate_bezier_cpu(curves, 10);
+
+    // Should produce tessellated points
+    EXPECT_GT(result.size(), 0);
+    EXPECT_GE(result.size(), curves.size() * 10);
+}
+
+TEST_F(GPUBezierTessellationTest, VMobjectTessellation) {
+    // Test VMobject tessellation
+    auto vmob = std::make_shared<VMobject>();
+
+    // Create a simple curve
+    vmob->start_new_path(math::Vec3(0, 0, 0));
+    vmob->add_cubic_bezier_curve(
+        {math::Vec3(0, 0, 0), math::Vec3(1, 0, 0)},
+        {math::Vec3(0.33f, 1, 0), math::Vec3(0.66f, 1, 0)}
+    );
+
+    // Ensure tessellation works
+    vmob->ensure_tessellation(16);
+    const auto& points = vmob->get_tessellated_points();
+
+    EXPECT_GT(points.size(), 0);
+    EXPECT_GE(points.size(), 16);
+}
+
+TEST_F(GPUBezierTessellationTest, CircleTessellation) {
+    // Test Circle (a VMobject subclass) tessellation
+    // Circle generates points in constructor
+    auto circle = std::make_shared<Circle>();
+
+    circle->ensure_tessellation(32);
+    const auto& points = circle->get_tessellated_points();
+
+    // Circle should have tessellated points (may be empty if not initialized properly)
+    // This test is mainly to ensure no crashes occur
+    EXPECT_GE(points.size(), 0);
+}
+
+TEST_F(GPUBezierTessellationTest, ArcLengthCalculation) {
+    auto vmob = std::make_shared<VMobject>();
+
+    // Create a curve using control points directly
+    vmob->set_points({
+        math::Vec3(0, 0, 0),   // P0 - anchor
+        math::Vec3(0.33f, 0, 0), // P1 - handle
+        math::Vec3(0.66f, 0, 0), // P2 - handle
+        math::Vec3(1, 0, 0)    // P3 - anchor
+    });
+
+    float arc_length = vmob->get_arc_length();
+
+    // Arc length should be positive and reasonable
+    EXPECT_GT(arc_length, 0.0f);
+    // For a straight line the arc length should be close to 1.0
+    EXPECT_LT(arc_length, 2.0f);
+}
+
+// ==================== Shader Hot-Reload Tests ====================
+
+#include "manim/renderer/shader_system.hpp"
+
+TEST(ShaderHotReload, ManagerInitialization) {
+    ShaderManager manager;
+
+    // Should be able to enable/disable hot-reload
+    manager.set_hot_reload_enabled(true);
+    EXPECT_TRUE(manager.is_hot_reload_enabled());
+
+    manager.set_hot_reload_enabled(false);
+    EXPECT_FALSE(manager.is_hot_reload_enabled());
+}
+
+TEST(ShaderHotReload, CheckAndReloadDisabled) {
+    ShaderManager manager;
+    manager.set_hot_reload_enabled(false);
+
+    // When disabled, check_and_reload should return 0
+    size_t reloaded = manager.check_and_reload();
+    EXPECT_EQ(reloaded, 0);
+}
+
+TEST(ShaderHotReload, ReloadCallback) {
+    ShaderManager manager;
+
+    bool callback_called = false;
+    std::string reloaded_name;
+
+    manager.set_reload_callback([&](const std::string& name) {
+        callback_called = true;
+        reloaded_name = name;
+    });
+
+    manager.set_hot_reload_enabled(true);
+
+    // Note: Actual reload would require valid shader files
+    // This just tests the callback mechanism is set up correctly
+    EXPECT_FALSE(callback_called);
+}
+
+// ==================== Swapchain Tests ====================
+
+#include "manim/renderer/vulkan_renderer.hpp"
+
+TEST(SwapchainHandling, RendererInitialization) {
+    // Test renderer can be created
+    VulkanRenderer renderer;
+
+    // Initialize should not crash even if no GPU
+    RendererConfig config;
+    config.width = 800;
+    config.height = 600;
+    config.fullscreen = false;  // Non-fullscreen mode
+
+    EXPECT_NO_THROW(renderer.initialize(config));
+    EXPECT_NO_THROW(renderer.shutdown());
+}
+
+TEST(SwapchainHandling, ResizeHandling) {
+    VulkanRenderer renderer;
+
+    RendererConfig config;
+    config.width = 800;
+    config.height = 600;
+    config.fullscreen = false;
+
+    renderer.initialize(config);
+
+    // Resize should be handled gracefully
+    EXPECT_NO_THROW(renderer.resize(1024, 768));
+    EXPECT_NO_THROW(renderer.resize(640, 480));
+
+    renderer.shutdown();
+}
+
+TEST(SwapchainHandling, FrameRendering) {
+    if (!GPUUtils::is_gpu_available()) {
+        GTEST_SKIP() << "No GPU available";
+    }
+
+    VulkanRenderer renderer;
+
+    RendererConfig config;
+    config.width = 800;
+    config.height = 600;
+    config.fullscreen = false;
+
+    renderer.initialize(config);
+
+    // Render a few frames
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_NO_THROW(renderer.begin_frame());
+        renderer.clear(math::Vec4(0.1f, 0.1f, 0.1f, 1.0f));
+        EXPECT_NO_THROW(renderer.end_frame());
+    }
+
+    renderer.shutdown();
+}
+
 // ==================== Main ====================
 
+#if 0
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+#endif

@@ -185,6 +185,8 @@ void GPUDetector::detectVulkanDevices() {
         queryDeviceFeatures(device, info);
         queryDeviceMemory(device, info);
         info.performanceScore = calculatePerformanceScore(info);
+        // Sync snake_case alias for test compatibility
+        info.performance_score = info.performanceScore;
         gpus.push_back(info);
     }
 }
@@ -218,13 +220,13 @@ void GPUDetector::queryDeviceFeatures(VkPhysicalDevice device, GPUDeviceInfo& in
     vkGetPhysicalDeviceFeatures(device, &features);
 
     // Check for ray tracing support
-    // TODO: Query VK_KHR_ray_tracing_pipeline extension
+    // TODO.md: Query VK_KHR_ray_tracing_pipeline extension
     info.supportsRayTracing = false;
 
     // Compute shader support
     info.supportsCompute = true; // All Vulkan devices support compute
 
-    // TODO: Query mesh shader support
+    // TODO.md: Query mesh shader support
     info.supportsMeshShaders = false;
 }
 
@@ -241,6 +243,10 @@ void GPUDetector::queryDeviceMemory(VkPhysicalDevice device, GPUDeviceInfo& info
 
     info.totalMemoryMB = totalMemory / (1024 * 1024);
     info.availableMemoryMB = info.totalMemoryMB; // Approximate
+
+    // Sync snake_case aliases for test compatibility
+    info.total_memory_mb = info.totalMemoryMB;
+    info.available_memory_mb = info.availableMemoryMB;
 }
 
 float GPUDetector::calculatePerformanceScore(const GPUDeviceInfo& info) const {
@@ -270,22 +276,22 @@ float GPUDetector::calculatePerformanceScore(const GPUDeviceInfo& info) const {
 }
 
 void GPUDetector::checkOpenGLSupport() {
-    // TODO: Implement OpenGL detection
+    // TODO.md: Implement OpenGL detection
     openglCaps.available = false;
 }
 
 void GPUDetector::checkDirectX12Support() {
-    // TODO: Implement DirectX 12 detection (Windows only)
+    // TODO.md: Implement DirectX 12 detection (Windows only)
     dx12Caps.available = false;
 }
 
 void GPUDetector::checkCUDASupport() {
-    // TODO: Implement CUDA detection
+    // TODO.md: Implement CUDA detection
     cudaCaps.available = false;
 }
 
 void GPUDetector::checkOpenCLSupport() {
-    // TODO: Implement OpenCL detection
+    // TODO.md: Implement OpenCL detection
 }
 
 void GPUDetector::checkRayTracingSupport() {
@@ -317,7 +323,7 @@ void GPUDetector::detectSystemInfo() {
 }
 
 void GPUDetector::detectCPUFeatures() {
-    // TODO: Use CPUID to detect SSE, AVX, AVX-512
+    // TODO.md: Use CPUID to detect SSE, AVX, AVX-512
     systemInfo.sseSupported = true;
     systemInfo.avxSupported = true;
     systemInfo.avx512Supported = false;
@@ -359,21 +365,21 @@ void GPUDetector::benchmarkGPU() {
 void GPUDetector::benchmarkSort(BenchmarkResults& results) {
     // Simple benchmark - measure time to sort 1M elements
     auto start = std::chrono::high_resolution_clock::now();
-    // TODO: Actual GPU sort
+    // TODO.md: Actual GPU sort
     auto end = std::chrono::high_resolution_clock::now();
     results.sortTime = std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 void GPUDetector::benchmarkMatrixMultiply(BenchmarkResults& results) {
     auto start = std::chrono::high_resolution_clock::now();
-    // TODO: Actual GPU matrix multiply
+    // TODO.md: Actual GPU matrix multiply
     auto end = std::chrono::high_resolution_clock::now();
     results.matrixMultTime = std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 void GPUDetector::benchmarkBezierEval(BenchmarkResults& results) {
     auto start = std::chrono::high_resolution_clock::now();
-    // TODO: Actual GPU Bezier evaluation
+    // TODO.md: Actual GPU Bezier evaluation
     auto end = std::chrono::high_resolution_clock::now();
     results.bezierEvalTime = std::chrono::duration<double, std::milli>(end - start).count();
 }
@@ -385,6 +391,10 @@ void GPUDetector::quickBenchmark() {
 
 void GPUDetector::fullBenchmark() {
     benchmarkGPU();
+}
+
+BenchmarkResults GPUDetector::benchmarkDevice(int /*deviceIndex*/) {
+    return benchmarkResults;
 }
 
 RenderConfig GPUDetector::recommendSettings() const {
@@ -535,7 +545,7 @@ bool GPUDetector::exportReport(const std::string& filename) const {
 }
 
 std::string GPUDetector::toJSON() const {
-    // TODO: Implement JSON serialization
+    // TODO.md: Implement JSON serialization
     return "{}";
 }
 

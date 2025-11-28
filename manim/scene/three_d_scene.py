@@ -112,7 +112,7 @@ class ThreeDScene(Scene):
         about
             one of 3 options: ["theta", "phi", "gamma"]. defaults to theta.
         """
-        # TODO, use a ValueTracker for rate, so that it
+        # TODO.md, use a ValueTracker for rate, so that it
         # can begin and end smoothly
         about: str = about.lower()
         try:

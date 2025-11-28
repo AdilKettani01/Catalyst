@@ -31,12 +31,12 @@ logger, console, error_console = make_logger(
     parser["CLI"]["verbosity"],
 )
 cli_ctx_settings = parse_cli_ctx(parser["CLI_CTX"])
-# TODO: temporary to have a clean terminal output when working with PIL or matplotlib
+# TODO.md: temporary to have a clean terminal output when working with PIL or matplotlib
 logging.getLogger("PIL").setLevel(logging.INFO)
 logging.getLogger("matplotlib").setLevel(logging.INFO)
 
 config = ManimConfig().digest_parser(parser)
-# TODO: to be used in the future - see PR #620
+# TODO.md: to be used in the future - see PR #620
 # https://github.com/ManimCommunity/manim/pull/620
 frame = ManimFrame(config)
 

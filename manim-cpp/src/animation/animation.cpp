@@ -36,7 +36,7 @@ void Animation::begin() {
 
     // Suspend mobject updating if requested
     if (suspend_mobject_updating_) {
-        mobject_->suspend_updating(true);
+        mobject_->suspend_updating();
     }
 
     spdlog::debug("Animation '{}' started", name_);
@@ -76,7 +76,7 @@ void Animation::finish() {
 
     // Resume mobject updating
     if (suspend_mobject_updating_) {
-        mobject_->suspend_updating(false);
+        mobject_->resume_updating();
     }
 
     spdlog::debug("Animation '{}' finished", name_);

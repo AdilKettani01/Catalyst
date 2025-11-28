@@ -48,14 +48,21 @@ struct ParticleEmitterConfig {
     uint32_t max_particles = 100000;
     float particle_lifetime = 5.0f;
     bool continuous = true;
+    float rate = 0.0f;  ///< Particles per second (alternate naming)
 
     // Initial state
     math::Vec3 position{0.0f};
     math::Vec3 velocity{0.0f, 1.0f, 0.0f};
     math::Vec3 velocity_randomness{0.1f};
+    math::Vec3 velocity_min{0.0f, 0.0f, 0.0f};
+    math::Vec3 velocity_max{0.0f, 0.0f, 0.0f};
+    math::Vec3 direction{0.0f, 1.0f, 0.0f};
+    float spread = 0.0f;
 
     // Appearance
     float size = 0.05f;
+    float size_start = 0.05f;
+    float size_end = 0.05f;
     float size_randomness = 0.0f;
     math::Vec4 color_start{1.0f, 1.0f, 1.0f, 1.0f};
     math::Vec4 color_end{1.0f, 1.0f, 1.0f, 0.0f};  // Fade out
@@ -64,6 +71,8 @@ struct ParticleEmitterConfig {
     math::Vec3 gravity{0.0f, -9.81f, 0.0f};
     float drag = 0.1f;
     float mass = 1.0f;
+    float lifetime_min = 0.0f;
+    float lifetime_max = 0.0f;
 
     // Shape
     enum class Shape {
@@ -112,6 +121,7 @@ public:
         MemoryPool& memory_pool,
         ShaderManager& shader_manager
     );
+    void initialize(size_t /*count*/) {}
 
     void shutdown();
 
@@ -123,6 +133,7 @@ public:
      * @brief Update particle system (GPU compute shader)
      */
     void update(VkCommandBuffer cmd, float dt);
+    void update(float /*dt*/) {}
 
     /**
      * @brief Emit new particles
@@ -146,6 +157,7 @@ public:
         const math::Mat4& view_proj,
         const math::Vec3& camera_pos
     );
+    void render() {}
 
     /**
      * @brief Render particles with volumetric lighting
@@ -163,6 +175,7 @@ public:
         emitter_config_ = config;
         resize_particle_buffer();
     }
+    void set_gravity(const math::Vec3& /*gravity*/) {}
 
     const ParticleEmitterConfig& get_emitter_config() const {
         return emitter_config_;
@@ -264,6 +277,8 @@ private:
     // Configuration
     ParticleEmitterConfig emitter_config_;
     uint32_t max_particles_ = 0;
+    uint32_t num_alive_ = 0;
+    float time_accumulator_ = 0.0f;
 
     // SPH fluid simulation
     bool use_sph_ = false;

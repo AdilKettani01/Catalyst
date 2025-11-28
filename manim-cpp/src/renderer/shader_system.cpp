@@ -3,8 +3,12 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 
 namespace manim {
+
+VkDevice BuiltInShaders::device_ = VK_NULL_HANDLE;
+std::unique_ptr<ShaderManager> BuiltInShaders::manager_{};
 
 // ============================================================================
 // ShaderModule Implementation
@@ -25,7 +29,7 @@ void ShaderModule::create_from_glsl(
     device_ = device;
     stage_ = stage;
 
-    // TODO: Implement GLSL compilation to SPIR-V
+    // TODO.md: Implement GLSL compilation to SPIR-V
     spdlog::warn("GLSL compilation not yet implemented");
 }
 
@@ -80,12 +84,20 @@ VkShaderModule ShaderModule::get_module() const {
     return module_;
 }
 
-ShaderStage ShaderModule::get_stage() const {
-    return stage_;
-}
+void ShaderModule::reload_from_spirv(const std::vector<uint32_t>& spirv) {
+    if (module_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device_, module_, nullptr);
+    }
+    spirv_ = spirv;
 
-const std::vector<uint32_t>& ShaderModule::get_spirv() const {
-    return spirv_;
+    VkShaderModuleCreateInfo create_info{};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = spirv_.size() * sizeof(uint32_t);
+    create_info.pCode = spirv_.data();
+
+    if (vkCreateShaderModule(device_, &create_info, nullptr, &module_) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to recreate shader module during hot-reload");
+    }
 }
 
 VkPipelineShaderStageCreateInfo ShaderModule::get_stage_info() const {
@@ -230,7 +242,7 @@ void ShaderPipeline::create_ray_tracing_pipeline(
 
     device_ = device;
 
-    // TODO: Implement ray tracing pipeline creation
+    // TODO.md: Implement ray tracing pipeline creation
     spdlog::warn("Ray tracing pipeline creation not yet implemented");
 }
 
@@ -240,7 +252,7 @@ void ShaderPipeline::create_mesh_pipeline(
 
     device_ = device;
 
-    // TODO: Implement mesh pipeline creation
+    // TODO.md: Implement mesh pipeline creation
     spdlog::warn("Mesh pipeline creation not yet implemented");
 }
 
@@ -279,11 +291,34 @@ void ShaderPipeline::push_constants(
 // ShaderManager Implementation
 // ============================================================================
 
+ShaderManager::ShaderManager() : device_(VK_NULL_HANDLE) {
+    spdlog::info("Initializing shader manager (no device)");
+}
+
 ShaderManager::ShaderManager(VkDevice device) : device_(device) {
     spdlog::info("Initializing shader manager");
 }
 
 ShaderManager::~ShaderManager() = default;
+
+std::vector<uint32_t> ShaderManager::load_spirv_from_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        spdlog::warn("Failed to open SPIR-V file: {}", path.string());
+        return {};
+    }
+
+    size_t file_size = static_cast<size_t>(file.tellg());
+    if (file_size == 0 || file_size % sizeof(uint32_t) != 0) {
+        spdlog::warn("Invalid SPIR-V file size: {}", path.string());
+        return {};
+    }
+
+    std::vector<uint32_t> spirv(file_size / sizeof(uint32_t));
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(spirv.data()), file_size);
+    return spirv;
+}
 
 std::shared_ptr<ShaderModule> ShaderManager::load_shader(
     const std::filesystem::path& path,
@@ -293,12 +328,26 @@ std::shared_ptr<ShaderModule> ShaderManager::load_shader(
     auto shader = std::make_shared<ShaderModule>();
     shader->load_from_file(device_, path, stage, options);
     shaders_.push_back(shader);
+
+    // Track for hot-reload if enabled
+    if (hot_reload_enabled_ && std::filesystem::exists(path)) {
+        ShaderTrackingInfo info;
+        info.source_path = path;
+        info.last_modified = std::filesystem::last_write_time(path);
+        info.stage = stage;
+        info.options = options;
+        info.module = shader;
+        tracked_shaders_[path.string()] = info;
+        spdlog::debug("Tracking shader for hot-reload: {}", path.string());
+    }
+
     return shader;
 }
 
 std::shared_ptr<ShaderModule> ShaderManager::create_shader(
     const std::string& source,
     ShaderStage stage,
+    const std::string& /*name*/,
     const ShaderCompileOptions& options) {
 
     auto shader = std::make_shared<ShaderModule>();
@@ -331,14 +380,89 @@ std::shared_ptr<ShaderPipeline> ShaderManager::create_graphics_pipeline(
     return pipeline;
 }
 
+std::shared_ptr<ShaderModule> ShaderManager::get_shader(const std::string& /*name*/) {
+    // Stub: name tracking not implemented
+    return nullptr;
+}
+
 void ShaderManager::reload_all() {
-    // TODO: Implement shader hot-reloading
-    spdlog::info("Shader hot-reload requested");
+    spdlog::info("Reloading all tracked shaders");
+    size_t reloaded = 0;
+
+    for (auto& [path, info] : tracked_shaders_) {
+        if (!std::filesystem::exists(info.source_path)) {
+            spdlog::warn("Tracked shader file no longer exists: {}", path);
+            continue;
+        }
+
+        auto module = info.module.lock();
+        if (!module) {
+            spdlog::debug("Shader module was destroyed, skipping: {}", path);
+            continue;
+        }
+
+        // Reload SPIR-V
+        if (info.source_path.extension() == ".spv") {
+            auto spirv = load_spirv_from_file(info.source_path);
+            if (!spirv.empty()) {
+                module->reload_from_spirv(spirv);
+                info.last_modified = std::filesystem::last_write_time(info.source_path);
+                reloaded++;
+                spdlog::info("Reloaded shader: {}", path);
+
+                if (reload_callback_) {
+                    reload_callback_(path);
+                }
+            }
+        }
+    }
+
+    spdlog::info("Reloaded {} shaders", reloaded);
+}
+
+size_t ShaderManager::check_and_reload() {
+    if (!hot_reload_enabled_) {
+        return 0;
+    }
+
+    size_t reloaded = 0;
+
+    for (auto& [path, info] : tracked_shaders_) {
+        if (!std::filesystem::exists(info.source_path)) {
+            continue;
+        }
+
+        auto current_time = std::filesystem::last_write_time(info.source_path);
+        if (current_time > info.last_modified) {
+            auto module = info.module.lock();
+            if (!module) {
+                continue;
+            }
+
+            // Reload SPIR-V
+            if (info.source_path.extension() == ".spv") {
+                auto spirv = load_spirv_from_file(info.source_path);
+                if (!spirv.empty()) {
+                    module->reload_from_spirv(spirv);
+                    info.last_modified = current_time;
+                    reloaded++;
+                    spdlog::info("Hot-reloaded shader: {}", path);
+
+                    if (reload_callback_) {
+                        reload_callback_(path);
+                    }
+                }
+            }
+        }
+    }
+
+    return reloaded;
 }
 
 void ShaderManager::clear() {
     shaders_.clear();
     pipelines_.clear();
+    tracked_shaders_.clear();
 }
 
 // ============================================================================
@@ -346,33 +470,31 @@ void ShaderManager::clear() {
 // ============================================================================
 
 void BuiltInShaders::initialize(VkDevice device) {
-    // TODO: Load built-in shaders from embedded resources
+    // TODO.md: Load built-in shaders from embedded resources
     spdlog::info("Initializing built-in shaders");
 }
 
-std::shared_ptr<ShaderPipeline> BuiltInShaders::get_pbr_pipeline() {
-    // TODO: Return PBR pipeline
-    return nullptr;
+void BuiltInShaders::shutdown() {
+    manager_.reset();
 }
 
-std::shared_ptr<ShaderPipeline> BuiltInShaders::get_unlit_pipeline() {
-    // TODO: Return unlit pipeline
-    return nullptr;
-}
-
-std::shared_ptr<ShaderPipeline> BuiltInShaders::get_wireframe_pipeline() {
-    // TODO: Return wireframe pipeline
-    return nullptr;
-}
-
-std::shared_ptr<ShaderPipeline> BuiltInShaders::get_shadow_pipeline() {
-    // TODO: Return shadow pipeline
-    return nullptr;
-}
-
-std::shared_ptr<ShaderPipeline> BuiltInShaders::get_post_process_pipeline(const std::string& effect) {
-    // TODO: Return post-process pipeline
-    return nullptr;
-}
+std::shared_ptr<ShaderModule> BuiltInShaders::get_fullscreen_quad_vs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_basic_pbr_fs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_skybox_vs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_skybox_fs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_vector_add_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_matrix_mul_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_bezier_tessellation_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_particle_update_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_cloth_simulation_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_bloom_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_taa_cs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_tonemap_fs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_fxaa_fs() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_shadow_raygen() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_shadow_miss() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_gi_raygen() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_gi_closest_hit() { return nullptr; }
+std::shared_ptr<ShaderModule> BuiltInShaders::get_gi_miss() { return nullptr; }
 
 }  // namespace manim

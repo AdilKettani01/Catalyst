@@ -12,6 +12,7 @@
 #include "manim/core/types.h"
 #include "manim/mobject/mobject.hpp"
 #include "manim/animation/animation.hpp"
+#include <any>
 
 namespace manim {
 
@@ -100,6 +101,7 @@ public:
      * Override in subclasses for cleanup code
      */
     virtual void tearDown();
+    void tear_down() { tearDown(); }
 
     // ==================== Mobject Management ====================
 
@@ -269,7 +271,9 @@ public:
     std::shared_ptr<Camera> getCamera() const { return camera; }
     std::shared_ptr<Renderer> getRenderer() const { return renderer; }
     const std::vector<std::shared_ptr<Mobject>>& getMobjects() const { return mobjects; }
+    const std::vector<std::shared_ptr<Mobject>>& get_mobjects() const { return mobjects; }
     double getTime() const { return time; }
+    double get_time() const { return getTime(); }
     double getDuration() const { return duration; }
     std::string getName() const { return name; }
 

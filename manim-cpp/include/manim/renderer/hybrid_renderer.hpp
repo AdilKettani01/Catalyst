@@ -20,8 +20,11 @@
 #include <queue>
 #include <functional>
 #include <condition_variable>
+#include <memory>
 
 namespace manim {
+
+class GPU3DScene;
 
 /**
  * @brief Work item that can be executed on CPU or GPU
@@ -56,6 +59,8 @@ struct SceneComplexity {
     uint32_t num_points = 0;
     uint32_t num_lights = 0;
     uint32_t num_particles = 0;
+    uint32_t total_vertices = 0;
+    uint32_t total_triangles = 0;
 
     bool has_transparency = false;
     bool has_animations = false;
@@ -63,6 +68,7 @@ struct SceneComplexity {
 
     float estimated_cpu_time_ms = 0.0f;
     float estimated_gpu_time_ms = 0.0f;
+    float complexity_score = 0.0f;
 
     // Bottleneck detection
     enum class Bottleneck {
@@ -73,6 +79,13 @@ struct SceneComplexity {
         BandwidthBound
     };
     Bottleneck bottleneck = Bottleneck::None;
+};
+
+struct HybridRenderStats {
+    float gpu_utilization = 0.0f;
+    float cpu_utilization = 0.0f;
+    int quality_level = 0;
+    float frame_time_ms = 0.0f;
 };
 
 /**
@@ -249,6 +262,10 @@ public:
     void enable_3d_rendering(bool enable) { use_3d_renderer_ = enable; }
     void enable_ray_tracing(bool enable);
     void enable_global_illumination(bool enable);
+    void set_mode(RenderMode mode);
+    HybridRenderStats render(const std::shared_ptr<GPU3DScene>& scene);
+    void enable_adaptive_quality(bool enable) { adaptive_quality_enabled_ = enable; }
+    void set_target_fps(float fps) { target_fps_ = fps; }
 
 private:
     // GPU renderer
@@ -311,7 +328,11 @@ private:
 
     // Render state
     RenderMode render_mode_ = RenderMode::Normal;
+    RenderMode hybrid_mode_ = RenderMode::HYBRID_AUTO;
     bool use_3d_renderer_ = true;
+    bool adaptive_quality_enabled_ = false;
+    float target_fps_ = 60.0f;
+    HybridRenderStats last_stats_{};
 
     // Draw calls
     struct DrawCall {

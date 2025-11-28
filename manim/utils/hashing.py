@@ -204,7 +204,7 @@ class _CustomEncoder(json.JSONEncoder):
             cvardict = {**copy.copy(cvars.globals), **copy.copy(cvars.nonlocals)}
             for i in list(cvardict):
                 # NOTE : All module types objects are removed, because otherwise it
-                # throws ValueError: Circular reference detected if not. TODO
+                # throws ValueError: Circular reference detected if not. TODO.md
                 if isinstance(cvardict[i], ModuleType):
                     del cvardict[i]
             try:

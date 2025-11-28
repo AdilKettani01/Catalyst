@@ -70,7 +70,7 @@ def _deprecation_text_component(
     return f"deprecated {since}and {until}.{msg}"
 
 
-# TODO: Use ParamSpec to type decorated functions when Python 3.9 is out of life
+# TODO.md: Use ParamSpec to type decorated functions when Python 3.9 is out of life
 T = TypeVar("T")
 
 

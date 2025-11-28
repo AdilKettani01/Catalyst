@@ -1,0 +1,97 @@
+#version 450
+
+// Temporal depth reprojection shader
+// Reprojects previous frame's depth buffer to current frame view space
+// Used for occlusion culling with moving cameras
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Previous frame depth buffer
+layout(binding = 0) uniform sampler2D prev_depth;
+
+// Current frame depth buffer (written from geometry pass)
+layout(binding = 1) uniform sampler2D curr_depth;
+
+// Output reprojected depth for Hi-Z construction
+layout(binding = 2, r32f) writeonly uniform image2D reprojected_depth;
+
+layout(push_constant) uniform PushConstants {
+    mat4 prev_view_proj_inv;  // Inverse of previous frame's view-projection
+    mat4 curr_view_proj;      // Current frame's view-projection
+    int width;
+    int height;
+    float depth_threshold;    // Threshold for depth invalidation
+    uint use_current_fallback; // Fall back to current depth if reprojection fails
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+    if (coord.x >= pc.width || coord.y >= pc.height) {
+        return;
+    }
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.width, pc.height);
+
+    // Sample previous frame depth
+    float prev_z = texture(prev_depth, uv).r;
+
+    // If no valid previous depth, use current depth
+    if (prev_z <= 0.0 || prev_z >= 1.0) {
+        float curr_z = texture(curr_depth, uv).r;
+        imageStore(reprojected_depth, coord, vec4(curr_z));
+        return;
+    }
+
+    // Convert screen UV + depth to NDC
+    vec2 ndc_xy = uv * 2.0 - 1.0;
+    vec4 prev_clip = vec4(ndc_xy, prev_z, 1.0);
+
+    // Unproject to world space using previous frame's inverse view-proj
+    vec4 world_pos = pc.prev_view_proj_inv * prev_clip;
+    world_pos /= world_pos.w;
+
+    // Reproject to current frame's clip space
+    vec4 curr_clip = pc.curr_view_proj * world_pos;
+    vec3 curr_ndc = curr_clip.xyz / curr_clip.w;
+
+    // Convert to UV coordinates
+    vec2 reproj_uv = curr_ndc.xy * 0.5 + 0.5;
+    float reproj_z = curr_ndc.z;
+
+    // Check if reprojection is valid (within screen bounds)
+    if (reproj_uv.x < 0.0 || reproj_uv.x > 1.0 ||
+        reproj_uv.y < 0.0 || reproj_uv.y > 1.0 ||
+        reproj_z < 0.0 || reproj_z > 1.0) {
+        // Reprojection outside screen, fall back to current depth
+        if (pc.use_current_fallback != 0u) {
+            float curr_z = texture(curr_depth, uv).r;
+            imageStore(reprojected_depth, coord, vec4(curr_z));
+        } else {
+            // Use conservative far depth
+            imageStore(reprojected_depth, coord, vec4(1.0));
+        }
+        return;
+    }
+
+    // Sample current depth at reprojected location for validation
+    float curr_z_at_reproj = texture(curr_depth, reproj_uv).r;
+
+    // Check for disocclusion: if reprojected depth differs significantly
+    // from current depth, a new surface may have been revealed
+    float depth_diff = abs(reproj_z - curr_z_at_reproj);
+    if (depth_diff > pc.depth_threshold) {
+        // Disocclusion detected - use current depth (conservative)
+        float curr_z = texture(curr_depth, uv).r;
+        imageStore(reprojected_depth, coord, vec4(curr_z));
+        return;
+    }
+
+    // Use maximum of reprojected and current depth (conservative occlusion)
+    // This ensures objects that were visible in previous frame stay visible
+    // until we confirm they're occluded in current frame
+    float curr_z = texture(curr_depth, uv).r;
+    float final_depth = max(reproj_z, curr_z);
+
+    imageStore(reprojected_depth, coord, vec4(final_depth));
+}

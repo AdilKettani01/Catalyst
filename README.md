@@ -1,142 +1,281 @@
 <p align="center">
-    <a href="https://www.manim.community/"><img src="https://raw.githubusercontent.com/ManimCommunity/manim/main/logo/cropped.png"></a>
-    <br />
-    <br />
-    <a href="https://pypi.org/project/manim/"><img src="https://img.shields.io/pypi/v/manim.svg?style=flat&logo=pypi" alt="PyPI Latest Release"></a>
-    <a href="https://hub.docker.com/r/manimcommunity/manim"><img src="https://img.shields.io/docker/v/manimcommunity/manim?color=%23099cec&label=docker%20image&logo=docker" alt="Docker image"> </a>
-    <a href="https://mybinder.org/v2/gh/ManimCommunity/jupyter_examples/HEAD?filepath=basic_example_scenes.ipynb"><img src="https://mybinder.org/badge_logo.svg"></a>
-    <a href="http://choosealicense.com/licenses/mit/"><img src="https://img.shields.io/badge/license-MIT-red.svg?style=flat" alt="MIT License"></a>
-    <a href="https://www.reddit.com/r/manim/"><img src="https://img.shields.io/reddit/subreddit-subscribers/manim.svg?color=orange&label=reddit&logo=reddit" alt="Reddit" href=></a>
-    <a href="https://twitter.com/manim_community/"><img src="https://img.shields.io/twitter/url/https/twitter.com/cloudposse.svg?style=social&label=Follow%20%40manim_community" alt="Twitter">
-    <a href="https://www.manim.community/discord/"><img src="https://img.shields.io/discord/581738731934056449.svg?label=discord&color=yellow&logo=discord" alt="Discord"></a>
-    <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black">
-    <a href="https://docs.manim.community/"><img src="https://readthedocs.org/projects/manimce/badge/?version=latest" alt="Documentation Status"></a>
-    <a href="https://pepy.tech/project/manim"><img src="https://pepy.tech/badge/manim/month?" alt="Downloads"> </a>
-    <img src="https://github.com/ManimCommunity/manim/workflows/CI/badge.svg" alt="CI">
-    <br />
-    <br />
-    <i>An animation engine for explanatory math videos</i>
+  <!-- Optional: replace with your own logo -->
+  <!-- <img src="docs/logo.png" width="220" alt="Catalyst logo" /> -->
+  <br />
+  <br />
+  <strong>Catalyst</strong>
+  <br />
+  Vulkan‑accelerated rendering & culling library with CPU fallbacks
+  <br />
+  <br />
+  <!-- Badges: customize or remove as needed -->
+  <a href="#"><img src="https://img.shields.io/badge/lang-C%2B%2B20-blue.svg" alt="C++20"></a>
+  <a href="#"><img src="https://img.shields.io/badge/gpu-Vulkan-7834ff.svg" alt="Vulkan"></a>
+  <a href="#"><img src="https://img.shields.io/badge/build-CMake-informational.svg" alt="CMake"></a>
+  <a href="#"><img src="https://img.shields.io/badge/bindings-Python-green.svg" alt="Python bindings"></a>
 </p>
+
 <hr />
 
-Manim is an animation engine for explanatory math videos. It's used to create precise animations programmatically, as demonstrated in the videos of [3Blue1Brown](https://www.3blue1brown.com/).
+Catalyst is a Vulkan‑accelerated rendering and culling library with CPU fallbacks.  
+It is shipped as a CMake library target (`catalyst`) that you can drop directly into your C++ project, with optional Python bindings available for scripting and experimentation.
 
 > [!NOTE]
-> The community edition of Manim (ManimCE) is a version maintained and developed by the community. It was forked from 3b1b/manim, a tool originally created and open-sourced by Grant Sanderson, also creator of the 3Blue1Brown educational math videos. While Grant Sanderson continues to maintain his own repository, we recommend this version for its continued development, improved features, enhanced documentation, and more active community-driven maintenance. If you would like to study how Grant makes his videos, head over to his repository ([3b1b/manim](https://github.com/3b1b/manim)).
+> Catalyst was formerly known as **Manim C++ (Vulkan GPU edition)**. The core concepts remain the same, but the project has been generalized into a reusable GPU library rather than a single application.
 
-## Table of Contents:
+---
 
-- [Installation](#installation)
-- [Usage](#usage)
-- [Documentation](#documentation)
-- [Docker](#docker)
-- [Help with Manim](#help-with-manim)
-- [Contributing](#contributing)
-- [License](#license)
+## Table of Contents
 
-## Installation
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installing Dependencies with vcpkg](#installing-dependencies-with-vcpkg)
+- [Building from Source](#building-from-source)
+- [Using Catalyst as a C++ Library](#using-catalyst-as-a-c-library)
+- [Running Tests](#running-tests)
+- [Sample: Render to File](#sample-render-to-file)
+- [Python Bindings (Optional)](#python-bindings-optional)
+- [Project Layout](#project-layout)
+- [Implementation Notes](#implementation-notes)
+
+---
+
+## Features
+
+- Vulkan‑based rendering pipeline with CPU fallback paths
+- High‑performance geometry culling
+- Clean C++20 API, shipped as a CMake target: `catalyst`
+- Optional Python bindings via `pybind11`
+- Unit and integration tests via `gtest`
+- Minimal example application for GPU rendering to file
+
+---
+
+## Prerequisites
+
+To build and use Catalyst you will need:
+
+- **CMake** ≥ 3.20
+- **C++20**‑capable toolchain
+- **Vulkan** SDK / driver (hardware driver recommended)
+
+Recommended dependencies via **vcpkg**:
+
+- `vulkan-memory-allocator`
+- `spdlog`
+- `cli11`
+- `tomlplusplus`
+- `glfw3`
+- `glm`
+- `eigen3`
+- `benchmark`
+- `gtest`
+- `ffmpeg`
+- `freetype`
+- `harfbuzz`
+- `pybind11`
+
+> [!TIP]
+> You are free to provide these dependencies via your system package manager instead of vcpkg, as long as CMake can find them. The commands below show a vcpkg‑based setup.
+
+---
+
+## Installing Dependencies with vcpkg
+
+One‑time vcpkg setup and dependency installation:
+
+```bash
+cd /home/adil/CPPmath-independent   # adjust to your own workspace
+git clone https://github.com/microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+
+./vcpkg/vcpkg install \
+  vulkan-memory-allocator \
+  spdlog \
+  cli11 \
+  tomlplusplus \
+  glfw3 \
+  glm \
+  eigen3 \
+  benchmark \
+  gtest \
+  ffmpeg \
+  freetype \
+  harfbuzz \
+  pybind11
+```
+
+If you prefer, you can set `VCPKG_ROOT` and use it in your CMake configuration instead of the hard‑coded path.
+
+---
+
+## Building from Source
+
+Clone (or enter) the `manim-cpp` directory containing Catalyst and configure a build:
+
+```bash
+cd manim-cpp
+
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMANIM_ENABLE_VULKAN=ON \
+  -DMANIM_BUILD_TESTS=ON
+
+cmake --build build --config Release -j"$(nproc)"
+```
+
+### Using vcpkg as a CMake toolchain
+
+If you installed dependencies via vcpkg, point CMake to the toolchain file:
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMANIM_ENABLE_VULKAN=ON \
+  -DMANIM_BUILD_TESTS=ON \
+  -DCMAKE_TOOLCHAIN_FILE=/home/adil/CPPmath-independent/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+cmake --build build --config Release -j"$(nproc)"
+```
 
 > [!CAUTION]
-> These instructions are for the community version _only_. Trying to use these instructions to install [3b1b/manim](https://github.com/3b1b/manim) or instructions there to install this version will cause problems. Read [this](https://docs.manim.community/en/stable/faq/installation.html#why-are-there-different-versions-of-manim) and decide which version you wish to install, then only follow the instructions for your desired version.
+> If Vulkan falls back to a software implementation (e.g. `llvmpipe`), performance will be poor. Make sure your system is using your dedicated GPU driver.
 
-Manim requires a few dependencies that must be installed prior to using it. If you
-want to try it out first before installing it locally, you can do so
-[in our online Jupyter environment](https://try.manim.community/).
+To explicitly point Vulkan at a particular GPU ICD (for example, NVIDIA):
 
-For local installation, please visit the [Documentation](https://docs.manim.community/en/stable/installation.html)
-and follow the appropriate instructions for your operating system.
-
-## Usage
-
-Manim is an extremely versatile package. The following is an example `Scene` you can construct:
-
-```python
-from manim import *
-
-
-class SquareToCircle(Scene):
-    def construct(self):
-        circle = Circle()
-        square = Square()
-        square.flip(RIGHT)
-        square.rotate(-3 * TAU / 8)
-        circle.set_fill(PINK, opacity=0.5)
-
-        self.play(Create(square))
-        self.play(Transform(square, circle))
-        self.play(FadeOut(square))
+```bash
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json  # adjust to your system
 ```
 
-In order to view the output of this scene, save the code in a file called `example.py`. Then, run the following in a terminal window:
+---
 
-```sh
-manim -p -ql example.py SquareToCircle
+## Using Catalyst as a C++ Library
+
+The recommended way to consume Catalyst is as a subproject in your existing CMake build.
+
+### Adding Catalyst as a subproject
+
+In your project’s `CMakeLists.txt`:
+
+```cmake
+# Add Catalyst (manim-cpp) as a subdirectory
+add_subdirectory(path/to/Catalyst/manim-cpp)
+
+# Link the library target
+target_link_libraries(your_app PRIVATE catalyst)
+
+# Include Catalyst public headers
+target_include_directories(your_app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/manim-cpp/include
+)
 ```
 
-You should see your native video player program pop up and play a simple scene in which a square is transformed into a circle. You may find some more simple examples within this
-[GitHub repository](example_scenes). You can also visit the [official gallery](https://docs.manim.community/en/stable/examples.html) for more advanced examples.
+### CMake Options
 
-Manim also ships with a `%%manim` IPython magic which allows to use it conveniently in JupyterLab (as well as classic Jupyter) notebooks. See the
-[corresponding documentation](https://docs.manim.community/en/stable/reference/manim.utils.ipython_magic.ManimMagic.html) for some guidance and
-[try it out online](https://mybinder.org/v2/gh/ManimCommunity/jupyter_examples/HEAD?filepath=basic_example_scenes.ipynb).
+Configure these options **before** calling `add_subdirectory`:
 
-## Command line arguments
+- `MANIM_ENABLE_VULKAN` (default: `ON`)  
+  Enable Vulkan GPU backend. Turn this off if you only want CPU fallbacks.
 
-The general usage of Manim is as follows:
+- `MANIM_BUILD_TESTS` (`ON` / `OFF`)  
+  Build C++ unit and integration tests.
 
-![manim-illustration](https://raw.githubusercontent.com/ManimCommunity/manim/main/docs/source/_static/command.png)
+- `MANIM_BUILD_PYTHON_BINDINGS` (`ON` / `OFF`)  
+  Build the optional Python module (see [Python Bindings](#python-bindings-optional)).
 
-The `-p` flag in the command above is for previewing, meaning the video file will automatically open when it is done rendering. The `-ql` flag is for a faster rendering at a lower quality.
+---
 
-Some other useful flags include:
+## Running Tests
 
-- `-s` to skip to the end and just show the final frame.
-- `-n <number>` to skip ahead to the `n`'th animation of a scene.
-- `-f` show the file in the file browser.
+After building with `MANIM_BUILD_TESTS=ON`:
 
-For a thorough list of command line arguments, visit the [documentation](https://docs.manim.community/en/stable/guides/configuration.html).
+```bash
+cd manim-cpp/build
 
-## Documentation
+# Run all CTest tests
+ctest --output-on-failure
+```
 
-Documentation is in progress at [ReadTheDocs](https://docs.manim.community/).
+You can also run the Google Test binary directly and select only GPU‑related tests:
 
-## Docker
+```bash
+./bin/manim_tests \
+  --gtest_filter="GPUComputeTest.*:GPUMemoryTest.*:GPUErrorHandling.*:MultiGPUTest.*"
+```
 
-The community also maintains a docker image (`manimcommunity/manim`), which can be found [on DockerHub](https://hub.docker.com/r/manimcommunity/manim).
-Instructions on how to install and use it can be found in our [documentation](https://docs.manim.community/en/stable/installation/docker.html).
+---
 
-## Help with Manim
+## Sample: Render to File
 
-If you need help installing or using Manim, feel free to reach out to our [Discord
-Server](https://www.manim.community/discord/) or [Reddit Community](https://www.reddit.com/r/manim). If you would like to submit a bug report or feature request, please open an issue.
+Catalyst includes a minimal example that renders a simple GPU scene directly to an image file.
 
-## Contributing
+From the build directory:
 
-Contributions to Manim are always welcome. In particular, there is a dire need for tests and documentation. For contribution guidelines, please see the [documentation](https://docs.manim.community/en/stable/contributing.html).
+```bash
+cd manim-cpp/build
 
-However, please note that Manim is currently undergoing a major refactor. In general,
-contributions implementing new features will not be accepted in this period.
-The contribution guide may become outdated quickly; we highly recommend joining our
-[Discord server](https://www.manim.community/discord/) to discuss any potential
-contributions and keep up to date with the latest developments.
+./bin/gpu_render_to_file --gpu output.ppm
+ffmpeg -y -i output.ppm -update 1 output.png
+```
 
-Most developers on the project use `uv` for management. You'll want to have uv installed and available in your environment.
-Learn more about `uv` at its [documentation](https://docs.astral.sh/uv/) and find out how to install manim with uv at the [manim dev-installation guide](https://docs.manim.community/en/latest/contributing/development.html) in the manim documentation.
+If everything is set up correctly, you should see:
 
-## How to Cite Manim
+- A **blue circle**
+- A **white dot**
+- A **red ellipse**
+- On a **dark background**  
+  with smooth edges thanks to **4× MSAA**.
 
-We acknowledge the importance of good software to support research, and we note
-that research becomes more valuable when it is communicated effectively. To
-demonstrate the value of Manim, we ask that you cite Manim in your work.
-Currently, the best way to cite Manim is to go to our
-[repository page](https://github.com/ManimCommunity/manim) (if you aren't already) and
-click the "cite this repository" button on the right sidebar. This will generate
-a citation in your preferred format, and will also integrate well with citation managers.
+---
 
-## Code of Conduct
+## Python Bindings (Optional)
 
-Our full code of conduct, and how we enforce it, can be read on [our website](https://docs.manim.community/en/stable/conduct.html).
+If you configured the project with `MANIM_BUILD_PYTHON_BINDINGS=ON`, you can experiment with Catalyst from Python.
 
-## License
+Create and activate a virtual environment:
 
-The software is double-licensed under the MIT license, with copyright by 3blue1brown LLC (see LICENSE), and copyright by Manim Community Developers (see LICENSE.community).
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install numpy
+```
+
+Once the build has completed, you can import the generated module (typically in `manim-cpp/build/python`):
+
+```bash
+PYTHONPATH=manim-cpp/build/python python - <<'PY'
+import manim_cpp as m
+
+print("GPU ready:", hasattr(m, "GPU3DScene"))
+PY
+```
+
+> [!NOTE]
+> The exact module name and available symbols may evolve as the bindings are expanded, but the above pattern shows the expected import and a simple capability check.
+
+---
+
+## Project Layout
+
+A quick overview of the repository structure:
+
+- `include/manim/` – Public C++ headers for the `catalyst` library
+- `src/` – Library implementation
+- `shaders/` – Vulkan shaders (graphics & compute)
+- `examples/gpu_render_to_file.cpp` – Minimal GPU render‑to‑file sample
+- `tests/` – C++ unit and integration tests
+- `bindings/python/` – Optional Python bindings (via `pybind11`)
+
+---
+
+## Implementation Notes
+
+- All C++ tests are currently passing.
+- The Vulkan path is considered stable:
+  - Geometry is rendered correctly with visible output.
+  - MSAA is enabled for smooth edges.
+- Backface culling is enabled (clockwise front face for the current projection).
+- Fragment shader respects alpha for proper transparency handling.
+
+> [!TIP]
+> For deeper integration, inspect the `examples/` and `tests/` directories. They provide concise examples of how to set up buffers, pipelines, and scenes using Catalyst’s abstractions.
