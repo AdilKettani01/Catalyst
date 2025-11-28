@@ -1,6 +1,6 @@
 <p align="center">
   <!-- Optional: replace with your own logo -->
-  <img src="logo/logo.png" width="220" alt="Catalyst logo" />
+  <img src="logo/logo.png" width="520" alt="Catalyst logo" />
   <br />
   <br />
   <strong>Catalyst</strong>
