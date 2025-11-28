@@ -1,40 +1,83 @@
-● Catalyst GPU Library – Checklist
+# Catalyst GPU Library - Project Status
 
-Updated: 2025-11-27
+Updated: 2025-11-28
 
-===============================================================================
-STATUS
-===============================================================================
-- Build: ✅ Release build clean
-- Tests: ✅ All C++ tests passing
-- GPU: ✅ Vulkan path stable (geometry visible, MSAA on, render-to-file works)
+---
 
-===============================================================================
-HOW TO CONSUME THIS LIBRARY
-===============================================================================
-- Add as a subproject in your CMake build:
-  ```cmake
-  add_subdirectory(path/to/CPPmath-independent/manim-cpp)
-  target_link_libraries(your_app PRIVATE catalyst)
-  target_include_directories(your_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/manim-cpp/include)
-  ```
-- Options (set before add_subdirectory): `MANIM_ENABLE_VULKAN` (ON), `MANIM_BUILD_TESTS` (ON/OFF), `MANIM_BUILD_PYTHON_BINDINGS` (ON/OFF).
-- Sample target: `examples/gpu_render_to_file.cpp` builds `gpu_render_to_file` (run with `--gpu`).
+## Current Status
 
-===============================================================================
-COMPLETED POLISH ITEMS
-===============================================================================
-- ✅ Backface culling enabled (CW front face for Y-flipped projection)
-- ✅ Alpha passed through shaders for opacity support
-- ✅ "Render to File" documentation in manim-cpp/README.md
+| Component | Status |
+|-----------|--------|
+| Build | Release build clean |
+| Tests | 270/270 passing |
+| GPU Rendering | Vulkan stable, MSAA enabled |
+| Text Rendering | SDF text implemented |
+| Animations | FadeIn/FadeOut working |
 
-===============================================================================
-BUILD & TEST
-===============================================================================
-cd /home/adil/CPPmath-independent/manim-cpp
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMANIM_ENABLE_VULKAN=ON -DMANIM_BUILD_TESTS=ON
-cmake --build build --config Release -j$(nproc)
+---
+
+## Quick Start
+
+```bash
+cd manim-cpp/build
+
+# Run tests
+./bin/manim_tests
+
+# Render shapes to image
+./bin/gpu_render_to_file --gpu output.ppm
+
+# Run text animation
+./bin/text_fade_animation
+```
+
+---
+
+## Recent Completions
+
+- [x] Repository cleanup (Python Manim removed)
+- [x] C++ only project structure
+- [x] Text animation example added
+- [x] Backface culling (CW front face)
+- [x] Alpha/opacity through shaders
+- [x] Documentation updated
+
+---
+
+## Examples
+
+| Example | Command | Description |
+|---------|---------|-------------|
+| GPU Render | `./bin/gpu_render_to_file --gpu out.ppm` | Renders shapes to PPM |
+| Text Animation | `./bin/text_fade_animation` | TEXT1/2/3 fade sequence |
+
+---
+
+## Build Commands
+
+```bash
+cd manim-cpp
+
+# Configure
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMANIM_ENABLE_VULKAN=ON \
+  -DMANIM_BUILD_TESTS=ON \
+  -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+
+# Build
+cmake --build build -j$(nproc)
+
+# Test
 cd build && ctest --output-on-failure
+```
 
-GPU-focused tests:
-./bin/manim_tests --gtest_filter="GPUComputeTest.*:GPUMemoryTest.*:GPUErrorHandling.*:MultiGPUTest.*"
+---
+
+## Future Work
+
+- [ ] Video export (MP4 via FFmpeg)
+- [ ] More animation types (Transform, MoveTo, etc.)
+- [ ] LaTeX/MathTex rendering
+- [ ] Interactive window mode
+- [ ] More geometry primitives

@@ -380,6 +380,9 @@ endif()
 add_executable(gpu_render_to_file examples/gpu_render_to_file.cpp)
 target_link_libraries(gpu_render_to_file PRIVATE catalyst)
 
+add_executable(text_fade_animation examples/text_fade_animation.cpp)
+target_link_libraries(text_fade_animation PRIVATE catalyst)
+
 # ==============================================================================
 # Python Bindings
 # ==============================================================================
