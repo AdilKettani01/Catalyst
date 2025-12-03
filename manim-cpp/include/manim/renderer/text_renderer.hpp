@@ -62,7 +62,8 @@ public:
         VkPhysicalDevice physical_device,
         VkRenderPass render_pass,
         MemoryPool& pool,
-        uint32_t subpass = 0
+        uint32_t subpass = 0,
+        VkSampleCountFlagBits msaa_samples = VK_SAMPLE_COUNT_1_BIT
     );
 
     /**
@@ -145,6 +146,7 @@ private:
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     MemoryPool* pool_ = nullptr;
     uint32_t subpass_ = 0;
+    VkSampleCountFlagBits msaa_samples_ = VK_SAMPLE_COUNT_1_BIT;
     bool initialized_ = false;
 
     // Shaders

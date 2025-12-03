@@ -231,8 +231,34 @@ void VulkanRenderer::render_scene(Scene& scene, Camera& camera) {
     stats_.frame_number++;
 }
 
-void VulkanRenderer::render_mobject(Mobject& /*mobject*/) {
-    // For now, render_scene handles all objects in the scene graph.
+void VulkanRenderer::render_mobject(Mobject& mobject) {
+    if (!gpu_ready_ || !gpu_renderer_) {
+        return;
+    }
+
+    // Reset and begin command buffer for standalone render
+    vkResetCommandBuffer(command_buffer_, 0);
+    auto begin_info = vulkan_utils::one_time_begin_info();
+    vkBeginCommandBuffer(command_buffer_, &begin_info);
+
+    // Create temporary scene with the mobject
+    // Pass a non-owning shared_ptr to this renderer to avoid Scene creating its own
+    auto self_renderer = std::shared_ptr<Renderer>(std::shared_ptr<Renderer>{}, this);
+    Scene temp_scene(self_renderer);
+
+    // Add mobject with non-owning shared_ptr
+    auto mob_ptr = std::shared_ptr<Mobject>(std::shared_ptr<Mobject>{}, &mobject);
+    temp_scene.add(mob_ptr);
+
+    Camera camera;
+    gpu_renderer_->render(command_buffer_, temp_scene, camera);
+
+    // End and submit command buffer
+    vkEndCommandBuffer(command_buffer_);
+
+    VkSubmitInfo submit = vulkan_utils::submit_info(&command_buffer_);
+    vkQueueSubmit(graphics_queue_, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphics_queue_);
 }
 
 void VulkanRenderer::clear(const math::Vec4& color) {

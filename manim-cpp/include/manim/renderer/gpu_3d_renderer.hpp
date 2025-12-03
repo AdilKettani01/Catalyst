@@ -14,6 +14,7 @@
 #pragma once
 
 #include <manim/renderer/renderer.hpp>
+#include <manim/renderer/text_renderer.hpp>
 #include <manim/core/compute_engine.hpp>
 #include <manim/culling/indirect_renderer.hpp>
 #include <vulkan/vulkan.h>
@@ -414,6 +415,10 @@ private:
     culling::IndirectRenderer indirect_renderer_;
     bool indirect_rendering_enabled_ = false;
     bool indirect_renderer_initialized_ = false;
+
+    // Text rendering
+    TextRenderer text_renderer_;
+    bool text_renderer_initialized_ = false;
 
     // Pipelines
     VkPipeline geometry_pipeline_ = VK_NULL_HANDLE;

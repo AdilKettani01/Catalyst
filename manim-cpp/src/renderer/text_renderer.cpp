@@ -69,7 +69,8 @@ bool TextRenderer::initialize(
     VkPhysicalDevice physical_device,
     VkRenderPass render_pass,
     MemoryPool& pool,
-    uint32_t subpass
+    uint32_t subpass,
+    VkSampleCountFlagBits msaa_samples
 ) {
     if (initialized_) return true;
 
@@ -78,6 +79,7 @@ bool TextRenderer::initialize(
     render_pass_ = render_pass;
     pool_ = &pool;
     subpass_ = subpass;
+    msaa_samples_ = msaa_samples;
 
     if (!device_) {
         spdlog::warn("TextRenderer: No Vulkan device provided");
@@ -165,8 +167,27 @@ void TextRenderer::shutdown() {
 
 bool TextRenderer::load_shaders() {
     // Try to load compiled SPIR-V shaders from build directory
-    auto vert_code = read_file("shaders/sdf_text.vert.spv");
-    auto frag_code = read_file("shaders/sdf_text.frag.spv");
+    // Check multiple paths since shaders may be in subdirectories
+    std::vector<std::string> vert_paths = {
+        "shaders/vertex/sdf_text.vert.spv",
+        "shaders/sdf_text.vert.spv",
+        "../shaders/vertex/sdf_text.vert.spv"
+    };
+    std::vector<std::string> frag_paths = {
+        "shaders/fragment/sdf_text.frag.spv",
+        "shaders/sdf_text.frag.spv",
+        "../shaders/fragment/sdf_text.frag.spv"
+    };
+
+    std::vector<char> vert_code, frag_code;
+    for (const auto& path : vert_paths) {
+        vert_code = read_file(path);
+        if (!vert_code.empty()) break;
+    }
+    for (const auto& path : frag_paths) {
+        frag_code = read_file(path);
+        if (!frag_code.empty()) break;
+    }
 
     if (vert_code.empty() || frag_code.empty()) {
         spdlog::warn("TextRenderer: SPIR-V shaders not found, text rendering disabled");
@@ -409,11 +430,11 @@ bool TextRenderer::create_pipeline() {
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
 
-    // Multisampling
+    // Multisampling - must match the render pass sample count
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisampling.sampleShadingEnable = VK_FALSE;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisampling.rasterizationSamples = msaa_samples_;
 
     // Depth/stencil (disabled for 2D text)
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
@@ -594,10 +615,22 @@ void TextRenderer::render_text(VkCommandBuffer cmd, Text& text, const math::Mat4
         uniform_buffer_.unmap();
     }
 
-    // Bind instance buffer (binding 1)
-    // Note: This requires the Text object to have its glyph instance buffer ready
-    // For now, we skip if not available
-    spdlog::debug("TextRenderer: Rendering text with {} glyphs", text.get_text().length());
+    // Bind instance buffer and issue draw
+    const GPUBuffer* instance_buffer = text.get_glyph_buffer();
+    if (instance_buffer && instance_buffer->get_buffer() != VK_NULL_HANDLE) {
+        VkBuffer buffers[] = {instance_buffer->get_buffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cmd, 1, 1, buffers, offsets);  // Binding 1 for instances
+
+        uint32_t glyph_count = static_cast<uint32_t>(text.get_glyph_count());
+        if (glyph_count > 0) {
+            vkCmdDraw(cmd, 6, glyph_count, 0, 0);  // 6 vertices per quad, N instances
+            spdlog::debug("TextRenderer: Rendered text '{}' with {} glyphs",
+                          text.get_text(), glyph_count);
+        }
+    } else {
+        spdlog::debug("TextRenderer: No glyph buffer for text '{}'", text.get_text());
+    }
 }
 
 void TextRenderer::upload_text_to_gpu(Text& text) {

@@ -1,6 +1,7 @@
 // Advanced GPU 3D renderer implementation (stubbed for compilation)
 #include "manim/renderer/gpu_3d_renderer.hpp"
 #include "manim/mobject/vmobject.hpp"
+#include "manim/mobject/text/text.hpp"
 #include "manim/scene/scene.h"
 #include <filesystem>
 #include <fstream>
@@ -68,6 +69,24 @@ void GPU3DRenderer::initialize(
     create_render_pass();
     create_framebuffers();
     create_pipelines();
+
+    // Initialize text renderer with matching MSAA sample count
+    if (render_pass_ != VK_NULL_HANDLE && memory_pool_) {
+        text_renderer_initialized_ = text_renderer_.initialize(
+            device_,
+            physical_device_,
+            render_pass_,
+            *memory_pool_,
+            0,  // subpass 0
+            msaa_samples_  // Pass MSAA sample count for pipeline compatibility
+        );
+        if (text_renderer_initialized_) {
+            spdlog::info("TextRenderer initialized for GPU3DRenderer (MSAA: {}x)",
+                         static_cast<int>(msaa_samples_));
+        } else {
+            spdlog::warn("TextRenderer initialization failed - text rendering disabled");
+        }
+    }
 
     spdlog::info("GPU 3D renderer initialized: {}x{}, MSAA: {}x", width, height, msaa_samples);
 }
@@ -315,8 +334,22 @@ void GPU3DRenderer::render(
     std::vector<uint32_t> temp_indices;
     const uint32_t segments = std::max<uint32_t>(tessellation_segments_per_curve_, 8u);
 
+    // Collect Text objects for separate rendering
+    std::vector<std::pair<std::shared_ptr<Text>, math::Mat4>> text_objects;
+
     for (const auto& mobj : all_mobjects) {
         if (!mobj) continue;
+
+        // Check for Text objects first (before VMobject since Text inherits from VMobject)
+        auto text_obj = std::dynamic_pointer_cast<Text>(mobj);
+        if (text_obj) {
+            math::Mat4 world = mobj->get_world_transform();
+            text_objects.push_back({text_obj, world});
+            spdlog::debug("GPU3DRenderer: Found Text object '{}' with opacity {}",
+                          text_obj->get_text(), text_obj->get_opacity());
+            continue;  // Don't process as VMobject
+        }
+
         auto vmobj = std::dynamic_pointer_cast<VMobject>(mobj);
         math::Mat4 world = mobj->get_world_transform();
 
@@ -511,6 +544,27 @@ void GPU3DRenderer::render(
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
 
         vkCmdDrawIndexed(cmd, draw.index_count, 1, draw.first_index, draw.vertex_offset, 0);
+    }
+
+    // Render text objects using TextRenderer
+    if (text_renderer_initialized_ && !text_objects.empty()) {
+        spdlog::debug("GPU3DRenderer: Rendering {} Text objects via TextRenderer", text_objects.size());
+
+        // Set up projection matrix for text
+        text_renderer_.set_matrices(proj, math::Mat4(1.0f));
+
+        // Begin text batch
+        text_renderer_.begin_batch(cmd);
+
+        // Render each Text object
+        for (auto& [text_ptr, model_matrix] : text_objects) {
+            if (text_ptr) {
+                text_renderer_.render_text(cmd, *text_ptr, model_matrix);
+            }
+        }
+
+        // End text batch
+        text_renderer_.end_batch(cmd);
     }
 
     swapchain_present_index_ = frame_index;
@@ -1252,6 +1306,12 @@ void GPU3DRenderer::upload_batched_buffers(
 }
 
 void GPU3DRenderer::destroy_resources() {
+    // Shutdown text renderer first
+    if (text_renderer_initialized_) {
+        text_renderer_.shutdown();
+        text_renderer_initialized_ = false;
+    }
+
     gbuffer_ = {};
     voxel_grid_ = {};
     voxel_mipmaps_.clear();

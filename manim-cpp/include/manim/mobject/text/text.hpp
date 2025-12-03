@@ -152,6 +152,18 @@ public:
      */
     static const GPUImage& get_sdf_atlas();
 
+    /**
+     * @brief Get glyph instance buffer for GPU rendering
+     */
+    const GPUBuffer* get_glyph_buffer() const {
+        return glyph_instance_buffer_.has_value() ? &(*glyph_instance_buffer_) : nullptr;
+    }
+
+    /**
+     * @brief Get number of glyphs to render
+     */
+    size_t get_glyph_count() const { return glyph_instances_.size(); }
+
     // ========================================================================
     // Per-Character Access
     // ========================================================================

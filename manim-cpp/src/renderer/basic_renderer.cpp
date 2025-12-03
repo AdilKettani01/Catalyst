@@ -3,6 +3,7 @@
 
 #include "manim/mobject/geometry/circle.hpp"
 #include "manim/mobject/vmobject.hpp"
+#include "manim/mobject/text/text.hpp"
 #include "manim/scene/camera.hpp"
 #include "manim/scene/scene.h"
 
@@ -116,6 +117,36 @@ void BasicRenderer::render_mobject(Mobject& mobject) {
         auto color = annulus->get_fill_color();
         color.w = annulus->get_fill_opacity() * color.w;
         draw_ring(annulus->get_center(), annulus->get_inner_radius(), annulus->get_outer_radius(), color);
+        stats_.draw_calls++;
+        return;
+    }
+
+    // Text: render as filled rectangle with text color (CPU fallback)
+    if (auto* text = dynamic_cast<Text*>(&mobject)) {
+        auto [min_corner, max_corner] = text->get_bounding_box();
+        math::Vec3 center = (min_corner + max_corner) * 0.5f;
+        math::Vec3 size = max_corner - min_corner;
+
+        // If the text has no valid bounding box, use font size to estimate
+        if (size.x <= 0.0f || size.y <= 0.0f) {
+            float font_scale = text->get_font_size() / 72.0f;  // Rough world units
+            size.x = font_scale * static_cast<float>(text->get_text().length()) * 0.5f;
+            size.y = font_scale;
+        }
+
+        // Get text color with opacity applied
+        auto color = text->get_color();
+        color.w *= text->get_opacity();
+
+        if (color.w > 0.0f) {
+            // Draw a filled rectangle representing the text area
+            float rx = size.x * 0.5f;
+            float ry = size.y * 0.5f;
+            draw_filled_ellipse(center, rx, ry, color);
+            spdlog::debug("BasicRenderer: Drew text '{}' fallback at ({}, {})",
+                          text->get_text(), center.x, center.y);
+        }
+
         stats_.draw_calls++;
         return;
     }

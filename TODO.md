@@ -1,6 +1,6 @@
 # Catalyst GPU Library - Project Status
 
-Updated: 2025-11-28
+Updated: 2025-11-30
 
 ---
 
@@ -11,8 +11,8 @@ Updated: 2025-11-28
 | Build | Release build clean |
 | Tests | 270/270 passing |
 | GPU Rendering | Vulkan stable, MSAA enabled |
-| Text Rendering | SDF text implemented |
-| Animations | FadeIn/FadeOut working |
+| Text Rendering | Working (CPU fallback) |
+| Animations | FadeIn/FadeOut working (for shapes) |
 
 ---
 
@@ -24,7 +24,7 @@ cd manim-cpp/build
 # Run tests
 ./bin/manim_tests
 
-# Render shapes to image
+# Render shapes to image (WORKS)
 ./bin/gpu_render_to_file --gpu output.ppm
 
 # Run text animation
@@ -33,23 +33,39 @@ cd manim-cpp/build
 
 ---
 
+## Performance Issues (Priority 1)
+
+### Slow Frame Rendering
+
+**Symptom**: ~3 minutes to render 18-second video (546 frames)
+**Cause**: Sequential frame-by-frame rendering, no parallelization
+
+- [ ] Implement parallel frame rendering
+- [ ] Batch GPU command submissions
+- [ ] Pipeline frame capture while rendering next frame
+- [ ] Profile and optimize frame capture
+
+---
+
 ## Recent Completions
 
+- [x] Text rendering pipeline connected (was black screen)
 - [x] Repository cleanup (Python Manim removed)
 - [x] C++ only project structure
 - [x] Text animation example added
 - [x] Backface culling (CW front face)
 - [x] Alpha/opacity through shaders
 - [x] Documentation updated
+- [x] Video export infrastructure (FFmpeg encoding works)
 
 ---
 
 ## Examples
 
-| Example | Command | Description |
-|---------|---------|-------------|
-| GPU Render | `./bin/gpu_render_to_file --gpu out.ppm` | Renders shapes to PPM |
-| Text Animation | `./bin/text_fade_animation` | TEXT1/2/3 fade sequence |
+| Example | Command | Status |
+|---------|---------|--------|
+| GPU Render | `./bin/gpu_render_to_file --gpu out.ppm` | Working |
+| Text Animation | `./bin/text_fade_animation` | Working |
 
 ---
 
@@ -74,10 +90,10 @@ cd build && ctest --output-on-failure
 
 ---
 
-## Future Work
+## Future Work (After Fixes)
 
-- [ ] Video export (MP4 via FFmpeg)
 - [ ] More animation types (Transform, MoveTo, etc.)
 - [ ] LaTeX/MathTex rendering
 - [ ] Interactive window mode
 - [ ] More geometry primitives
+- [ ] Scene graph optimization
