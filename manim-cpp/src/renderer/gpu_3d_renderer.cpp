@@ -2,6 +2,7 @@
 #include "manim/renderer/gpu_3d_renderer.hpp"
 #include "manim/mobject/vmobject.hpp"
 #include "manim/mobject/text/text.hpp"
+#include "manim/text/sdf_generator.hpp"
 #include "manim/scene/scene.h"
 #include <filesystem>
 #include <fstream>
@@ -550,15 +551,35 @@ void GPU3DRenderer::render(
     if (text_renderer_initialized_ && !text_objects.empty()) {
         spdlog::debug("GPU3DRenderer: Rendering {} Text objects via TextRenderer", text_objects.size());
 
+        // Ensure SDF atlases are uploaded to GPU
+        SDFAtlasManager& atlas_manager = SDFAtlasManager::instance();
+        if (memory_pool_) {
+            atlas_manager.upload_dirty_atlases(*memory_pool_);
+        }
+
         // Set up projection matrix for text
         text_renderer_.set_matrices(proj, math::Mat4(1.0f));
 
         // Begin text batch
         text_renderer_.begin_batch(cmd);
 
-        // Render each Text object
+        // Render each Text object, binding the appropriate atlas for each font
         for (auto& [text_ptr, model_matrix] : text_objects) {
             if (text_ptr) {
+                // Get the SDF atlas for this text object's font
+                const std::string& font_name = text_ptr->get_font_name();
+                SDFAtlas* atlas = atlas_manager.get_atlas(font_name);
+                if (atlas) {
+                    const GPUImage& gpu_texture = atlas->get_gpu_texture();
+                    if (gpu_texture.get_view() != VK_NULL_HANDLE) {
+                        text_renderer_.set_atlas(gpu_texture);
+                    } else {
+                        spdlog::warn("GPU3DRenderer: SDF atlas GPU texture view is null for font '{}'", font_name);
+                    }
+                } else {
+                    spdlog::warn("GPU3DRenderer: No SDF atlas available for font '{}'", font_name);
+                }
+
                 text_renderer_.render_text(cmd, *text_ptr, model_matrix);
             }
         }

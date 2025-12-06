@@ -47,6 +47,11 @@ public:
     Text& set_font(const std::string& font_name);
 
     /**
+     * @brief Get font name
+     */
+    const std::string& get_font_name() const { return font_name_; }
+
+    /**
      * @brief Set font size
      */
     Text& set_font_size(float size);
