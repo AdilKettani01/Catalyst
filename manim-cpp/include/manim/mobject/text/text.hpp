@@ -133,17 +133,22 @@ public:
      * @brief Glyph instance data for GPU rendering
      *
      * Layout must match shader vertex inputs (sdf_text.vert):
-     * - location 2: vec4 (position.xy, size.xy) - pos_size
+     * - location 2: vec4 (position.xy, size.xy) - pos_size  [position + size read as single vec4]
      * - location 3: vec4 uv_rect
      * - location 4: vec4 color
      * - location 5: vec4 effects (outline_width, glow_intensity, shadow_offset, shadow_blur)
+     *
+     * Total size: 64 bytes (4 x vec4 equivalent)
+     * Stride for instanced rendering must equal sizeof(GlyphInstance)
      */
     struct GlyphInstance {
-        math::Vec2 position;      // Screen position (location 2.xy)
-        math::Vec2 size;          // Glyph size (location 2.zw)
-        math::Vec4 uv_rect;       // UV rectangle in atlas (x, y, w, h) - location 3
-        math::Vec4 color;         // Text color - location 4
-        math::Vec4 effects;       // (outline_width, glow_intensity, shadow_offset, shadow_blur) - location 5
+        math::Vec2 position;      // Screen position (location 2.xy) - 8 bytes
+        math::Vec2 size;          // Glyph size (location 2.zw) - 8 bytes
+        // Note: position + size are read together as vec4 at location 2
+        math::Vec4 uv_rect;       // UV rectangle in atlas (x, y, w, h) - location 3, 16 bytes
+        math::Vec4 color;         // Text color - location 4, 16 bytes
+        math::Vec4 effects;       // (outline_width, glow_intensity, shadow_offset, shadow_blur) - location 5, 16 bytes
+        // Total: 64 bytes per instance
     };
 
     /**
