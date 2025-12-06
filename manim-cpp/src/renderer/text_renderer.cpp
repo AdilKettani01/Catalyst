@@ -167,21 +167,38 @@ void TextRenderer::shutdown() {
 
 bool TextRenderer::load_shaders() {
     // Try to load compiled SPIR-V shaders from build directory
-    // Check multiple paths since shaders may be in subdirectories
     // CMake compiles shaders to ${CMAKE_BINARY_DIR}/shaders/ which is typically build/shaders/
+    // Priority order:
+    // 1. Installed/package locations (highest priority for deployed builds)
+    // 2. Build directory locations for development builds
+    // 3. Legacy flat shader directory as fallback
     std::vector<std::string> vert_paths = {
-        "build/shaders/vertex/sdf_text.vert.spv",
+        // Installed/package locations (highest priority)
         "shaders/vertex/sdf_text.vert.spv",
+        // Build directory (standard CMake output)
+        "build/shaders/vertex/sdf_text.vert.spv",
+        // Development: running from build directory
+        "../build/shaders/vertex/sdf_text.vert.spv",
+        "../../build/shaders/vertex/sdf_text.vert.spv",
+        // Legacy flat shader directory
         "shaders/sdf_text.vert.spv",
-        "../shaders/vertex/sdf_text.vert.spv",
-        "../build/shaders/vertex/sdf_text.vert.spv"
+        "../shaders/sdf_text.vert.spv",
+        // Source directory (may work with runtime compilation)
+        "../shaders/vertex/sdf_text.vert.spv"
     };
     std::vector<std::string> frag_paths = {
-        "build/shaders/fragment/sdf_text.frag.spv",
+        // Installed/package locations (highest priority)
         "shaders/fragment/sdf_text.frag.spv",
+        // Build directory (standard CMake output)
+        "build/shaders/fragment/sdf_text.frag.spv",
+        // Development: running from build directory
+        "../build/shaders/fragment/sdf_text.frag.spv",
+        "../../build/shaders/fragment/sdf_text.frag.spv",
+        // Legacy flat shader directory
         "shaders/sdf_text.frag.spv",
-        "../shaders/fragment/sdf_text.frag.spv",
-        "../build/shaders/fragment/sdf_text.frag.spv"
+        "../shaders/sdf_text.frag.spv",
+        // Source directory (may work with runtime compilation)
+        "../shaders/fragment/sdf_text.frag.spv"
     };
 
     std::vector<char> vert_code, frag_code;

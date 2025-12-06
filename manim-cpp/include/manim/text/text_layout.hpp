@@ -231,12 +231,18 @@ private:
 
 /**
  * @brief GPU glyph instance data for batched rendering
+ *
+ * Layout must match shader vertex inputs (sdf_text.vert):
+ * - location 2: vec4 position_size (xy = position, zw = size)
+ * - location 3: vec4 uv_rect
+ * - location 4: vec4 color
+ * - location 5: vec4 effects (outline_width, glow_intensity, shadow_offset, shadow_blur)
  */
 struct GPUGlyphInstance {
     math::Vec4 position_size;       // xy = position, zw = size
     math::Vec4 uv_rect;             // UV rectangle in atlas
     math::Vec4 color;               // RGBA color
-    math::Vec4 effects;             // x = outline_width, y = glow, z = shadow, w = reserved
+    math::Vec4 effects;             // x = outline_width, y = glow_intensity, z = shadow_offset, w = shadow_blur
 };
 
 /**
