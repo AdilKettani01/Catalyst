@@ -21,26 +21,38 @@ namespace manim {
 
 /**
  * @brief Uniform buffer for SDF text rendering
+ *
+ * Layout follows std140 rules for GLSL uniform blocks:
+ * - mat4: 64 bytes, aligned to 16
+ * - vec2: 8 bytes, aligned to 8
+ * - float: 4 bytes, aligned to 4
  */
-struct TextUniformBuffer {
-    math::Mat4 projection;
-    math::Mat4 view;
-    math::Mat4 model;
-    math::Vec2 atlas_size;
-    float sdf_range;
-    float time;
+struct alignas(16) TextUniformBuffer {
+    math::Mat4 projection;      // offset 0, 64 bytes
+    math::Mat4 view;            // offset 64, 64 bytes
+    math::Mat4 model;           // offset 128, 64 bytes
+    math::Vec2 atlas_size;      // offset 192, 8 bytes
+    float sdf_range;            // offset 200, 4 bytes
+    float time;                 // offset 204, 4 bytes
+    // Total: 208 bytes (std140 requires 16-byte alignment for struct size)
 };
 
 /**
  * @brief Effects uniform buffer
+ *
+ * Layout follows std140 rules for GLSL uniform blocks:
+ * - vec4: 16 bytes, aligned to 16
+ * - vec2: 8 bytes, aligned to 8
+ * - float: 4 bytes, aligned to 4
  */
-struct TextEffectsBuffer {
-    math::Vec4 outline_color;
-    math::Vec4 glow_color;
-    math::Vec4 shadow_color;
-    math::Vec2 shadow_offset;
-    float smoothing;
-    float gamma;
+struct alignas(16) TextEffectsBuffer {
+    math::Vec4 outline_color;   // offset 0, 16 bytes
+    math::Vec4 glow_color;      // offset 16, 16 bytes
+    math::Vec4 shadow_color;    // offset 32, 16 bytes
+    math::Vec2 shadow_offset;   // offset 48, 8 bytes
+    float smoothing;            // offset 56, 4 bytes
+    float gamma;                // offset 60, 4 bytes
+    // Total: 64 bytes
 };
 
 /**

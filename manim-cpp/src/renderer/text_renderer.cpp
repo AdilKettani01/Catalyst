@@ -185,19 +185,41 @@ bool TextRenderer::load_shaders() {
     };
 
     std::vector<char> vert_code, frag_code;
+    std::string vert_found_path, frag_found_path;
     for (const auto& path : vert_paths) {
         vert_code = read_file(path);
-        if (!vert_code.empty()) break;
+        if (!vert_code.empty()) {
+            vert_found_path = path;
+            break;
+        }
     }
     for (const auto& path : frag_paths) {
         frag_code = read_file(path);
-        if (!frag_code.empty()) break;
+        if (!frag_code.empty()) {
+            frag_found_path = path;
+            break;
+        }
     }
 
     if (vert_code.empty() || frag_code.empty()) {
         spdlog::warn("TextRenderer: SPIR-V shaders not found, text rendering disabled");
+        if (vert_code.empty()) {
+            spdlog::warn("TextRenderer: Vertex shader not found. Searched paths:");
+            for (const auto& path : vert_paths) {
+                spdlog::warn("  - {}", path);
+            }
+        }
+        if (frag_code.empty()) {
+            spdlog::warn("TextRenderer: Fragment shader not found. Searched paths:");
+            for (const auto& path : frag_paths) {
+                spdlog::warn("  - {}", path);
+            }
+        }
         return false;
     }
+
+    spdlog::debug("TextRenderer: Loaded vertex shader from '{}'", vert_found_path);
+    spdlog::debug("TextRenderer: Loaded fragment shader from '{}'", frag_found_path);
 
     vert_shader_ = create_shader_module(device_, vert_code);
     frag_shader_ = create_shader_module(device_, frag_code);
