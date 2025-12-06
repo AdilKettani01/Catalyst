@@ -168,15 +168,20 @@ void TextRenderer::shutdown() {
 bool TextRenderer::load_shaders() {
     // Try to load compiled SPIR-V shaders from build directory
     // Check multiple paths since shaders may be in subdirectories
+    // CMake compiles shaders to ${CMAKE_BINARY_DIR}/shaders/ which is typically build/shaders/
     std::vector<std::string> vert_paths = {
+        "build/shaders/vertex/sdf_text.vert.spv",
         "shaders/vertex/sdf_text.vert.spv",
         "shaders/sdf_text.vert.spv",
-        "../shaders/vertex/sdf_text.vert.spv"
+        "../shaders/vertex/sdf_text.vert.spv",
+        "../build/shaders/vertex/sdf_text.vert.spv"
     };
     std::vector<std::string> frag_paths = {
+        "build/shaders/fragment/sdf_text.frag.spv",
         "shaders/fragment/sdf_text.frag.spv",
         "shaders/sdf_text.frag.spv",
-        "../shaders/fragment/sdf_text.frag.spv"
+        "../shaders/fragment/sdf_text.frag.spv",
+        "../build/shaders/fragment/sdf_text.frag.spv"
     };
 
     std::vector<char> vert_code, frag_code;
@@ -397,8 +402,8 @@ bool TextRenderer::create_pipeline() {
 
     attr_descs[5].binding = 1;
     attr_descs[5].location = 5;
-    attr_descs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;  // effects (outline_width, etc.)
-    attr_descs[5].offset = offsetof(Text::GlyphInstance, sdf_threshold);
+    attr_descs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;  // effects (outline_width, glow, shadow_offset, shadow_blur)
+    attr_descs[5].offset = offsetof(Text::GlyphInstance, effects);
 
     VkPipelineVertexInputStateCreateInfo vertex_input{};
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

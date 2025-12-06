@@ -131,15 +131,19 @@ public:
 
     /**
      * @brief Glyph instance data for GPU rendering
+     *
+     * Layout must match shader vertex inputs (sdf_text.vert):
+     * - location 2: vec4 (position.xy, size.xy) - pos_size
+     * - location 3: vec4 uv_rect
+     * - location 4: vec4 color
+     * - location 5: vec4 effects (outline_width, glow_intensity, shadow_offset, shadow_blur)
      */
     struct GlyphInstance {
-        math::Vec2 position;      // Screen position
-        math::Vec2 size;          // Glyph size
-        math::Vec4 uv_rect;       // UV rectangle in atlas (x, y, w, h)
-        math::Vec4 color;         // Text color
-        float sdf_threshold;      // SDF threshold for sharp edges
-        float outline_width;      // Outline width
-        math::Vec4 outline_color; // Outline color
+        math::Vec2 position;      // Screen position (location 2.xy)
+        math::Vec2 size;          // Glyph size (location 2.zw)
+        math::Vec4 uv_rect;       // UV rectangle in atlas (x, y, w, h) - location 3
+        math::Vec4 color;         // Text color - location 4
+        math::Vec4 effects;       // (outline_width, glow_intensity, shadow_offset, shadow_blur) - location 5
     };
 
     /**

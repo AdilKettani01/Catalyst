@@ -207,9 +207,10 @@ void Text::generate_points() {
 
         // Color
         instance.color = color_;
-        instance.sdf_threshold = 0.5f;
-        instance.outline_width = outline_width_;
-        instance.outline_color = outline_color_;
+        // Pack effects into vec4 matching shader: (outline_width, glow_intensity, shadow_offset, shadow_blur)
+        // shadow_offset is a length here (will use the effects buffer for full 2D offset)
+        float shadow_offset_len = std::sqrt(shadow_offset_.x * shadow_offset_.x + shadow_offset_.y * shadow_offset_.y);
+        instance.effects = math::Vec4(outline_width_, glow_intensity_, shadow_offset_len, shadow_blur_);
 
         glyph_instances_.push_back(instance);
 
