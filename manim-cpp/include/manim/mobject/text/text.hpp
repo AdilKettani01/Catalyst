@@ -126,6 +126,20 @@ public:
     Text& set_max_width(float width);
 
     // ========================================================================
+    // Color & Opacity (override to update glyph instances)
+    // ========================================================================
+
+    /**
+     * @brief Set text color (updates glyph instances)
+     */
+    Text& set_color(const math::Vec4& color);
+
+    /**
+     * @brief Set text opacity (updates glyph instances)
+     */
+    Text& set_opacity(float opacity);
+
+    // ========================================================================
     // GPU SDF Rendering
     // ========================================================================
 
@@ -204,6 +218,13 @@ protected:
      * @brief Layout text (compute glyph positions)
      */
     void layout_text();
+
+    /**
+     * @brief Update glyph instance colors with current color_
+     *
+     * Called when color or opacity changes to keep glyph instances in sync.
+     */
+    void update_glyph_colors();
 
 private:
     // Text content
