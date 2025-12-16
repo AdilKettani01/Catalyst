@@ -1,9 +1,10 @@
 <p align="center">
   <img src="lib/logo_rounded.png" alt="Catalyst logo" width="600" />
 </p>
-# Catalyst
 
-**GPU-First Vulkan Renderer with Manim-Style Animation API**
+# Catalyst - GPU-First Vulkan Renderer
+
+## Project Overview
 
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-red.svg)
