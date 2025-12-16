@@ -1,0 +1,5 @@
+#pragma once
+
+// Convenience umbrella header so users can `#include <Catalyst>`
+#include <catalyst.h>
+

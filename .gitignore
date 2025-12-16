@@ -1,0 +1,36 @@
+# Build directories
+build/
+cmake-build-*/
+build_consumer/
+_install/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled shaders (generated)
+*.spv
+
+# Object files
+*.o
+*.obj
+
+# Debug logs
+d_logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+
+# Submodule git directories
+lib/MicroTeX/.git/
+
+# Claude config
+.claude/

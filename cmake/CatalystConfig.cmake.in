@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+# Runtime assets live under: share/Catalyst/ (shaders/, font/, lib/MicroTeX/res)
+set(CATALYST_RESOURCE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/Catalyst")
+
+include("${CMAKE_CURRENT_LIST_DIR}/CatalystTargets.cmake")
+

@@ -1,0 +1,19375 @@
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include <iostream>
+#include <fstream>
+#include <stdexcept>
+#include <cstdlib>
+#include <vector>
+#include <deque>
+#include <cstring>
+#include <optional>
+#include <set>
+#include <limits>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <functional>
+#include <dlfcn.h>
+#include <unistd.h>
+#include <linux/limits.h>
+#include "catalyst.h"
+
+// MicroTeX for LaTeX rendering
+#include "latex.h"
+#include "platform/cairo/graphic_cairo.h"
+#include <cairomm/cairomm.h>
+#include <pangomm/init.h>
+
+// Get the directory where the executable is located
+std::string getExecutableDir() {
+    char result[PATH_MAX];
+    ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
+    if (count == -1) return "./";
+    std::string path(result, count);
+    size_t lastSlash = path.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        return path.substr(0, lastSlash + 1);
+    }
+    return "./";
+}
+
+static bool fileExists(const std::string& path) {
+    std::ifstream file(path);
+    return file.good();
+}
+
+static std::string ensureTrailingSlash(std::string path) {
+    if (!path.empty() && path.back() != '/' && path.back() != '\\') {
+        path.push_back('/');
+    }
+    return path;
+}
+
+static std::string getDirname(const std::string& path) {
+    size_t lastSlash = path.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        return path.substr(0, lastSlash + 1);
+    }
+    return "./";
+}
+
+static std::string getSharedObjectDir() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&getSharedObjectDir), &info) != 0 && info.dli_fname) {
+        return getDirname(info.dli_fname);
+    }
+    return {};
+}
+
+// Get the base path for resources, with fallback to build/ directory
+std::string getResourceBasePath() {
+    const auto hasShaders = [](const std::string& base) {
+        return fileExists(base + "shaders/morph.vert.spv");
+    };
+
+    // 1) Explicit override via environment variable.
+    if (const char* envPath = std::getenv("CATALYST_RESOURCE_PATH")) {
+        std::string candidate = ensureTrailingSlash(envPath);
+        if (hasShaders(candidate)) return candidate;
+    }
+
+    // 2) Installed layout: resolve relative to the shared library location (works for any prefix).
+    // Try a few parent depths to handle /usr/lib, /usr/lib64, and multiarch directories.
+    std::string soDir = ensureTrailingSlash(getSharedObjectDir());
+    if (!soDir.empty()) {
+        for (int depth = 0; depth <= 4; depth++) {
+            std::string candidate = soDir;
+            for (int i = 0; i < depth; i++) candidate += "../";
+            candidate += "share/Catalyst/";
+            candidate = ensureTrailingSlash(candidate);
+            if (hasShaders(candidate)) return candidate;
+        }
+    }
+
+    // 3) Development layout: resources next to the executable (current behavior).
+    std::string exeDir = ensureTrailingSlash(getExecutableDir());
+    if (hasShaders(exeDir)) {
+        return exeDir;
+    }
+
+    // 4) IDE builds: try ../build/ relative to the executable.
+    std::string buildPath = ensureTrailingSlash(exeDir + "../build/");
+    if (hasShaders(buildPath)) {
+        return buildPath;
+    }
+
+    // Default to executable directory
+    return exeDir;
+}
+
+const int MAX_FRAMES_IN_FLIGHT = 3;  // Triple buffering for better GPU utilization
+
+const std::vector<const char*> validationLayers = {
+    "VK_LAYER_KHRONOS_validation"
+};
+
+const std::vector<const char*> deviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+
+#ifdef NDEBUG
+const bool enableValidationLayers = false;
+#else
+const bool enableValidationLayers = true;
+#endif
+
+struct Vertex {
+    float pos[2];
+    float texCoord[2];
+    float charIndex;  // Character index for per-character animations (Write, LetterByLetter)
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(Vertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Vertex, texCoord);
+
+        attributeDescriptions[2].binding = 0;
+        attributeDescriptions[2].location = 2;
+        attributeDescriptions[2].format = VK_FORMAT_R32_SFLOAT;
+        attributeDescriptions[2].offset = offsetof(Vertex, charIndex);
+
+        return attributeDescriptions;
+    }
+};
+
+// Vertex for shapes (position only, no texture coords)
+struct ShapeVertex {
+    float pos[2];
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(ShapeVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 1> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 1> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(ShapeVertex, pos);
+
+        return attributeDescriptions;
+    }
+};
+
+// 3D Vertex for 3D shapes (position + normal for lighting)
+struct Shape3DVertex {
+    float pos[3];       // 3D position
+    float normal[3];    // Surface normal for lighting
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(Shape3DVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        // Position
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(Shape3DVertex, pos);
+
+        // Normal
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Shape3DVertex, normal);
+
+        return attributeDescriptions;
+    }
+};
+
+struct QueueFamilyIndices {
+    std::optional<uint32_t> graphicsFamily;
+    std::optional<uint32_t> presentFamily;
+    std::optional<uint32_t> transferFamily;   // Dedicated transfer queue
+    std::optional<uint32_t> computeFamily;    // Async compute queue
+
+    bool isComplete() {
+        return graphicsFamily.has_value() && presentFamily.has_value();
+    }
+
+    bool hasTransfer() {
+        return transferFamily.has_value();
+    }
+
+    bool hasCompute() {
+        return computeFamily.has_value();
+    }
+};
+
+// GPU performance metrics for load monitoring
+struct GPUMetrics {
+    double gpuFrameTimeMs = 0.0;
+    double avgFrameTimeMs = 0.0;
+    uint64_t frameCount = 0;
+    uint64_t lastTimestamp = 0;
+    bool isOverloaded = false;
+
+    static constexpr double OVERLOAD_THRESHOLD_MS = 33.3;  // 30 FPS threshold
+    static constexpr double WARNING_THRESHOLD_MS = 16.6;   // 60 FPS threshold
+};
+
+// GPU device info for multi-GPU enumeration
+struct GPUDeviceInfo {
+    VkPhysicalDevice device = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties properties;
+    VkPhysicalDeviceMemoryProperties memoryProperties;
+    VkPhysicalDeviceFeatures features;
+    QueueFamilyIndices queueFamilies;
+    int score = 0;
+    bool isPrimary = false;
+};
+
+struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities;
+    std::vector<VkSurfaceFormatKHR> formats;
+    std::vector<VkPresentModeKHR> presentModes;
+};
+
+enum class AnimationType { None, FadeIn, FadeOut, MoveTo, Scale, Rotate, Transform, Morph, Write, LetterByLetter, DrawBorderThenFill, Indicate, Flash, Circumscribe, Wiggle, Pulse, FocusOn, MoveAlongPath, SpiralIn, SpiralOut, Homotopy, PhaseFlow };
+
+// Element type for cross-element references (used by Transform and Groups)
+enum class ElementType {
+    Text, Math, Shape, Image, Graph, Axes, NumberLine,
+    BarChart, PieChart, VectorField, Table, Vector,
+    Shape3D, Axes3D, Surface3D, Group
+};
+
+// Reference to another element for Transform animation and Group membership
+struct ElementRef {
+    ElementType type = ElementType::Text;
+    size_t index = 0;
+    bool valid = false;
+};
+
+// Render item for z-sorted drawing
+struct RenderItem {
+    ElementType type;
+    size_t index;
+    int zIndex;
+
+    bool operator<(const RenderItem& other) const {
+        if (zIndex != other.zIndex) return zIndex < other.zIndex;
+        if (type != other.type) return type < other.type;
+        return index < other.index;
+    }
+};
+
+// Animation queue entry for chaining animations with then()
+struct AnimationQueueEntry {
+    AnimationType type = AnimationType::None;
+    // Scene time (seconds since sceneStartTime) when this animation should begin.
+    float startTime = 0.0f;
+    float duration = 1.0f;
+    Easing easing = Easing::EaseOutCubic;
+
+    // One-shot loop modifiers captured at scheduling time (applied when starting this entry).
+    int loopCount = 0;          // 0 = no loop, -1 = forever, N = repeat N times
+    bool loopPingPong = false;  // Alternate direction each loop
+
+    Direction direction = Direction::NONE;
+    float shiftAmount = 0.1f;
+
+    // Generic numeric payload (meaning depends on AnimationType + element kind)
+    // - MoveTo: targetX/targetY[/targetZ] (pixels for 2D, world coords for 3D)
+    // - Shape3D RotateTo: targetX/targetY/targetZ (Euler angles, engine units)
+    float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+    // - Scale / ScaleTo: targetScale
+    float targetScale = 1.0f;
+    // - Rotate (2D): targetRotation (degrees)
+    float targetRotation = 0.0f;
+
+    // Cross-element reference (Transform)
+    ElementRef elementTarget;
+
+    // Shape morph target
+    size_t morphTargetIndex = SIZE_MAX;
+
+    // Emphasis payload (Indicate/Flash/Wiggle/Pulse)
+    float emphasisFlashR = 1.0f, emphasisFlashG = 1.0f, emphasisFlashB = 0.0f;
+    float emphasisIntensity = 1.0f;
+    float emphasisPeakScale = 1.2f;
+    int emphasisWiggleCycles = 3;
+    float emphasisWiggleAngle = 0.1f;
+
+    // Circumscribe payload
+    float circumscribeColorR = 1.0f, circumscribeColorG = 1.0f, circumscribeColorB = 0.0f;
+    float circumscribeStrokeWidth = 3.0f;
+    float circumscribePadding = 10.0f;
+
+    // Path payload (MoveAlongPath)
+    std::vector<float> pathPointsX;
+    std::vector<float> pathPointsY;
+    bool pathSmooth = true;
+
+    // Spiral payload (SpiralIn/SpiralOut)
+    float spiralRotations = 2.0f;
+
+    // Homotopy payload
+    int homotopyType = 0;
+    float homotopyAmplitude = 0.1f;
+    float homotopyFrequency = 2.0f;
+
+    // PhaseFlow payload
+    int phaseFlowType = 0;
+    float phaseFlowStrength = 1.0f;
+};
+
+// Morph vertex for interpolation (source and target positions)
+struct MorphVertex {
+    float sourcePos[2];
+    float targetPos[2];
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(MorphVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(MorphVertex, sourcePos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(MorphVertex, targetPos);
+
+        return attributeDescriptions;
+    }
+};
+
+// State for morph animation (geometric interpolation between shapes)
+struct MorphState {
+    bool active = false;
+    size_t targetIndex = 0;
+
+    // Normalized vertex data (same count for source and target)
+    std::vector<MorphVertex> vertices;
+    uint32_t normalizedVertexCount = 0;
+
+    // Color interpolation
+    float sourceR = 1.0f, sourceG = 1.0f, sourceB = 1.0f;
+    float targetR = 1.0f, targetG = 1.0f, targetB = 1.0f;
+
+    // GPU buffer for morph vertices
+    VkBuffer morphVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory morphVertexMemory = VK_NULL_HANDLE;
+
+    float morphProgress = 0.0f;
+};
+
+// Per-text element state
+struct TextObject {
+    // Content
+    std::string text;
+
+    // Rendering properties
+    float fontSize = 64.0f;
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Stroke properties
+    float strokeWidth = 0.0f;  // 0 = no stroke
+    float strokeColorR = 0.0f;
+    float strokeColorG = 0.0f;
+    float strokeColorB = 0.0f;
+
+    // Gradient properties
+    bool useGradient = false;
+    float gradientEndR = 1.0f;
+    float gradientEndG = 1.0f;
+    float gradientEndB = 1.0f;
+    float gradientAngle = 0.0f;  // In radians
+
+    // Multi-line / Paragraph properties
+    float lineHeight = 1.2f;              // Multiplier of fontSize (1.2 = 120%)
+    float maxWidth = 0.0f;                // Max width for word wrap (0 = no wrap)
+    TextAlignment alignment = TextAlignment::LEFT;
+
+    // Cached multi-line layout (computed during vertex generation)
+    mutable std::vector<std::string> lines;
+    mutable float totalWidth = 0.0f;      // Width of widest line
+    mutable float totalHeight = 0.0f;     // Total height of all lines
+
+    // Positioning
+    Position anchor = Position::CENTER;
+    float posX = 0.0f, posY = 0.0f;
+    bool usePixelPosition = false;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+
+    // Directional animation fields
+    Direction animationDirection = Direction::NONE;
+    float animationShiftAmount = 0.1f;  // NDC units (0.1 = 10% of screen)
+    float currentOffsetX = 0.0f;
+    float currentOffsetY = 0.0f;
+
+    // Timeline scheduling
+    float scheduledStartTime = 0.0f;  // Scene time when element becomes active
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;
+    float elementDelay = 0.0f;  // Delay before next animation starts
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;  // Flag set by then()
+    float chainedStartTime = 0.0f;    // Start time for next chained animation
+
+    // Loop animation
+    int loopCount = 0;              // 0=no loop, -1=forever, N=repeat N times
+    int currentLoopIteration = 0;
+    bool loopPingPong = false;      // If true, alternate direction each loop
+    bool loopReverse = false;       // Current direction in ping-pong
+
+    // MoveTo animation
+    float moveStartX = 0.0f, moveStartY = 0.0f;    // Starting position (NDC)
+    float moveTargetX = 0.0f, moveTargetY = 0.0f;  // Target position (NDC)
+
+    // Scale animation
+    float scaleStart = 1.0f;    // Starting scale
+    float scaleTarget = 1.0f;   // Target scale
+    float currentScale = 1.0f;  // Current interpolated scale
+
+    // Rotate animation
+    float rotateStart = 0.0f;      // Starting rotation (radians)
+    float rotateTarget = 0.0f;     // Target rotation (radians)
+    float currentRotation = 0.0f;  // Current interpolated rotation
+
+    // Transform animation (cross-fade to another element)
+    ElementRef transformTarget;                         // Target element reference
+    float transformSourceOpacityStart = 1.0f;           // Source opacity at transform start
+    bool isTransformTarget = false;                     // True if this element is being transformed TO
+    size_t transformControllerIndex = 0;                // Index of element controlling this transform
+    ElementType transformControllerType = ElementType::Text;  // Type of controlling element
+
+    // Vertex data (offset into shared buffer)
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    // Per-character animation fields (for Write, LetterByLetter)
+    mutable int totalCharCount = 0;     // Total renderable characters (computed during vertex generation)
+    float charRevealProgress = 1.0f;    // 0.0 = no chars visible, 1.0 = all visible
+
+    // Separate stroke/fill opacity (for DrawBorderThenFill)
+    float strokeOpacity = 1.0f;         // Independent stroke opacity (0.0-1.0)
+    float fillOpacity = 1.0f;           // Independent fill opacity (0.0-1.0)
+    bool useSeparateStrokeFill = false; // Enable split stroke/fill rendering
+
+    // Emphasis animation - original state storage (for ping-pong animations)
+    float originalColorR = 1.0f;
+    float originalColorG = 1.0f;
+    float originalColorB = 1.0f;
+    float originalScale = 1.0f;
+    float originalRotation = 0.0f;
+    float originalOpacity = 1.0f;
+
+    // Emphasis animation parameters
+    float emphasisPeakScale = 1.2f;        // Peak scale for Indicate/Pulse (1.2 = 20% larger)
+    float emphasisFlashColorR = 1.0f;      // Flash highlight color
+    float emphasisFlashColorG = 1.0f;
+    float emphasisFlashColorB = 0.0f;      // Default: yellow
+    float emphasisWiggleAngle = 0.1f;      // Wiggle amplitude in radians (~6 degrees)
+    int emphasisWiggleCycles = 3;          // Number of oscillations for Wiggle
+    float emphasisIntensity = 1.0f;        // Overall intensity (0.0-1.0)
+
+    // Circumscribe-specific
+    size_t circumscribeShapeIndex = SIZE_MAX;  // Index of temporary shape
+    bool hasCircumscribeShape = false;
+
+    // FocusOn-specific
+    bool isFocusTarget = false;  // If true, this element stays bright during FocusOn
+
+    // Movement animation - MoveAlongPath
+    std::vector<float> pathPointsX;
+    std::vector<float> pathPointsY;
+    bool pathSmooth = true;  // Use Catmull-Rom interpolation
+
+    // Movement animation - Spiral
+    float spiralStartRadius = 0.0f;
+    float spiralEndRadius = 0.0f;
+    float spiralRotations = 2.0f;
+    float spiralCenterX = 0.0f;
+    float spiralCenterY = 0.0f;
+
+    // Movement animation - Homotopy
+    int homotopyType = 0;  // 0=wave, 1=ripple, 2=shear, 3=twist
+    float homotopyAmplitude = 0.1f;
+    float homotopyFrequency = 2.0f;
+    float homotopyBaseX = 0.0f;  // Starting position for homotopy
+    float homotopyBaseY = 0.0f;
+
+    // Movement animation - PhaseFlow
+    int phaseFlowType = 0;  // 0=circular, 1=sink, 2=source, 3=saddle
+    float phaseFlowStrength = 1.0f;
+    float lastProgress = 0.0f;  // For incremental integration
+
+    // Base position in NDC (set during vertex buffer generation, used for MoveTo)
+    mutable float baseNdcX = 0.0f;
+    mutable float baseNdcY = 0.0f;
+
+    // Color conversion helpers
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+
+    void setColorRGB(int r, int g, int b) {
+        colorR = std::clamp(r, 0, 255) / 255.0f;
+        colorG = std::clamp(g, 0, 255) / 255.0f;
+        colorB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    void setColorHSL(float h, float s, float l) {
+        // HSL to RGB conversion
+        if (s == 0) {
+            colorR = colorG = colorB = l;
+        } else {
+            auto hue2rgb = [](float p, float q, float t) {
+                if (t < 0) t += 1;
+                if (t > 1) t -= 1;
+                if (t < 1.0f/6) return p + (q - p) * 6 * t;
+                if (t < 1.0f/2) return q;
+                if (t < 2.0f/3) return p + (q - p) * (2.0f/3 - t) * 6;
+                return p;
+            };
+            float q = l < 0.5f ? l * (1 + s) : l + s - l * s;
+            float p = 2 * l - q;
+            colorR = hue2rgb(p, q, h/360.0f + 1.0f/3);
+            colorG = hue2rgb(p, q, h/360.0f);
+            colorB = hue2rgb(p, q, h/360.0f - 1.0f/3);
+        }
+    }
+
+    // Stroke color conversion helpers
+    void setStrokeColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            strokeColorR = r / 255.0f;
+            strokeColorG = g / 255.0f;
+            strokeColorB = b / 255.0f;
+        }
+    }
+
+    void setStrokeColorRGB(int r, int g, int b) {
+        strokeColorR = std::clamp(r, 0, 255) / 255.0f;
+        strokeColorG = std::clamp(g, 0, 255) / 255.0f;
+        strokeColorB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    // Gradient color helper
+    void setGradientEndHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            gradientEndR = r / 255.0f;
+            gradientEndG = g / 255.0f;
+            gradientEndB = b / 255.0f;
+        }
+    }
+
+    // Morph animation state
+    MorphState morphState;
+    bool isMorphTarget = false;  // True if this text is the target of a morph
+
+    bool cleared = false;  // True if element was cleared and should not render
+};
+
+// Per-math element state (LaTeX formulas)
+struct MathObject {
+    // Content
+    std::string latex;
+
+    // Rendering properties
+    float fontSize = 64.0f;
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Positioning
+    Position anchor = Position::CENTER;
+    float posX = 0.0f, posY = 0.0f;
+    bool usePixelPosition = false;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+
+    // Directional animation fields
+    Direction animationDirection = Direction::NONE;
+    float animationShiftAmount = 0.1f;  // NDC units (0.1 = 10% of screen)
+    float currentOffsetX = 0.0f;
+    float currentOffsetY = 0.0f;
+
+    // Timeline scheduling
+    float scheduledStartTime = 0.0f;  // Scene time when element becomes active
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;
+    float elementDelay = 0.0f;  // Delay before next animation starts
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;  // Flag set by then()
+    float chainedStartTime = 0.0f;    // Start time for next chained animation
+
+    // Loop animation
+    int loopCount = 0;              // 0=no loop, -1=forever, N=repeat N times
+    int currentLoopIteration = 0;
+    bool loopPingPong = false;      // If true, alternate direction each loop
+    bool loopReverse = false;       // Current direction in ping-pong
+
+    // MoveTo animation
+    float moveStartX = 0.0f, moveStartY = 0.0f;    // Starting position (NDC)
+    float moveTargetX = 0.0f, moveTargetY = 0.0f;  // Target position (NDC)
+
+    // Scale animation
+    float scaleStart = 1.0f;    // Starting scale
+    float scaleTarget = 1.0f;   // Target scale
+    float currentScale = 1.0f;  // Current interpolated scale
+
+    // Rotate animation
+    float rotateStart = 0.0f;      // Starting rotation (radians)
+    float rotateTarget = 0.0f;     // Target rotation (radians)
+    float currentRotation = 0.0f;  // Current interpolated rotation
+
+    // Transform animation (cross-fade to another element)
+    ElementRef transformTarget;                         // Target element reference
+    float transformSourceOpacityStart = 1.0f;           // Source opacity at transform start
+    bool isTransformTarget = false;                     // True if this element is being transformed TO
+    size_t transformControllerIndex = 0;                // Index of element controlling this transform
+    ElementType transformControllerType = ElementType::Text;  // Type of controlling element
+
+    // Rendered texture (each formula gets its own texture)
+    VkImage texture = VK_NULL_HANDLE;
+    VkDeviceMemory textureMemory = VK_NULL_HANDLE;
+    VkImageView textureView = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    uint32_t textureWidth = 0;
+    uint32_t textureHeight = 0;
+    bool textureDirty = true;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    // Base position in NDC (set during vertex buffer generation, used for MoveTo)
+    mutable float baseNdcX = 0.0f;
+    mutable float baseNdcY = 0.0f;
+
+    // Color conversion helpers (same as TextObject)
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+
+    void setColorRGB(int r, int g, int b) {
+        colorR = std::clamp(r, 0, 255) / 255.0f;
+        colorG = std::clamp(g, 0, 255) / 255.0f;
+        colorB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    void setColorHSL(float h, float s, float l) {
+        if (s == 0) {
+            colorR = colorG = colorB = l;
+        } else {
+            auto hue2rgb = [](float p, float q, float t) {
+                if (t < 0) t += 1;
+                if (t > 1) t -= 1;
+                if (t < 1.0f/6) return p + (q - p) * 6 * t;
+                if (t < 1.0f/2) return q;
+                if (t < 2.0f/3) return p + (q - p) * (2.0f/3 - t) * 6;
+                return p;
+            };
+            float q = l < 0.5f ? l * (1 + s) : l + s - l * s;
+            float p = 2 * l - q;
+            colorR = hue2rgb(p, q, h/360.0f + 1.0f/3);
+            colorG = hue2rgb(p, q, h/360.0f);
+            colorB = hue2rgb(p, q, h/360.0f - 1.0f/3);
+        }
+    }
+
+    // Emphasis animation - original state storage
+    float originalColorR = 1.0f, originalColorG = 1.0f, originalColorB = 1.0f;
+    float originalScale = 1.0f;
+    float originalRotation = 0.0f;
+    float originalOpacity = 1.0f;
+
+    // Emphasis animation parameters
+    float emphasisPeakScale = 1.2f;  // Peak scale for Pulse/Indicate
+    float emphasisFlashColorR = 1.0f, emphasisFlashColorG = 1.0f, emphasisFlashColorB = 0.0f;  // Flash color (default yellow)
+    float emphasisWiggleAngle = 0.1f;  // ~6 degrees in radians
+    int emphasisWiggleCycles = 3;  // Number of oscillations
+    float emphasisIntensity = 1.0f;  // General intensity multiplier
+
+    // Circumscribe animation
+    size_t circumscribeShapeIndex = SIZE_MAX;  // Index of temporary shape for Circumscribe
+    bool hasCircumscribeShape = false;
+
+    // FocusOn animation
+    bool isFocusTarget = false;  // True if this element is the focus target
+
+    // Movement animation - MoveAlongPath
+    std::vector<float> pathPointsX;
+    std::vector<float> pathPointsY;
+    bool pathSmooth = true;  // Use Catmull-Rom interpolation
+
+    // Movement animation - Spiral
+    float spiralStartRadius = 0.0f;
+    float spiralEndRadius = 0.0f;
+    float spiralRotations = 2.0f;
+    float spiralCenterX = 0.0f;
+    float spiralCenterY = 0.0f;
+
+    // Movement animation - Homotopy
+    int homotopyType = 0;  // 0=wave, 1=ripple, 2=shear, 3=twist
+    float homotopyAmplitude = 0.1f;
+    float homotopyFrequency = 2.0f;
+    float homotopyBaseX = 0.0f;
+    float homotopyBaseY = 0.0f;
+
+    // Movement animation - PhaseFlow
+    int phaseFlowType = 0;  // 0=circular, 1=sink, 2=source, 3=saddle
+    float phaseFlowStrength = 1.0f;
+    float lastProgress = 0.0f;
+
+    bool cleared = false;  // True if element was cleared and should not render
+};
+
+// Path command types for custom paths
+enum class PathCommandType { MoveTo, LineTo, CurveTo, Close };
+
+struct PathCommand {
+    PathCommandType type = PathCommandType::MoveTo;
+    float x = 0.0f, y = 0.0f;           // Target point (for MoveTo, LineTo, CurveTo)
+    float cx1 = 0.0f, cy1 = 0.0f;       // Control point 1 (for CurveTo)
+    float cx2 = 0.0f, cy2 = 0.0f;       // Control point 2 (for CurveTo)
+};
+
+// Shape types
+enum class ShapeType { Circle, Rectangle, Line, Triangle, Arrow, Arc, Ellipse, Dot, Polygon, RegularPolygon, Star, DoubleArrow, Brace, RoundedRectangle, CubicBezier, CustomPath };
+
+// Per-shape element state
+struct ShapeObject {
+    ShapeType type = ShapeType::Rectangle;
+
+    // Dimensions (varies by shape type)
+    float width = 100.0f;   // For rectangle
+    float height = 100.0f;  // For rectangle
+    float radius = 50.0f;   // For circle
+    float x1 = 0.0f, y1 = 0.0f, x2 = 100.0f, y2 = 0.0f;  // For line
+    float size = 100.0f;    // For triangle (equilateral size)
+    float lineThickness = 2.0f;  // For line stroke width
+    float arrowHeadWidth = 20.0f;   // Width of arrowhead base in pixels
+    float arrowHeadLength = 30.0f;  // Length of arrowhead in pixels
+
+    // Arc-specific (uses radius field for arc radius)
+    float arcStartAngle = 0.0f;     // Starting angle in degrees (0 = right)
+    float arcEndAngle = 90.0f;      // Ending angle in degrees
+
+    // Ellipse-specific
+    float radiusX = 50.0f;          // Horizontal radius in pixels
+    float radiusY = 25.0f;          // Vertical radius in pixels
+
+    // Polygon (arbitrary) - vertex coordinates in pixels (relative to position)
+    std::vector<float> polygonVerticesX;
+    std::vector<float> polygonVerticesY;
+
+    // Regular polygon
+    int numSides = 6;               // Number of sides (3=triangle, 4=square, 5=pentagon, etc.)
+    float circumradius = 50.0f;     // Radius of circumscribed circle in pixels
+
+    // Star
+    int numPoints = 5;              // Number of star points
+    float outerRadius = 50.0f;      // Outer point radius in pixels
+    float innerRadius = 20.0f;      // Inner valley radius in pixels
+
+    // Brace
+    float braceHeight = 100.0f;     // Total height of brace in pixels
+    float braceWidth = 20.0f;       // How far it sticks out in pixels
+    bool braceFlipped = false;      // false = {, true = }
+
+    // Rounded rectangle (uses width/height fields)
+    float cornerRadius = 10.0f;     // Radius of corner arcs in pixels
+
+    // Cubic Bezier control points (in pixels)
+    float bezierP0X = 0.0f, bezierP0Y = 0.0f;  // Start point
+    float bezierP1X = 0.0f, bezierP1Y = 0.0f;  // Control point 1
+    float bezierP2X = 0.0f, bezierP2Y = 0.0f;  // Control point 2
+    float bezierP3X = 0.0f, bezierP3Y = 0.0f;  // End point
+
+    // Custom path commands (for CustomPath type)
+    std::vector<PathCommand> pathCommands;
+
+    // Fill color
+    float fillR = 1.0f, fillG = 1.0f, fillB = 1.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Stroke properties
+    float strokeWidth = 0.0f;
+    float strokeR = 0.0f, strokeG = 0.0f, strokeB = 0.0f;
+
+    // Positioning
+    Position anchor = Position::CENTER;
+    float posX = 0.0f, posY = 0.0f;
+    bool usePixelPosition = false;
+
+    // Animation state (same pattern as TextObject/MathObject)
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+
+    // Directional animation fields
+    Direction animationDirection = Direction::NONE;
+    float animationShiftAmount = 0.1f;
+    float currentOffsetX = 0.0f;
+    float currentOffsetY = 0.0f;
+
+    // Timeline scheduling
+    float scheduledStartTime = 0.0f;
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;  // Easing for animations
+    float elementDelay = 0.0f;  // Delay before next animation starts
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;  // Flag set by then()
+    float chainedStartTime = 0.0f;    // Start time for next chained animation
+
+    // Loop animation
+    int loopCount = 0;              // 0=no loop, -1=forever, N=repeat N times
+    int currentLoopIteration = 0;
+    bool loopPingPong = false;      // If true, alternate direction each loop
+    bool loopReverse = false;       // Current direction in ping-pong
+
+    // MoveTo animation
+    float moveStartX = 0.0f, moveStartY = 0.0f;
+    float moveTargetX = 0.0f, moveTargetY = 0.0f;
+
+    // Scale animation
+    float scaleStart = 1.0f;
+    float scaleTarget = 1.0f;
+    float currentScale = 1.0f;
+
+    // Rotate animation
+    float rotateStart = 0.0f;
+    float rotateTarget = 0.0f;
+    float currentRotation = 0.0f;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    // Base position in NDC
+    mutable float baseNdcX = 0.0f;
+    mutable float baseNdcY = 0.0f;
+
+    // Emphasis animation - original state storage (for ping-pong animations)
+    float originalFillR = 1.0f;
+    float originalFillG = 1.0f;
+    float originalFillB = 1.0f;
+    float originalScale = 1.0f;
+    float originalRotation = 0.0f;
+    float originalOpacity = 1.0f;
+
+    // Emphasis animation parameters
+    float emphasisPeakScale = 1.2f;
+    float emphasisFlashColorR = 1.0f;
+    float emphasisFlashColorG = 1.0f;
+    float emphasisFlashColorB = 0.0f;
+    float emphasisWiggleAngle = 0.1f;
+    int emphasisWiggleCycles = 3;
+    float emphasisIntensity = 1.0f;
+
+    // Circumscribe-specific
+    size_t circumscribeShapeIndex = SIZE_MAX;
+    bool hasCircumscribeShape = false;
+
+    // FocusOn-specific
+    bool isFocusTarget = false;
+
+    // Movement animation - MoveAlongPath
+    std::vector<float> pathPointsX;
+    std::vector<float> pathPointsY;
+    bool pathSmooth = true;  // Use Catmull-Rom interpolation
+
+    // Movement animation - Spiral
+    float spiralStartRadius = 0.0f;
+    float spiralEndRadius = 0.0f;
+    float spiralRotations = 2.0f;
+    float spiralCenterX = 0.0f;
+    float spiralCenterY = 0.0f;
+
+    // Movement animation - Homotopy
+    int homotopyType = 0;  // 0=wave, 1=ripple, 2=shear, 3=twist
+    float homotopyAmplitude = 0.1f;
+    float homotopyFrequency = 2.0f;
+    float homotopyBaseX = 0.0f;
+    float homotopyBaseY = 0.0f;
+
+    // Movement animation - PhaseFlow
+    int phaseFlowType = 0;  // 0=circular, 1=sink, 2=source, 3=saddle
+    float phaseFlowStrength = 1.0f;
+    float lastProgress = 0.0f;
+
+    // Color conversion helpers
+    void setFillHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            fillR = r / 255.0f;
+            fillG = g / 255.0f;
+            fillB = b / 255.0f;
+        }
+    }
+
+    void setFillRGB(int r, int g, int b) {
+        fillR = std::clamp(r, 0, 255) / 255.0f;
+        fillG = std::clamp(g, 0, 255) / 255.0f;
+        fillB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    void setStrokeColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            strokeR = r / 255.0f;
+            strokeG = g / 255.0f;
+            strokeB = b / 255.0f;
+        }
+    }
+
+    void setStrokeColorRGB(int r, int g, int b) {
+        strokeR = std::clamp(r, 0, 255) / 255.0f;
+        strokeG = std::clamp(g, 0, 255) / 255.0f;
+        strokeB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    // Morph animation state
+    MorphState morphState;
+    bool isMorphTarget = false;  // True if this shape is the target of a morph
+
+    bool cleared = false;  // True if element was cleared and should not render
+};
+
+// Per-group element state (for grouping and layout)
+struct GroupObject {
+    // Members (heterogeneous element references)
+    std::vector<ElementRef> members;
+
+    // Hierarchy (for nested groups)
+    size_t parentGroupIndex = SIZE_MAX;  // SIZE_MAX = no parent
+    std::vector<size_t> childGroupIndices;
+
+    // Cached bounding box (in pixels)
+    mutable float boundsMinX = 0.0f, boundsMinY = 0.0f;
+    mutable float boundsMaxX = 0.0f, boundsMaxY = 0.0f;
+    mutable bool boundsDirty = true;
+
+    // Position (center of group)
+    Position anchor = Position::CENTER;
+    float posX = 0.0f, posY = 0.0f;
+    bool usePixelPosition = false;
+
+    // Animation state (standard pattern)
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 1.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;
+    float elementDelay = 0.0f;
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;
+    float chainedStartTime = 0.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    bool cleared = false;
+};
+
+// 3D Shape types
+enum class Shape3DType { Sphere, Cube, Cylinder, Cone, Arrow3D };
+
+// Per-3D-shape element state
+struct Shape3DObject {
+    Shape3DType type = Shape3DType::Sphere;
+
+    // Position in 3D space
+    float posX = 0.0f, posY = 0.0f, posZ = 0.0f;
+
+    // Rotation (Euler angles in radians)
+    float rotX = 0.0f, rotY = 0.0f, rotZ = 0.0f;
+
+    // Scale
+    float scaleX = 1.0f, scaleY = 1.0f, scaleZ = 1.0f;
+
+    // Dimensions (varies by shape type)
+    float radius = 1.0f;        // Sphere, Cylinder base, Cone base
+    float height = 2.0f;        // Cylinder, Cone, Cube
+    float width = 1.0f;         // Cube
+    float depth = 1.0f;         // Cube
+
+    // Arrow3D specific
+    float arrowEndX = 0.0f, arrowEndY = 0.0f, arrowEndZ = 1.0f;
+    float arrowShaftRadius = 0.05f;
+    float arrowHeadRadius = 0.1f;
+    float arrowHeadLength = 0.2f;
+
+    // Tessellation detail
+    int latSegments = 32;       // Sphere latitude segments
+    int lonSegments = 32;       // Sphere longitude segments
+    int radialSegments = 32;    // Cylinder/Cone radial segments
+
+    // Color
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+    float opacity = 1.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;  // Easing for animations
+    float elementDelay = 0.0f;  // Delay before next animation starts
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;  // Flag set by then()
+    float chainedStartTime = 0.0f;    // Start time for next chained animation
+
+    // Loop animation
+    int loopCount = 0;              // 0=no loop, -1=forever, N=repeat N times
+    int currentLoopIteration = 0;
+    bool loopPingPong = false;      // If true, alternate direction each loop
+    bool loopReverse = false;       // Current direction in ping-pong
+
+    // Animation targets for transforms
+    float targetPosX = 0.0f, targetPosY = 0.0f, targetPosZ = 0.0f;
+    float targetRotX = 0.0f, targetRotY = 0.0f, targetRotZ = 0.0f;
+    float targetScaleX = 1.0f, targetScaleY = 1.0f, targetScaleZ = 1.0f;
+    float startPosX = 0.0f, startPosY = 0.0f, startPosZ = 0.0f;
+    float startRotX = 0.0f, startRotY = 0.0f, startRotZ = 0.0f;
+    float startScaleX = 1.0f, startScaleY = 1.0f, startScaleZ = 1.0f;
+
+    // Transform animation scheduling
+    bool hasPositionAnimation = false;
+    float posAnimScheduledTime = 0.0f;
+    float posAnimDuration = 0.0f;
+    float posAnimStartRealTime = -1.0f;
+    bool positionAnimating = false;
+
+    bool hasRotationAnimation = false;
+    float rotAnimScheduledTime = 0.0f;
+    float rotAnimDuration = 0.0f;
+    float rotAnimStartRealTime = -1.0f;
+    bool rotationAnimating = false;
+
+    bool hasScaleAnimation = false;
+    float scaleAnimScheduledTime = 0.0f;
+    float scaleAnimDuration = 0.0f;
+    float scaleAnimStartRealTime = -1.0f;
+    bool scaleAnimating = false;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    bool cleared = false;
+
+    // Color helpers
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+
+    void setColorRGB(int r, int g, int b) {
+        colorR = std::clamp(r, 0, 255) / 255.0f;
+        colorG = std::clamp(g, 0, 255) / 255.0f;
+        colorB = std::clamp(b, 0, 255) / 255.0f;
+    }
+};
+
+// 3D Axes object for 3D coordinate system
+struct Axes3DObject {
+    // Data range
+    float xMin = -5.0f, xMax = 5.0f;
+    float yMin = -5.0f, yMax = 5.0f;
+    float zMin = -5.0f, zMax = 5.0f;
+
+    // Tick spacing
+    float xTickSpacing = 1.0f, yTickSpacing = 1.0f, zTickSpacing = 1.0f;
+
+    // Appearance
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+    float lineThickness = 2.0f;
+    bool showArrows = true;
+    bool showLabels = true;
+    bool showTickMarks = true;
+
+    // Individual axis colors (default: X=red, Y=green, Z=blue)
+    float xAxisR = 1.0f, xAxisG = 0.3f, xAxisB = 0.3f;
+    float yAxisR = 0.3f, yAxisG = 1.0f, yAxisB = 0.3f;
+    float zAxisR = 0.3f, zAxisG = 0.3f, zAxisB = 1.0f;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Scheduled animation queue (pre-run timeline)
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    bool cleared = false;
+};
+
+// 3D Surface object for z = f(x,y) or parametric surfaces
+struct Surface3DObject {
+    // Height function: z = f(x, y)
+    std::function<float(float, float)> heightFunc;
+    bool hasHeightFunc = false;
+
+    // Parametric function: (x, y, z) = f(u, v)
+    std::function<std::tuple<float, float, float>(float, float)> paramFunc;
+    bool hasParamFunc = false;
+
+    // Domain range
+    float xMin = -5.0f, xMax = 5.0f;
+    float yMin = -5.0f, yMax = 5.0f;
+    float uMin = 0.0f, uMax = 1.0f;
+    float vMin = 0.0f, vMax = 1.0f;
+
+    // Tessellation
+    int uSegments = 50;
+    int vSegments = 50;
+
+    // Appearance
+    float colorR = 1.0f, colorG = 0.5f, colorB = 0.2f;
+    float opacity = 1.0f;
+    bool wireframe = false;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Scheduled animation queue (pre-run timeline)
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    bool cleared = false;
+
+    // Color helpers
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+
+    void setColorRGB(int r, int g, int b) {
+        colorR = std::clamp(r, 0, 255) / 255.0f;
+        colorG = std::clamp(g, 0, 255) / 255.0f;
+        colorB = std::clamp(b, 0, 255) / 255.0f;
+    }
+};
+
+// Axes object for coordinate system
+struct AxesObject {
+    // Data range
+    float xMin = -10.0f, xMax = 10.0f;
+    float yMin = -10.0f, yMax = 10.0f;
+
+    // Screen region (in pixels)
+    float screenX = 100.0f, screenY = 100.0f;  // Top-left corner
+    float screenWidth = 800.0f, screenHeight = 600.0f;
+
+    // Appearance
+    float axisColorR = 1.0f, axisColorG = 1.0f, axisColorB = 1.0f;
+    float lineThickness = 2.0f;
+    bool showArrows = true;
+
+    // Ticks
+    float xTickSpacing = 1.0f, yTickSpacing = 1.0f;
+    float tickLength = 10.0f;
+    bool showTickLabels = true;
+    float labelSize = 20.0f;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of sub-elements created by axes
+    std::vector<size_t> shapeIndices;  // Lines, arrows, ticks
+    std::vector<size_t> textIndices;   // Labels
+
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            axisColorR = r / 255.0f;
+            axisColorG = g / 255.0f;
+            axisColorB = b / 255.0f;
+        }
+    }
+};
+
+// Number line object (single axis)
+struct NumberLineObject {
+    // Data range
+    float minValue = -10.0f, maxValue = 10.0f;
+
+    // Position and size (in pixels)
+    float posX = 0.0f, posY = 0.0f;  // Center position
+    float length = 600.0f;           // Total length in pixels
+    bool isVertical = false;         // Horizontal by default
+
+    // Appearance
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+    float lineThickness = 2.0f;
+    bool showArrows = true;
+
+    // Ticks
+    float tickSpacing = 1.0f;
+    float tickLength = 10.0f;
+    bool showTickLabels = true;
+    float labelSize = 18.0f;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of sub-elements created
+    std::vector<size_t> shapeIndices;
+    std::vector<size_t> textIndices;
+
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+};
+
+// Bar chart object
+struct BarChartObject {
+    std::vector<float> values;           // Bar heights
+    std::vector<std::string> labels;     // Bar labels
+    std::vector<uint32_t> colors;        // Per-bar colors (packed RGB)
+
+    float barWidth = 50.0f;              // Width of each bar in pixels
+    float spacing = 10.0f;               // Gap between bars in pixels
+    bool horizontal = false;             // Vertical bars by default
+    float maxHeight = 300.0f;            // Maximum bar height in pixels
+
+    // Position (center of chart)
+    float posX = 0.0f, posY = 0.0f;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of sub-elements
+    std::vector<size_t> shapeIndices;  // Bar rectangles
+    std::vector<size_t> textIndices;   // Labels
+};
+
+// Pie chart object
+struct PieChartObject {
+    std::vector<float> values;           // Slice values (will be normalized)
+    std::vector<std::string> labels;     // Slice labels
+    std::vector<uint32_t> colors;        // Per-slice colors (packed RGB)
+
+    float radius = 150.0f;               // Chart radius in pixels
+    float posX = 0.0f, posY = 0.0f;      // Center position
+    float startAngle = -90.0f;           // Start angle in degrees (top = -90)
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of sub-elements
+    std::vector<size_t> shapeIndices;  // Pie slices (arcs/wedges)
+    std::vector<size_t> textIndices;   // Labels
+};
+
+// Vector field object (grid of arrows showing vector directions)
+struct VectorFieldObject {
+    // Reference to axes (for coordinate conversion)
+    size_t axesIndex = SIZE_MAX;
+
+    // Grid configuration
+    int gridSizeX = 10;
+    int gridSizeY = 10;
+
+    // Domain (defaults to axes range)
+    float xMin = -5.0f, xMax = 5.0f;
+    float yMin = -5.0f, yMax = 5.0f;
+
+    // Field function: takes (x, y), returns (vx, vy)
+    std::function<std::pair<float, float>(float, float)> fieldFunc;
+
+    // Appearance
+    float colorR = 0.0f, colorG = 0.8f, colorB = 0.2f;
+    float arrowScale = 0.3f;  // Scale factor for arrow size
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of arrow shapes
+    std::vector<size_t> shapeIndices;
+
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+};
+
+// Table object for grid of text cells
+struct TableObject {
+    // Cell data (row-major order)
+    std::vector<std::vector<std::string>> cells;
+    int numRows = 0;
+    int numCols = 0;
+
+    // Cell dimensions
+    float cellWidth = 100.0f;
+    float cellHeight = 40.0f;
+    std::vector<float> columnWidths;  // Optional per-column widths
+    std::vector<float> rowHeights;    // Optional per-row heights
+
+    // Appearance
+    bool showGrid = true;             // Draw cell borders
+    float gridLineWidth = 1.0f;
+    float gridColorR = 0.5f, gridColorG = 0.5f, gridColorB = 0.5f;
+    float textColorR = 1.0f, textColorG = 1.0f, textColorB = 1.0f;
+    float headerColorR = 0.2f, headerColorG = 0.4f, headerColorB = 0.8f;  // First row background
+    bool hasHeader = true;            // Color first row differently
+    float fontSize = 18.0f;
+
+    // Positioning
+    float posX = 0.0f, posY = 0.0f;   // Top-left corner of table
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Internal: indices of sub-elements
+    std::vector<size_t> shapeIndices;  // Grid lines and cell backgrounds
+    std::vector<size_t> textIndices;   // Cell text
+};
+
+// Image object for rendering images/textures
+struct ImageObject {
+    // Image data
+    std::string imagePath;
+    int imageWidth = 0;
+    int imageHeight = 0;
+    int channels = 0;
+
+    // Display size (in pixels)
+    float displayWidth = 0.0f;
+    float displayHeight = 0.0f;
+
+    // Position (center point)
+    float posX = 0.0f;
+    float posY = 0.0f;
+    bool usePixelPosition = true;
+    Position anchor = Position::CENTER;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Vulkan resources (managed by Impl)
+    VkImage texture = VK_NULL_HANDLE;
+    VkDeviceMemory textureMemory = VK_NULL_HANDLE;
+    VkImageView textureView = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    bool textureDirty = true;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Easing function for animations
+    Easing easingFunction = Easing::EaseOutCubic;  // Easing for animations
+    float elementDelay = 0.0f;  // Delay before next animation starts
+
+    // Animation chaining with then()
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+    bool chainNextAnimation = false;  // Flag set by then()
+    float chainedStartTime = 0.0f;    // Start time for next chained animation
+
+    // Loop animation
+    int loopCount = 0;              // 0=no loop, -1=forever, N=repeat N times
+    int currentLoopIteration = 0;
+    bool loopPingPong = false;      // If true, alternate direction each loop
+    bool loopReverse = false;       // Current direction in ping-pong
+
+    // Directional animation fields
+    Direction animationDirection = Direction::NONE;
+    float animationShiftAmount = 0.1f;
+    float currentOffsetX = 0.0f;
+    float currentOffsetY = 0.0f;
+
+    // Transform state
+    float currentScale = 1.0f;
+    float currentRotation = 0.0f;  // radians
+
+    // MoveTo animation
+    float moveStartX = 0.0f, moveStartY = 0.0f;
+    float moveTargetX = 0.0f, moveTargetY = 0.0f;
+
+    // Scale animation
+    float scaleStart = 1.0f;
+    float scaleTarget = 1.0f;
+
+    // Rotate animation
+    float rotateStart = 0.0f;
+    float rotateTarget = 0.0f;
+
+    // Vertex data (for drawing)
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    // Base position in NDC
+    mutable float baseNdcX = 0.0f;
+    mutable float baseNdcY = 0.0f;
+
+    // Clear state
+    bool cleared = false;
+
+    // Temporary pixel data storage (freed after texture creation)
+    std::vector<unsigned char> pixelData;
+};
+
+// Graph object for plotting data/functions
+struct GraphObject {
+    // Data points
+    std::vector<float> xData;
+    std::vector<float> yData;
+
+    // Reference to axes (for coordinate conversion)
+    size_t axesIndex = SIZE_MAX;  // Invalid by default
+
+    // Appearance
+    float lineColorR = 1.0f, lineColorG = 0.0f, lineColorB = 0.0f;
+    float lineThickness = 2.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+
+    // Scheduled animation queue (pre-run timeline)
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+
+    bool cleared = false;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+    mutable float baseNdcX = 0.0f, baseNdcY = 0.0f;
+
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            lineColorR = r / 255.0f;
+            lineColorG = g / 255.0f;
+            lineColorB = b / 255.0f;
+        }
+    }
+};
+
+// Vector object for mathematical vectors (arrows from origin to endpoint)
+struct VectorObject {
+    // Reference to axes (for coordinate conversion)
+    size_t axesIndex = SIZE_MAX;
+
+    // Vector components in data coordinates
+    float vx = 1.0f, vy = 0.0f;
+
+    // Origin point in data coordinates (default: 0,0)
+    float originX = 0.0f, originY = 0.0f;
+
+    // Appearance
+    float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+    float lineThickness = 3.0f;
+    float headWidth = 15.0f;
+    float headLength = 20.0f;
+
+    // Z-ordering (higher values render on top)
+    int zIndex = 0;
+
+    // Animation state
+    AnimationType animationType = AnimationType::None;
+    float animationDuration = 1.0f;
+    float animationStartTime = -1.0f;
+    float currentOpacity = 0.0f;
+    float scheduledStartTime = 0.0f;
+    bool cleared = false;
+
+    // Scheduled animation queue (pre-run timeline)
+    std::vector<AnimationQueueEntry> animationQueue;
+    size_t currentQueueIndex = 0;
+
+    // Vertex data
+    uint32_t vertexOffset = 0;
+    uint32_t vertexCount = 0;
+
+    void setColorHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            colorR = r / 255.0f;
+            colorG = g / 255.0f;
+            colorB = b / 255.0f;
+        }
+    }
+};
+
+class Catalyst::Impl {
+public:
+    uint32_t width;
+    uint32_t height;
+
+    // Multiple text objects
+    std::vector<TextObject> textObjects;
+    bool vertexBufferDirty = false;
+
+    // Multiple math objects (LaTeX formulas)
+    std::vector<MathObject> mathObjects;
+    bool mathVertexBufferDirty = false;
+    VkBuffer mathVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory mathVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t mathVertexCount = 0;
+
+    // Multiple shape objects
+    std::vector<ShapeObject> shapeObjects;
+    bool shapeVertexBufferDirty = false;
+    VkBuffer shapeVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory shapeVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t shapeVertexCount = 0;
+
+    // Axes objects (coordinate systems)
+    std::vector<AxesObject> axesObjects;
+
+    // Number line objects (single axis lines)
+    std::vector<NumberLineObject> numberLineObjects;
+
+    // Bar chart objects
+    std::vector<BarChartObject> barChartObjects;
+
+    // Pie chart objects
+    std::vector<PieChartObject> pieChartObjects;
+
+    // Vector field objects (grid of vectors)
+    std::vector<VectorFieldObject> vectorFieldObjects;
+
+    // Table objects
+    std::vector<TableObject> tableObjects;
+
+    // Image objects (loaded images/textures)
+    std::vector<ImageObject> imageObjects;
+    bool imageVertexBufferDirty = false;
+    VkBuffer imageVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory imageVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t imageVertexCount = 0;
+
+    // Graph objects (plotted data/functions)
+    std::vector<GraphObject> graphObjects;
+    bool graphVertexBufferDirty = false;
+    VkBuffer graphVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory graphVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t graphVertexCount = 0;
+
+    // Vector objects (mathematical vectors)
+    std::vector<VectorObject> vectorObjects;
+    bool vectorVertexBufferDirty = false;
+    VkBuffer vectorVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vectorVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t vectorVertexCount = 0;
+
+    // 3D shape objects
+    std::vector<Shape3DObject> shape3DObjects;
+
+    // 3D axes objects
+    std::vector<Axes3DObject> axes3DObjects;
+
+    // 3D surface objects
+    std::vector<Surface3DObject> surface3DObjects;
+
+    // Group objects (for grouping and layout)
+    std::vector<GroupObject> groupObjects;
+
+    // Reference font size for atlas (texts scale from this)
+    static constexpr float REFERENCE_FONT_SIZE = 128.0f;
+
+    // Timeline state for wait() scheduling
+    float currentTimeCursor = 0.0f;    // Advances with wait()
+    double sceneStartTime = -1.0;      // Set when mainLoop() starts
+    float clearFadeDuration = 0.5f;    // Duration of fade-out before clear
+
+    struct ClearEvent {
+        float time = 0.0f;          // Timeline time (seconds) when clear starts
+        float fadeDuration = 0.0f;  // Fade-out duration before removal
+        bool fadeStarted = false;
+
+        // Track element counts at time of clear() to only delete pre-clear elements
+        size_t textCount = 0;
+        size_t mathCount = 0;
+        size_t shapeCount = 0;
+        size_t imageCount = 0;
+        size_t graphCount = 0;
+        size_t vectorCount = 0;
+        size_t axes3DCount = 0;
+        size_t surface3DCount = 0;
+        size_t shape3DCount = 0;
+    };
+
+    // Support multiple clear() calls (e.g. resetting between sections).
+    std::deque<ClearEvent> pendingClears;
+
+    // Background color (default black)
+    float bgR = 0.0f, bgG = 0.0f, bgB = 0.0f;
+
+    // Camera state for zoom/pan/rotate
+    struct CameraState {
+        float zoom = 1.0f;
+        float panX = 0.0f, panY = 0.0f;
+        float rotation = 0.0f;  // radians
+
+        // Animation state
+        float targetZoom = 1.0f;
+        float targetPanX = 0.0f, targetPanY = 0.0f;
+        float targetRotation = 0.0f;
+        float animStartTime = -1.0f;
+        float animDuration = 0.0f;
+        float startZoom = 1.0f, startPanX = 0.0f, startPanY = 0.0f, startRotation = 0.0f;
+
+        void reset() {
+            zoom = 1.0f;
+            panX = panY = 0.0f;
+            rotation = 0.0f;
+            targetZoom = 1.0f;
+            targetPanX = targetPanY = 0.0f;
+            targetRotation = 0.0f;
+            animStartTime = -1.0f;
+            animDuration = 0.0f;
+            startZoom = 1.0f;
+            startPanX = startPanY = startRotation = 0.0f;
+        }
+    };
+
+    struct CameraEvent {
+        float startTime = 0.0f;
+        float duration = 0.0f;
+        bool hasZoom = false;
+        float zoom = 1.0f;
+        bool hasPan = false;
+        float panX = 0.0f;
+        float panY = 0.0f;
+        bool hasRotation = false;
+        float rotation = 0.0f;  // radians
+    };
+
+    std::deque<CameraEvent> pendingCameraEvents;
+
+    struct ModeEvent {
+        float startTime = 0.0f;
+        bool enabled = false;
+    };
+
+    std::deque<ModeEvent> pending3DModeEvents;
+
+    enum class Camera3DEventType { SetPose, SetFov, Orbit, Reset };
+
+    struct Camera3DEvent {
+        float startTime = 0.0f;
+        float duration = 0.0f;
+        Camera3DEventType type = Camera3DEventType::SetPose;
+
+        // SetPose
+        float eyeX = 0.0f, eyeY = 2.0f, eyeZ = 5.0f;
+        float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+
+        // SetFov
+        float fovY = 45.0f;
+
+        // Orbit
+        float theta = 0.0f;
+        float phi = 0.785398163f;
+        float distance = 8.0f;
+    };
+
+    std::deque<Camera3DEvent> pendingCamera3DEvents;
+
+    // 3D Camera state for perspective projection
+    struct Camera3DState {
+        // Eye position
+        float eyeX = 0.0f, eyeY = 2.0f, eyeZ = 5.0f;
+
+        // Look-at target
+        float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+
+        // Up vector
+        float upX = 0.0f, upY = 1.0f, upZ = 0.0f;
+
+        // Perspective parameters
+        float fovY = 45.0f;          // Field of view in degrees
+        float nearPlane = 0.1f;
+        float farPlane = 100.0f;
+
+        // Animation state (runtime)
+        float animStartTime = -1.0f;
+        float animDuration = 0.0f;
+        bool animating = false;
+
+        // Animation start values
+        float startEyeX = 0.0f, startEyeY = 2.0f, startEyeZ = 5.0f;
+        float startTargetX = 0.0f, startTargetY = 0.0f, startTargetZ = 0.0f;
+        float startFovY = 45.0f;
+
+        // Animation target values (destination)
+        float destEyeX = 0.0f, destEyeY = 2.0f, destEyeZ = 5.0f;
+        float destTargetX = 0.0f, destTargetY = 0.0f, destTargetZ = 0.0f;
+        float destFovY = 45.0f;
+
+        // Orbit animation (spherical interpolation around current target)
+        bool orbitAnimating = false;
+        float orbitStartTheta = 0.0f, orbitStartPhi = 0.785398163f, orbitStartDistance = 8.0f;
+        float orbitDestTheta = 0.0f, orbitDestPhi = 0.785398163f, orbitDestDistance = 8.0f;
+
+        void reset() {
+            eyeX = 0.0f; eyeY = 2.0f; eyeZ = 5.0f;
+            targetX = targetY = targetZ = 0.0f;
+            upX = 0.0f; upY = 1.0f; upZ = 0.0f;
+            fovY = 45.0f;
+            nearPlane = 0.1f;
+            farPlane = 100.0f;
+            animStartTime = -1.0f;
+            animDuration = 0.0f;
+            animating = false;
+            orbitAnimating = false;
+        }
+    };
+
+    // Lighting state for 3D rendering
+    struct PointLight {
+        float posX = 0.0f, posY = 0.0f, posZ = 0.0f;
+        float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+        float intensity = 1.0f;
+        float constantAtten = 1.0f;
+        float linearAtten = 0.09f;
+        float quadraticAtten = 0.032f;
+        bool enabled = false;
+    };
+
+    struct LightingState {
+        // Ambient light
+        float ambientR = 1.0f, ambientG = 1.0f, ambientB = 1.0f;
+        float ambientIntensity = 0.3f;
+
+        // Directional light
+        float dirLightDirX = 1.0f, dirLightDirY = 1.0f, dirLightDirZ = 1.0f;
+        float dirLightR = 1.0f, dirLightG = 1.0f, dirLightB = 1.0f;
+        float dirLightIntensity = 0.7f;
+        bool dirLightEnabled = true;
+
+        // Point lights (up to 4)
+        PointLight pointLights[4];
+
+        // Material properties
+        float shininess = 32.0f;
+        float specularStrength = 0.5f;
+
+        void reset() {
+            ambientR = ambientG = ambientB = 1.0f;
+            ambientIntensity = 0.3f;
+            dirLightDirX = dirLightDirY = dirLightDirZ = 1.0f;
+            dirLightR = dirLightG = dirLightB = 1.0f;
+            dirLightIntensity = 0.7f;
+            dirLightEnabled = true;
+            for (int i = 0; i < 4; i++) {
+                pointLights[i] = PointLight();
+            }
+            shininess = 32.0f;
+            specularStrength = 0.5f;
+        }
+    };
+
+    // Scene data structure for multiple scenes support
+    struct SceneData {
+        // Element indices owned by this scene
+        std::vector<size_t> textIndices;
+        std::vector<size_t> mathIndices;
+        std::vector<size_t> shapeIndices;
+        std::vector<size_t> imageIndices;
+        std::vector<size_t> graphIndices;
+
+        // 3D element indices
+        std::vector<size_t> shape3DIndices;
+        std::vector<size_t> axes3DIndices;
+        std::vector<size_t> surface3DIndices;
+
+        // Scene-specific state
+        CameraState camera;
+        Camera3DState camera3D;
+        float bgR = 0.0f, bgG = 0.0f, bgB = 0.0f;
+        float timeCursor = 0.0f;
+
+        // 3D mode flag
+        bool is3DMode = false;
+
+        // Visibility
+        bool active = true;
+        float opacity = 1.0f;  // For transitions
+    };
+
+    // Scenes (scene 0 is the default scene)
+    std::vector<SceneData> scenes;
+    size_t activeSceneIndex = 0;
+
+    // Global camera (for default scene or when not using multi-scene)
+    CameraState camera;
+
+    // Global 3D camera (for default scene or when not using multi-scene)
+    Camera3DState camera3D;
+
+    // Camera UBO resources
+    VkBuffer cameraUBO = VK_NULL_HANDLE;
+    VkDeviceMemory cameraUBOMemory = VK_NULL_HANDLE;
+    VkDescriptorSetLayout cameraDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet cameraDescriptorSet = VK_NULL_HANDLE;
+
+    Impl(uint32_t w, uint32_t h) : width(w), height(h) {
+        // Initialize font metrics early so under() can calculate text widths
+        initFontMetrics();
+    }
+
+    // Initialize font metrics without creating the full Vulkan texture
+    // This allows text width calculations before run() is called
+    void initFontMetrics() {
+        // Load font file
+        std::string fontPath = getResourceBasePath() + "font/Raleway-Bold.ttf";
+        std::ifstream file(fontPath, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            // Try fallback path from current working directory
+            fontPath = "font/Raleway-Bold.ttf";
+            file.open(fontPath, std::ios::ate | std::ios::binary);
+            if (!file.is_open()) return;
+        }
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        std::vector<char> fontData(fileSize);
+        file.seekg(0);
+        file.read(fontData.data(), fileSize);
+        file.close();
+
+        // Initialize stb_truetype font info
+        stbtt_fontinfo fontInfo;
+        if (!stbtt_InitFont(&fontInfo, reinterpret_cast<const unsigned char*>(fontData.data()), 0)) {
+            return;
+        }
+
+        // Get font metrics at reference size
+        float scale = stbtt_ScaleForPixelHeight(&fontInfo, REFERENCE_FONT_SIZE);
+
+        // Populate charData with xadvance values for ASCII characters 32-127
+        for (int c = 32; c < 128; c++) {
+            int advance, lsb;
+            stbtt_GetCodepointHMetrics(&fontInfo, c, &advance, &lsb);
+            charData[c - 32].xadvance = advance * scale;
+        }
+    }
+
+	    size_t addText(const std::string& t) {
+	        TextObject obj;
+	        obj.text = t;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        textObjects.push_back(obj);
+	        vertexBufferDirty = true;
+	        size_t idx = textObjects.size() - 1;
+        // DEBUG LOG
+        {
+            std::ofstream log("/tmp/catalyst_debug.log", std::ios::app);
+            log << "[CREATE] text[" << idx << "] = \"" << t.substr(0, std::min(t.size(), size_t(30))) << "\" scheduledStart=" << currentTimeCursor << std::endl;
+        }
+        return idx;
+    }
+
+    TextObject& getTextObject(size_t index) {
+        return textObjects[index];
+    }
+
+	    size_t addMath(const std::string& latex) {
+	        MathObject obj;
+	        obj.latex = latex;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        mathObjects.push_back(obj);
+	        mathVertexBufferDirty = true;
+	        return mathObjects.size() - 1;
+	    }
+
+    MathObject& getMathObject(size_t index) {
+        return mathObjects[index];
+    }
+
+	    size_t addCircle(float radius) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Circle;
+	        obj.radius = radius;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addRectangle(float width, float height) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Rectangle;
+	        obj.width = width;
+	        obj.height = height;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addLine(float x1, float y1, float x2, float y2) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Line;
+        obj.x1 = x1;
+        obj.y1 = y1;
+	        obj.x2 = x2;
+	        obj.y2 = y2;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addTriangle(float size) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Triangle;
+	        obj.size = size;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addArrow(float x1, float y1, float x2, float y2, float headWidth = 20.0f, float headLength = 30.0f) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Arrow;
+        obj.x1 = x1;
+        obj.y1 = y1;
+        obj.x2 = x2;
+	        obj.y2 = y2;
+	        obj.arrowHeadWidth = headWidth;
+	        obj.arrowHeadLength = headLength;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addArc(float radius, float startAngle, float endAngle) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Arc;
+        obj.radius = radius;
+	        obj.arcStartAngle = startAngle;
+	        obj.arcEndAngle = endAngle;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addEllipse(float radiusX, float radiusY) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Ellipse;
+	        obj.radiusX = radiusX;
+	        obj.radiusY = radiusY;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addDot(float radius = 5.0f) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Dot;
+	        obj.radius = radius;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addPolygon(const std::vector<float>& x, const std::vector<float>& y) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Polygon;
+	        obj.polygonVerticesX = x;
+	        obj.polygonVerticesY = y;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addRegularPolygon(int sides, float radius) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::RegularPolygon;
+	        obj.numSides = sides;
+	        obj.circumradius = radius;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addStar(int points, float outerRadius, float innerRadius) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Star;
+	        obj.numPoints = points;
+	        obj.outerRadius = outerRadius;
+	        obj.innerRadius = innerRadius;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addDoubleArrow(float x1, float y1, float x2, float y2) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::DoubleArrow;
+        obj.x1 = x1;
+        obj.y1 = y1;
+	        obj.x2 = x2;
+	        obj.y2 = y2;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addBrace(float braceHeight, float braceWidth, bool flipped) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::Brace;
+        obj.braceHeight = braceHeight;
+	        obj.braceWidth = braceWidth;
+	        obj.braceFlipped = flipped;
+	        obj.lineThickness = 3.0f;  // Default brace stroke thickness
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addRoundedRectangle(float w, float h, float cornerRadius) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::RoundedRectangle;
+	        obj.width = w;
+	        obj.height = h;
+	        obj.cornerRadius = cornerRadius;
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addCubicBezier(float p0x, float p0y, float p1x, float p1y,
+	                          float p2x, float p2y, float p3x, float p3y) {
+	        ShapeObject obj;
+	        obj.type = ShapeType::CubicBezier;
+        obj.bezierP0X = p0x; obj.bezierP0Y = p0y;
+        obj.bezierP1X = p1x; obj.bezierP1Y = p1y;
+	        obj.bezierP2X = p2x; obj.bezierP2Y = p2y;
+	        obj.bezierP3X = p3x; obj.bezierP3Y = p3y;
+	        obj.lineThickness = 2.0f;  // Default thickness
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        shapeVertexBufferDirty = true;
+	        return shapeObjects.size() - 1;
+	    }
+
+	    size_t addCustomPath() {
+	        ShapeObject obj;
+	        obj.type = ShapeType::CustomPath;
+	        obj.lineThickness = 2.0f;  // Default thickness
+	        obj.scheduledStartTime = currentTimeCursor;
+	        obj.chainedStartTime = currentTimeCursor;
+	        shapeObjects.push_back(obj);
+	        // Don't mark dirty yet - path commands will be added
+	        return shapeObjects.size() - 1;
+	    }
+
+    ShapeObject& getShapeObject(size_t index) {
+        return shapeObjects[index];
+    }
+
+    AxesObject& getAxesObject(size_t index) {
+        return axesObjects[index];
+    }
+
+    GraphObject& getGraphObject(size_t index) {
+        return graphObjects[index];
+    }
+
+    VectorObject& getVectorObject(size_t index) {
+        return vectorObjects[index];
+    }
+
+    NumberLineObject& getNumberLineObject(size_t index) {
+        return numberLineObjects[index];
+    }
+
+    BarChartObject& getBarChartObject(size_t index) {
+        return barChartObjects[index];
+    }
+
+    PieChartObject& getPieChartObject(size_t index) {
+        return pieChartObjects[index];
+    }
+
+    VectorFieldObject& getVectorFieldObject(size_t index) {
+        return vectorFieldObjects[index];
+    }
+
+    TableObject& getTableObject(size_t index) {
+        return tableObjects[index];
+    }
+
+    ImageObject& getImageObject(size_t index) {
+        return imageObjects[index];
+    }
+
+    // 3D object getters
+    Axes3DObject& getAxes3DObject(size_t index) {
+        return axes3DObjects[index];
+    }
+
+    Surface3DObject& getSurface3DObject(size_t index) {
+        return surface3DObjects[index];
+    }
+
+    Shape3DObject& getShape3DObject(size_t index) {
+        return shape3DObjects[index];
+    }
+
+    // Background color setters
+    void setBackgroundHex(const std::string& hex) {
+        std::string h = hex;
+        if (!h.empty() && h[0] == '#') h = h.substr(1);
+        if (h.length() >= 6) {
+            unsigned int r, g, b;
+            sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+            bgR = r / 255.0f;
+            bgG = g / 255.0f;
+            bgB = b / 255.0f;
+        }
+    }
+
+    void setBackgroundRGB(int r, int g, int b) {
+        bgR = std::clamp(r, 0, 255) / 255.0f;
+        bgG = std::clamp(g, 0, 255) / 255.0f;
+        bgB = std::clamp(b, 0, 255) / 255.0f;
+    }
+
+    void setBackgroundFloat(float r, float g, float b) {
+        bgR = std::clamp(r, 0.0f, 1.0f);
+        bgG = std::clamp(g, 0.0f, 1.0f);
+        bgB = std::clamp(b, 0.0f, 1.0f);
+    }
+
+    float getCameraEventStartTime() const {
+        if (sceneStartTime >= 0.0) {
+            return static_cast<float>(glfwGetTime() - sceneStartTime);
+        }
+        return currentTimeCursor;
+    }
+
+    void enqueueCameraEvent(CameraEvent event) {
+        auto it = std::upper_bound(
+            pendingCameraEvents.begin(), pendingCameraEvents.end(), event.startTime,
+            [](float startTime, const CameraEvent& e) { return startTime < e.startTime; });
+        pendingCameraEvents.insert(it, std::move(event));
+    }
+
+    float get3DModeEventStartTime() const {
+        if (sceneStartTime >= 0.0) {
+            return static_cast<float>(glfwGetTime() - sceneStartTime);
+        }
+        return currentTimeCursor;
+    }
+
+    void enqueue3DModeEvent(ModeEvent event) {
+        auto it = std::upper_bound(
+            pending3DModeEvents.begin(), pending3DModeEvents.end(), event.startTime,
+            [](float startTime, const ModeEvent& e) { return startTime < e.startTime; });
+        pending3DModeEvents.insert(it, std::move(event));
+    }
+
+    float getCamera3DEventStartTime() const {
+        if (sceneStartTime >= 0.0) {
+            return static_cast<float>(glfwGetTime() - sceneStartTime);
+        }
+        return currentTimeCursor;
+    }
+
+    void enqueueCamera3DEvent(Camera3DEvent event) {
+        auto it = std::upper_bound(
+            pendingCamera3DEvents.begin(), pendingCamera3DEvents.end(), event.startTime,
+            [](float startTime, const Camera3DEvent& e) { return startTime < e.startTime; });
+        pendingCamera3DEvents.insert(it, std::move(event));
+    }
+
+    void apply3DModeEvents(float sceneTime) {
+        while (!pending3DModeEvents.empty() && sceneTime >= pending3DModeEvents.front().startTime) {
+            const auto enabled = pending3DModeEvents.front().enabled;
+            is3DModeEnabled = enabled;
+            if (!scenes.empty()) {
+                scenes[activeSceneIndex].is3DMode = enabled;
+            }
+            pending3DModeEvents.pop_front();
+        }
+    }
+
+    void setCamera3D(float eyeX, float eyeY, float eyeZ,
+                     float targetX, float targetY, float targetZ,
+                     float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::SetPose;
+        event.eyeX = eyeX;
+        event.eyeY = eyeY;
+        event.eyeZ = eyeZ;
+        event.targetX = targetX;
+        event.targetY = targetY;
+        event.targetZ = targetZ;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void setCameraFOV3D(float fov, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::SetFov;
+        event.fovY = fov;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void orbitCamera3D(float theta, float phi, float distance, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::Orbit;
+        event.theta = theta;
+        event.phi = phi;
+        event.distance = distance;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void resetCamera3D(float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::Reset;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    // Camera control setters
+    void setCameraZoom(float zoom, float duration = 0.0f) {
+        CameraEvent event;
+        event.startTime = getCameraEventStartTime();
+        event.duration = duration;
+        event.hasZoom = true;
+        event.zoom = zoom;
+        enqueueCameraEvent(std::move(event));
+    }
+
+    void setCameraPan(float x, float y, float duration = 0.0f) {
+        CameraEvent event;
+        event.startTime = getCameraEventStartTime();
+        event.duration = duration;
+        event.hasPan = true;
+        event.panX = x;
+        event.panY = y;
+        enqueueCameraEvent(std::move(event));
+    }
+
+    void setCameraRotate(float degrees, float duration = 0.0f) {
+        float radians = degrees * 3.14159265f / 180.0f;
+        CameraEvent event;
+        event.startTime = getCameraEventStartTime();
+        event.duration = duration;
+        event.hasRotation = true;
+        event.rotation = radians;
+        enqueueCameraEvent(std::move(event));
+    }
+
+    void resetCamera(float duration = 0.0f) {
+        CameraEvent event;
+        event.startTime = getCameraEventStartTime();
+        event.duration = duration;
+        event.hasZoom = true;
+        event.zoom = 1.0f;
+        event.hasPan = true;
+        event.panX = 0.0f;
+        event.panY = 0.0f;
+        event.hasRotation = true;
+        event.rotation = 0.0f;
+        enqueueCameraEvent(std::move(event));
+    }
+
+    // Easing function for camera animations
+    float easeOutCubic(float t) {
+        return 1.0f - std::pow(1.0f - t, 3.0f);
+    }
+
+    // Update camera UBO with current camera state
+    void updateCameraUBO(float currentTime) {
+        // Advance camera timeline: apply due camera events and step active animation.
+        // Note: camera changes are scheduled pre-run using currentTimeCursor (wait()),
+        // while runtime calls use wall-clock scene time; both are represented in the same "sceneTime" units.
+        bool progressed = true;
+        int safetyCounter = 0;
+        while (progressed && safetyCounter++ < 1000) {
+            progressed = false;
+
+            // If no active animation, start the next due event (or apply instant events).
+            if (camera.animStartTime < 0.0f) {
+                while (!pendingCameraEvents.empty() && currentTime >= pendingCameraEvents.front().startTime) {
+                    CameraEvent ev = pendingCameraEvents.front();
+                    pendingCameraEvents.pop_front();
+
+                    float targetZoom = ev.hasZoom ? ev.zoom : camera.zoom;
+                    float targetPanX = ev.hasPan ? ev.panX : camera.panX;
+                    float targetPanY = ev.hasPan ? ev.panY : camera.panY;
+                    float targetRotation = ev.hasRotation ? ev.rotation : camera.rotation;
+
+                    camera.targetZoom = targetZoom;
+                    camera.targetPanX = targetPanX;
+                    camera.targetPanY = targetPanY;
+                    camera.targetRotation = targetRotation;
+
+                    if (ev.duration <= 0.0f) {
+                        // Instant camera change.
+                        camera.zoom = targetZoom;
+                        camera.panX = targetPanX;
+                        camera.panY = targetPanY;
+                        camera.rotation = targetRotation;
+                        camera.animDuration = 0.0f;
+                        progressed = true;
+                        continue;
+                    }
+
+                    // Start a timed animation from the current camera state.
+                    camera.startZoom = camera.zoom;
+                    camera.startPanX = camera.panX;
+                    camera.startPanY = camera.panY;
+                    camera.startRotation = camera.rotation;
+                    camera.animStartTime = ev.startTime;
+                    camera.animDuration = ev.duration;
+                    progressed = true;
+                    break;  // Only one timed camera animation at a time.
+                }
+            }
+
+            // Step active animation (if started).
+            if (camera.animStartTime >= 0.0f && camera.animDuration > 0.0f) {
+                float elapsed = currentTime - camera.animStartTime;
+                if (elapsed < 0.0f) {
+                    // Not started yet; keep camera at start state.
+                    break;
+                }
+
+                float progress = std::min(elapsed / camera.animDuration, 1.0f);
+                float eased = easeOutCubic(progress);
+
+                camera.zoom = camera.startZoom + (camera.targetZoom - camera.startZoom) * eased;
+                camera.panX = camera.startPanX + (camera.targetPanX - camera.startPanX) * eased;
+                camera.panY = camera.startPanY + (camera.targetPanY - camera.startPanY) * eased;
+                camera.rotation = camera.startRotation + (camera.targetRotation - camera.startRotation) * eased;
+
+                if (progress >= 1.0f) {
+                    camera.zoom = camera.targetZoom;
+                    camera.panX = camera.targetPanX;
+                    camera.panY = camera.targetPanY;
+                    camera.rotation = camera.targetRotation;
+                    camera.animStartTime = -1.0f;
+                    camera.animDuration = 0.0f;
+                    progressed = true;  // Allow starting the next due event this frame.
+                }
+            }
+        }
+
+        // Build 2D view-projection matrix (column-major order for GLSL)
+        // Transform = scale * rotate * translate
+        float c = std::cos(-camera.rotation);
+        float s = std::sin(-camera.rotation);
+        float z = camera.zoom;
+
+        // Combined matrix: scale(z) * rotate(-r) * translate(-pan)
+        // In column-major order:
+        // [z*c,  z*s, 0, 0]
+        // [-z*s, z*c, 0, 0]
+        // [0,    0,   1, 0]
+        // [tx,   ty,  0, 1]
+        // where tx = -panX*z*c + panY*z*s, ty = -panX*z*s - panY*z*c
+
+        float tx = -camera.panX * z * c + camera.panY * z * s;
+        float ty = -camera.panX * z * s - camera.panY * z * c;
+
+        float matrix[16] = {
+            z * c,  z * s, 0.0f, 0.0f,
+            -z * s, z * c, 0.0f, 0.0f,
+            0.0f,   0.0f,  1.0f, 0.0f,
+            tx,     ty,    0.0f, 1.0f
+        };
+
+        // Upload to UBO
+        void* data;
+        vkMapMemory(device, cameraUBOMemory, 0, sizeof(matrix), 0, &data);
+        memcpy(data, matrix, sizeof(matrix));
+        vkUnmapMemory(device, cameraUBOMemory);
+    }
+
+    // Scene management methods
+    size_t createScene() {
+        SceneData newScene;
+        newScene.bgR = bgR;  // Inherit global background
+        newScene.bgG = bgG;
+        newScene.bgB = bgB;
+        scenes.push_back(newScene);
+        return scenes.size() - 1;
+    }
+
+    void setActiveScene(size_t index) {
+        if (index < scenes.size()) {
+            activeSceneIndex = index;
+            // Apply scene's background and camera
+            SceneData& scene = scenes[index];
+            bgR = scene.bgR;
+            bgG = scene.bgG;
+            bgB = scene.bgB;
+            camera = scene.camera;
+        }
+    }
+
+    SceneData& getScene(size_t index) {
+        if (index >= scenes.size()) {
+            throw std::runtime_error("Scene index out of range");
+        }
+        return scenes[index];
+    }
+
+    size_t getActiveSceneIndex() const {
+        return activeSceneIndex;
+    }
+
+    // Add element to current scene
+    void addElementToScene(size_t elementIndex, const std::string& type) {
+        if (scenes.empty()) return;  // No scenes, global mode
+        SceneData& scene = scenes[activeSceneIndex];
+        if (type == "text") {
+            scene.textIndices.push_back(elementIndex);
+        } else if (type == "math") {
+            scene.mathIndices.push_back(elementIndex);
+        } else if (type == "shape") {
+            scene.shapeIndices.push_back(elementIndex);
+        } else if (type == "image") {
+            scene.imageIndices.push_back(elementIndex);
+        } else if (type == "graph") {
+            scene.graphIndices.push_back(elementIndex);
+        }
+    }
+
+    // Check if element is in active scene (or if global mode with no scenes)
+    bool isInActiveScene(size_t elementIndex, const std::string& type) const {
+        if (scenes.empty()) return true;  // Global mode - all elements visible
+        const SceneData& scene = scenes[activeSceneIndex];
+        const std::vector<size_t>* indices = nullptr;
+        if (type == "text") indices = &scene.textIndices;
+        else if (type == "math") indices = &scene.mathIndices;
+        else if (type == "shape") indices = &scene.shapeIndices;
+        else if (type == "image") indices = &scene.imageIndices;
+        else if (type == "graph") indices = &scene.graphIndices;
+        if (!indices) return true;
+        return std::find(indices->begin(), indices->end(), elementIndex) != indices->end();
+    }
+
+    // Scene-specific background setting
+    void setSceneBackground(size_t sceneIndex, float r, float g, float b) {
+        if (sceneIndex < scenes.size()) {
+            scenes[sceneIndex].bgR = r;
+            scenes[sceneIndex].bgG = g;
+            scenes[sceneIndex].bgB = b;
+            if (sceneIndex == activeSceneIndex) {
+                bgR = r;
+                bgG = g;
+                bgB = b;
+            }
+        }
+    }
+
+    // Scene-specific camera controls
+    void setSceneCameraZoom(size_t sceneIndex, float zoom, float duration) {
+        if (sceneIndex < scenes.size()) {
+            CameraState& cam = scenes[sceneIndex].camera;
+            if (duration <= 0.0f) {
+                cam.zoom = zoom;
+                cam.targetZoom = zoom;
+            } else {
+                cam.startZoom = cam.zoom;
+                cam.startPanX = cam.panX;
+                cam.startPanY = cam.panY;
+                cam.startRotation = cam.rotation;
+                cam.targetZoom = zoom;
+                cam.animStartTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                cam.animDuration = duration;
+            }
+            if (sceneIndex == activeSceneIndex) {
+                camera = cam;
+            }
+        }
+    }
+
+    void setSceneCameraPan(size_t sceneIndex, float x, float y, float duration) {
+        if (sceneIndex < scenes.size()) {
+            CameraState& cam = scenes[sceneIndex].camera;
+            if (duration <= 0.0f) {
+                cam.panX = x;
+                cam.panY = y;
+                cam.targetPanX = x;
+                cam.targetPanY = y;
+            } else {
+                cam.startZoom = cam.zoom;
+                cam.startPanX = cam.panX;
+                cam.startPanY = cam.panY;
+                cam.startRotation = cam.rotation;
+                cam.targetPanX = x;
+                cam.targetPanY = y;
+                cam.animStartTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                cam.animDuration = duration;
+            }
+            if (sceneIndex == activeSceneIndex) {
+                camera = cam;
+            }
+        }
+    }
+
+    void setSceneCameraRotate(size_t sceneIndex, float degrees, float duration) {
+        if (sceneIndex < scenes.size()) {
+            CameraState& cam = scenes[sceneIndex].camera;
+            float radians = degrees * 3.14159265f / 180.0f;
+            if (duration <= 0.0f) {
+                cam.rotation = radians;
+                cam.targetRotation = radians;
+            } else {
+                cam.startZoom = cam.zoom;
+                cam.startPanX = cam.panX;
+                cam.startPanY = cam.panY;
+                cam.startRotation = cam.rotation;
+                cam.targetRotation = radians;
+                cam.animStartTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                cam.animDuration = duration;
+            }
+            if (sceneIndex == activeSceneIndex) {
+                camera = cam;
+            }
+        }
+    }
+
+    void resetSceneCamera(size_t sceneIndex, float duration) {
+        if (sceneIndex < scenes.size()) {
+            CameraState& cam = scenes[sceneIndex].camera;
+            if (duration <= 0.0f) {
+                cam.reset();
+            } else {
+                cam.startZoom = cam.zoom;
+                cam.startPanX = cam.panX;
+                cam.startPanY = cam.panY;
+                cam.startRotation = cam.rotation;
+                cam.targetZoom = 1.0f;
+                cam.targetPanX = 0.0f;
+                cam.targetPanY = 0.0f;
+                cam.targetRotation = 0.0f;
+                cam.animStartTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                cam.animDuration = duration;
+            }
+            if (sceneIndex == activeSceneIndex) {
+                camera = cam;
+            }
+        }
+    }
+
+    // Coordinate conversion helpers for axes
+    float dataToPixelX(float dataX, const AxesObject& axes) {
+        float t = (dataX - axes.xMin) / (axes.xMax - axes.xMin);
+        return axes.screenX + t * axes.screenWidth;
+    }
+
+    float dataToPixelY(float dataY, const AxesObject& axes) {
+        float t = (dataY - axes.yMin) / (axes.yMax - axes.yMin);
+        // NDC conversion will handle the Y-flip
+        return axes.screenY + t * axes.screenHeight;
+    }
+
+    // Format number for tick labels
+    std::string formatNumber(float value) {
+        if (std::abs(value) < 0.001f) return "0";
+        char buffer[32];
+        if (std::abs(value - std::round(value)) < 0.001f) {
+            snprintf(buffer, sizeof(buffer), "%.0f", value);
+        } else {
+            snprintf(buffer, sizeof(buffer), "%.1f", value);
+        }
+        return std::string(buffer);
+    }
+
+    size_t addAxes(float xMin, float xMax, float yMin, float yMax) {
+        AxesObject axes;
+        axes.xMin = xMin;
+        axes.xMax = xMax;
+        axes.yMin = yMin;
+        axes.yMax = yMax;
+
+        // Default screen region: square, centered with margins
+        // Use the smaller dimension to ensure equal visual spacing on both axes
+        float maxSize = std::min(width, height) * 0.8f;
+        axes.screenWidth = maxSize;
+        axes.screenHeight = maxSize;
+        // Center the square region
+        axes.screenX = (width - maxSize) / 2.0f;
+        axes.screenY = (height - maxSize) / 2.0f;
+
+        // Calculate reasonable tick spacing
+        float xRange = xMax - xMin;
+        float yRange = yMax - yMin;
+        axes.xTickSpacing = std::pow(10.0f, std::floor(std::log10(xRange / 5)));
+        axes.yTickSpacing = std::pow(10.0f, std::floor(std::log10(yRange / 5)));
+
+        axes.scheduledStartTime = currentTimeCursor;
+        axesObjects.push_back(axes);
+
+        size_t axesIdx = axesObjects.size() - 1;
+
+        // Generate the visual elements for this axes
+        generateAxesElements(axesIdx);
+
+        return axesIdx;
+    }
+
+    void generateAxesElements(size_t axesIdx) {
+        AxesObject& axes = axesObjects[axesIdx];
+
+        // Calculate origin in pixels
+        float originX = dataToPixelX(0, axes);
+        float originY = dataToPixelY(0, axes);
+
+        // Clamp origin to screen region
+        originX = std::clamp(originX, axes.screenX, axes.screenX + axes.screenWidth);
+        originY = std::clamp(originY, axes.screenY, axes.screenY + axes.screenHeight);
+
+        // 1. X-axis arrow (horizontal)
+        if (axes.showArrows) {
+            size_t xArrowIdx = addArrow(axes.screenX, originY,
+                                        axes.screenX + axes.screenWidth, originY,
+                                        15.0f, 20.0f);
+            shapeObjects[xArrowIdx].fillR = axes.axisColorR;
+            shapeObjects[xArrowIdx].fillG = axes.axisColorG;
+            shapeObjects[xArrowIdx].fillB = axes.axisColorB;
+            shapeObjects[xArrowIdx].lineThickness = axes.lineThickness;
+            shapeObjects[xArrowIdx].scheduledStartTime = axes.scheduledStartTime;
+            axes.shapeIndices.push_back(xArrowIdx);
+        }
+
+        // 2. Y-axis arrow (vertical, pointing up)
+        if (axes.showArrows) {
+            size_t yArrowIdx = addArrow(originX, axes.screenY,
+                                        originX, axes.screenY + axes.screenHeight,
+                                        15.0f, 20.0f);
+            shapeObjects[yArrowIdx].fillR = axes.axisColorR;
+            shapeObjects[yArrowIdx].fillG = axes.axisColorG;
+            shapeObjects[yArrowIdx].fillB = axes.axisColorB;
+            shapeObjects[yArrowIdx].lineThickness = axes.lineThickness;
+            shapeObjects[yArrowIdx].scheduledStartTime = axes.scheduledStartTime;
+            axes.shapeIndices.push_back(yArrowIdx);
+        }
+
+        // 3. X-axis tick marks and labels
+        float xStart = std::ceil(axes.xMin / axes.xTickSpacing) * axes.xTickSpacing;
+        for (float x = xStart; x <= axes.xMax; x += axes.xTickSpacing) {
+            if (std::abs(x) < axes.xTickSpacing * 0.1f) continue;  // Skip origin
+            float px = dataToPixelX(x, axes);
+
+            // Skip if outside screen region
+            if (px < axes.screenX || px > axes.screenX + axes.screenWidth) continue;
+
+            // Tick mark
+            size_t tickIdx = addLine(px, originY - axes.tickLength / 2,
+                                     px, originY + axes.tickLength / 2);
+            shapeObjects[tickIdx].fillR = axes.axisColorR;
+            shapeObjects[tickIdx].fillG = axes.axisColorG;
+            shapeObjects[tickIdx].fillB = axes.axisColorB;
+            shapeObjects[tickIdx].lineThickness = axes.lineThickness;
+            shapeObjects[tickIdx].scheduledStartTime = axes.scheduledStartTime;
+            axes.shapeIndices.push_back(tickIdx);
+
+            // Label
+            if (axes.showTickLabels) {
+                size_t labelIdx = addText(formatNumber(x));
+                textObjects[labelIdx].posX = px;
+                textObjects[labelIdx].posY = originY + axes.tickLength + 5;
+                textObjects[labelIdx].usePixelPosition = true;
+                textObjects[labelIdx].fontSize = axes.labelSize;
+                textObjects[labelIdx].colorR = axes.axisColorR;
+                textObjects[labelIdx].colorG = axes.axisColorG;
+                textObjects[labelIdx].colorB = axes.axisColorB;
+                textObjects[labelIdx].scheduledStartTime = axes.scheduledStartTime;
+                axes.textIndices.push_back(labelIdx);
+            }
+        }
+
+        // 4. Y-axis tick marks and labels
+        float yStart = std::ceil(axes.yMin / axes.yTickSpacing) * axes.yTickSpacing;
+        for (float y = yStart; y <= axes.yMax; y += axes.yTickSpacing) {
+            if (std::abs(y) < axes.yTickSpacing * 0.1f) continue;  // Skip origin
+            float py = dataToPixelY(y, axes);
+
+            // Skip if outside screen region
+            if (py < axes.screenY || py > axes.screenY + axes.screenHeight) continue;
+
+            // Tick mark
+            size_t tickIdx = addLine(originX - axes.tickLength / 2, py,
+                                     originX + axes.tickLength / 2, py);
+            shapeObjects[tickIdx].fillR = axes.axisColorR;
+            shapeObjects[tickIdx].fillG = axes.axisColorG;
+            shapeObjects[tickIdx].fillB = axes.axisColorB;
+            shapeObjects[tickIdx].lineThickness = axes.lineThickness;
+            shapeObjects[tickIdx].scheduledStartTime = axes.scheduledStartTime;
+            axes.shapeIndices.push_back(tickIdx);
+
+            // Label
+            if (axes.showTickLabels) {
+                size_t labelIdx = addText(formatNumber(y));
+                textObjects[labelIdx].posX = originX - axes.tickLength - 30;
+                textObjects[labelIdx].posY = py - axes.labelSize / 2;
+                textObjects[labelIdx].usePixelPosition = true;
+                textObjects[labelIdx].fontSize = axes.labelSize;
+                textObjects[labelIdx].colorR = axes.axisColorR;
+                textObjects[labelIdx].colorG = axes.axisColorG;
+                textObjects[labelIdx].colorB = axes.axisColorB;
+                textObjects[labelIdx].scheduledStartTime = axes.scheduledStartTime;
+                axes.textIndices.push_back(labelIdx);
+            }
+        }
+
+        vertexBufferDirty = true;
+        shapeVertexBufferDirty = true;
+    }
+
+    // Add number line
+    size_t addNumberLine(float min, float max, bool vertical = false) {
+        NumberLineObject numLine;
+        numLine.minValue = min;
+        numLine.maxValue = max;
+        numLine.isVertical = vertical;
+
+        // Default position: centered
+        numLine.posX = width / 2.0f;
+        numLine.posY = height / 2.0f;
+
+        // Default length: 80% of screen dimension
+        numLine.length = (vertical ? height : width) * 0.8f;
+
+        // Calculate reasonable tick spacing
+        float range = max - min;
+        numLine.tickSpacing = std::pow(10.0f, std::floor(std::log10(range / 5)));
+
+        numLine.scheduledStartTime = currentTimeCursor;
+        numberLineObjects.push_back(numLine);
+
+        size_t idx = numberLineObjects.size() - 1;
+        generateNumberLineElements(idx);
+
+        return idx;
+    }
+
+    void generateNumberLineElements(size_t idx) {
+        NumberLineObject& numLine = numberLineObjects[idx];
+
+        float halfLen = numLine.length / 2.0f;
+
+        if (numLine.isVertical) {
+            // Vertical number line
+            float startY = numLine.posY - halfLen;
+            float endY = numLine.posY + halfLen;
+
+            // Main line (arrow or line)
+            size_t lineIdx;
+            if (numLine.showArrows) {
+                lineIdx = addArrow(numLine.posX, startY, numLine.posX, endY, 12.0f, 18.0f);
+            } else {
+                lineIdx = addLine(numLine.posX, startY, numLine.posX, endY);
+            }
+            shapeObjects[lineIdx].fillR = numLine.colorR;
+            shapeObjects[lineIdx].fillG = numLine.colorG;
+            shapeObjects[lineIdx].fillB = numLine.colorB;
+            shapeObjects[lineIdx].lineThickness = numLine.lineThickness;
+            shapeObjects[lineIdx].scheduledStartTime = numLine.scheduledStartTime;
+            numLine.shapeIndices.push_back(lineIdx);
+
+            // Tick marks and labels
+            float tickStart = std::ceil(numLine.minValue / numLine.tickSpacing) * numLine.tickSpacing;
+            for (float val = tickStart; val <= numLine.maxValue; val += numLine.tickSpacing) {
+                // Convert value to pixel position
+                float t = (val - numLine.minValue) / (numLine.maxValue - numLine.minValue);
+                float py = startY + t * numLine.length;
+
+                // Tick mark
+                size_t tickIdx = addLine(numLine.posX - numLine.tickLength / 2, py,
+                                         numLine.posX + numLine.tickLength / 2, py);
+                shapeObjects[tickIdx].fillR = numLine.colorR;
+                shapeObjects[tickIdx].fillG = numLine.colorG;
+                shapeObjects[tickIdx].fillB = numLine.colorB;
+                shapeObjects[tickIdx].lineThickness = numLine.lineThickness;
+                shapeObjects[tickIdx].scheduledStartTime = numLine.scheduledStartTime;
+                numLine.shapeIndices.push_back(tickIdx);
+
+                // Label
+                if (numLine.showTickLabels) {
+                    size_t labelIdx = addText(formatNumber(val));
+                    textObjects[labelIdx].posX = numLine.posX + numLine.tickLength + 5;
+                    textObjects[labelIdx].posY = py - numLine.labelSize / 2;
+                    textObjects[labelIdx].usePixelPosition = true;
+                    textObjects[labelIdx].fontSize = numLine.labelSize;
+                    textObjects[labelIdx].colorR = numLine.colorR;
+                    textObjects[labelIdx].colorG = numLine.colorG;
+                    textObjects[labelIdx].colorB = numLine.colorB;
+                    textObjects[labelIdx].scheduledStartTime = numLine.scheduledStartTime;
+                    numLine.textIndices.push_back(labelIdx);
+                }
+            }
+        } else {
+            // Horizontal number line
+            float startX = numLine.posX - halfLen;
+            float endX = numLine.posX + halfLen;
+
+            // Main line (arrow or line)
+            size_t lineIdx;
+            if (numLine.showArrows) {
+                lineIdx = addArrow(startX, numLine.posY, endX, numLine.posY, 12.0f, 18.0f);
+            } else {
+                lineIdx = addLine(startX, numLine.posY, endX, numLine.posY);
+            }
+            shapeObjects[lineIdx].fillR = numLine.colorR;
+            shapeObjects[lineIdx].fillG = numLine.colorG;
+            shapeObjects[lineIdx].fillB = numLine.colorB;
+            shapeObjects[lineIdx].lineThickness = numLine.lineThickness;
+            shapeObjects[lineIdx].scheduledStartTime = numLine.scheduledStartTime;
+            numLine.shapeIndices.push_back(lineIdx);
+
+            // Tick marks and labels
+            float tickStart = std::ceil(numLine.minValue / numLine.tickSpacing) * numLine.tickSpacing;
+            for (float val = tickStart; val <= numLine.maxValue; val += numLine.tickSpacing) {
+                // Convert value to pixel position
+                float t = (val - numLine.minValue) / (numLine.maxValue - numLine.minValue);
+                float px = startX + t * numLine.length;
+
+                // Tick mark
+                size_t tickIdx = addLine(px, numLine.posY - numLine.tickLength / 2,
+                                         px, numLine.posY + numLine.tickLength / 2);
+                shapeObjects[tickIdx].fillR = numLine.colorR;
+                shapeObjects[tickIdx].fillG = numLine.colorG;
+                shapeObjects[tickIdx].fillB = numLine.colorB;
+                shapeObjects[tickIdx].lineThickness = numLine.lineThickness;
+                shapeObjects[tickIdx].scheduledStartTime = numLine.scheduledStartTime;
+                numLine.shapeIndices.push_back(tickIdx);
+
+                // Label
+                if (numLine.showTickLabels) {
+                    size_t labelIdx = addText(formatNumber(val));
+                    textObjects[labelIdx].posX = px;
+                    textObjects[labelIdx].posY = numLine.posY + numLine.tickLength + 5;
+                    textObjects[labelIdx].usePixelPosition = true;
+                    textObjects[labelIdx].fontSize = numLine.labelSize;
+                    textObjects[labelIdx].colorR = numLine.colorR;
+                    textObjects[labelIdx].colorG = numLine.colorG;
+                    textObjects[labelIdx].colorB = numLine.colorB;
+                    textObjects[labelIdx].scheduledStartTime = numLine.scheduledStartTime;
+                    numLine.textIndices.push_back(labelIdx);
+                }
+            }
+        }
+
+        vertexBufferDirty = true;
+        shapeVertexBufferDirty = true;
+    }
+
+    // Default bar chart colors
+    std::vector<uint32_t> getDefaultChartColors() {
+        return {
+            0x3498DB,  // Blue
+            0xE74C3C,  // Red
+            0x2ECC71,  // Green
+            0xF39C12,  // Orange
+            0x9B59B6,  // Purple
+            0x1ABC9C,  // Teal
+            0xE91E63,  // Pink
+            0x00BCD4   // Cyan
+        };
+    }
+
+    // Add bar chart
+    size_t addBarChart(const std::vector<float>& values, const std::vector<std::string>& labels = {}) {
+        BarChartObject chart;
+        chart.values = values;
+        chart.labels = labels;
+        chart.colors = getDefaultChartColors();
+
+        // Default position: centered
+        chart.posX = width / 2.0f;
+        chart.posY = height / 2.0f;
+
+        // Calculate appropriate bar width based on number of bars
+        float totalWidth = width * 0.7f;
+        int numBars = values.size();
+        chart.spacing = totalWidth * 0.05f / numBars;
+        chart.barWidth = (totalWidth - chart.spacing * (numBars - 1)) / numBars;
+
+        chart.scheduledStartTime = currentTimeCursor;
+        barChartObjects.push_back(chart);
+
+        size_t idx = barChartObjects.size() - 1;
+        generateBarChartElements(idx);
+
+        return idx;
+    }
+
+    void generateBarChartElements(size_t idx) {
+        BarChartObject& chart = barChartObjects[idx];
+
+        // Find max value for scaling
+        float maxVal = *std::max_element(chart.values.begin(), chart.values.end());
+        if (maxVal <= 0) maxVal = 1.0f;
+
+        int numBars = chart.values.size();
+        float totalWidth = chart.barWidth * numBars + chart.spacing * (numBars - 1);
+        float startX = chart.posX - totalWidth / 2.0f;
+
+        for (size_t i = 0; i < chart.values.size(); i++) {
+            float barHeight = (chart.values[i] / maxVal) * chart.maxHeight;
+            float barX = startX + i * (chart.barWidth + chart.spacing);
+            float barY = chart.posY + chart.maxHeight / 2.0f - barHeight;  // Bottom aligned
+
+            // Create rectangle for this bar
+            size_t rectIdx = addRectangle(chart.barWidth, barHeight);
+            auto& shape = shapeObjects[rectIdx];
+            shape.posX = barX + chart.barWidth / 2.0f;
+            shape.posY = barY + barHeight / 2.0f;
+            shape.usePixelPosition = true;
+
+            // Set color
+            uint32_t color = chart.colors[i % chart.colors.size()];
+            shape.fillR = ((color >> 16) & 0xFF) / 255.0f;
+            shape.fillG = ((color >> 8) & 0xFF) / 255.0f;
+            shape.fillB = (color & 0xFF) / 255.0f;
+
+            shape.scheduledStartTime = chart.scheduledStartTime;
+            chart.shapeIndices.push_back(rectIdx);
+
+            // Add label if provided
+            if (i < chart.labels.size()) {
+                size_t labelIdx = addText(chart.labels[i]);
+                textObjects[labelIdx].posX = barX + chart.barWidth / 2.0f;
+                textObjects[labelIdx].posY = chart.posY + chart.maxHeight / 2.0f + 20.0f;
+                textObjects[labelIdx].usePixelPosition = true;
+                textObjects[labelIdx].fontSize = 16.0f;
+                textObjects[labelIdx].scheduledStartTime = chart.scheduledStartTime;
+                chart.textIndices.push_back(labelIdx);
+            }
+        }
+
+        vertexBufferDirty = true;
+        shapeVertexBufferDirty = true;
+    }
+
+    // Add pie chart
+    size_t addPieChart(const std::vector<float>& values, float radius) {
+        PieChartObject chart;
+        chart.values = values;
+        chart.radius = radius;
+        chart.colors = getDefaultChartColors();
+
+        // Default position: centered
+        chart.posX = width / 2.0f;
+        chart.posY = height / 2.0f;
+
+        chart.scheduledStartTime = currentTimeCursor;
+        pieChartObjects.push_back(chart);
+
+        size_t idx = pieChartObjects.size() - 1;
+        generatePieChartElements(idx);
+
+        return idx;
+    }
+
+    void generatePieChartElements(size_t idx) {
+        PieChartObject& chart = pieChartObjects[idx];
+
+        // Calculate total for normalization
+        float total = 0.0f;
+        for (float v : chart.values) total += v;
+        if (total <= 0) total = 1.0f;
+
+        float currentAngle = chart.startAngle;
+
+        for (size_t i = 0; i < chart.values.size(); i++) {
+            float sliceAngle = (chart.values[i] / total) * 360.0f;
+            float endAngle = currentAngle + sliceAngle;
+
+            // Create arc for this slice (filled wedge)
+            size_t arcIdx = addArc(chart.radius, currentAngle, endAngle);
+            auto& shape = shapeObjects[arcIdx];
+            shape.posX = chart.posX;
+            shape.posY = chart.posY;
+            shape.usePixelPosition = true;
+
+            // Set color
+            uint32_t color = chart.colors[i % chart.colors.size()];
+            shape.fillR = ((color >> 16) & 0xFF) / 255.0f;
+            shape.fillG = ((color >> 8) & 0xFF) / 255.0f;
+            shape.fillB = (color & 0xFF) / 255.0f;
+
+            shape.scheduledStartTime = chart.scheduledStartTime;
+            chart.shapeIndices.push_back(arcIdx);
+
+            currentAngle = endAngle;
+        }
+
+        shapeVertexBufferDirty = true;
+    }
+
+    // Add vector field (grid of arrows showing field directions)
+    size_t addVectorField(size_t axesIdx, std::function<std::pair<float, float>(float, float)> func,
+                          int gridX, int gridY) {
+        VectorFieldObject field;
+        field.axesIndex = axesIdx;
+        field.fieldFunc = func;
+        field.gridSizeX = gridX;
+        field.gridSizeY = gridY;
+
+        // Get domain from axes
+        if (axesIdx < axesObjects.size()) {
+            const AxesObject& axes = axesObjects[axesIdx];
+            field.xMin = axes.xMin;
+            field.xMax = axes.xMax;
+            field.yMin = axes.yMin;
+            field.yMax = axes.yMax;
+        }
+
+        field.scheduledStartTime = currentTimeCursor;
+        vectorFieldObjects.push_back(field);
+
+        size_t idx = vectorFieldObjects.size() - 1;
+        generateVectorFieldElements(idx);
+
+        return idx;
+    }
+
+    void generateVectorFieldElements(size_t idx) {
+        VectorFieldObject& field = vectorFieldObjects[idx];
+
+        // Clear existing arrows
+        field.shapeIndices.clear();
+
+        if (field.axesIndex >= axesObjects.size()) return;
+        const AxesObject& axes = axesObjects[field.axesIndex];
+
+        // Calculate grid spacing
+        float dx = (field.xMax - field.xMin) / (field.gridSizeX - 1);
+        float dy = (field.yMax - field.yMin) / (field.gridSizeY - 1);
+
+        // Find max magnitude for normalization
+        float maxMag = 0.0f;
+        for (int j = 0; j < field.gridSizeY; j++) {
+            for (int i = 0; i < field.gridSizeX; i++) {
+                float x = field.xMin + i * dx;
+                float y = field.yMin + j * dy;
+                auto [vx, vy] = field.fieldFunc(x, y);
+                float mag = std::sqrt(vx * vx + vy * vy);
+                if (mag > maxMag) maxMag = mag;
+            }
+        }
+        if (maxMag <= 0) maxMag = 1.0f;
+
+        // Calculate arrow size based on grid spacing (in pixels)
+        float gridPixelSpacingX = axes.screenWidth / field.gridSizeX;
+        float gridPixelSpacingY = axes.screenHeight / field.gridSizeY;
+        float arrowMaxLen = std::min(gridPixelSpacingX, gridPixelSpacingY) * 0.8f * field.arrowScale;
+
+        // Create arrows at each grid point
+        for (int j = 0; j < field.gridSizeY; j++) {
+            for (int i = 0; i < field.gridSizeX; i++) {
+                float x = field.xMin + i * dx;
+                float y = field.yMin + j * dy;
+
+                auto [vx, vy] = field.fieldFunc(x, y);
+                float mag = std::sqrt(vx * vx + vy * vy);
+                if (mag < 0.001f) continue;  // Skip near-zero vectors
+
+                // Normalize and scale
+                float scale = (mag / maxMag) * arrowMaxLen;
+                float nvx = (vx / mag) * scale;
+                float nvy = (vy / mag) * scale;
+
+                // Convert start point to pixels
+                float pixelX = dataToPixelX(x, axes);
+                float pixelY = dataToPixelY(y, axes);
+
+                // Create arrow from (pixelX, pixelY) to (pixelX + nvx, pixelY - nvy)
+                // Note: Y is inverted for screen coordinates
+                size_t arrowIdx = addArrow(pixelX, pixelY, pixelX + nvx, pixelY - nvy);
+                auto& shape = shapeObjects[arrowIdx];
+
+                // Set color based on field color
+                shape.fillR = field.colorR;
+                shape.fillG = field.colorG;
+                shape.fillB = field.colorB;
+
+                shape.scheduledStartTime = field.scheduledStartTime;
+                field.shapeIndices.push_back(arrowIdx);
+            }
+        }
+
+        shapeVertexBufferDirty = true;
+    }
+
+    // Add table from 2D string array
+    size_t addTable(const std::vector<std::vector<std::string>>& data) {
+        TableObject table;
+        table.cells = data;
+        table.numRows = static_cast<int>(data.size());
+        table.numCols = data.empty() ? 0 : static_cast<int>(data[0].size());
+
+        // Default position to center
+        float tableWidth = table.numCols * table.cellWidth;
+        float tableHeight = table.numRows * table.cellHeight;
+        table.posX = (width - tableWidth) / 2.0f;
+        table.posY = (height - tableHeight) / 2.0f;
+
+        table.scheduledStartTime = currentTimeCursor;
+        tableObjects.push_back(table);
+
+        size_t idx = tableObjects.size() - 1;
+        generateTableElements(idx);
+
+        return idx;
+    }
+
+    void generateTableElements(size_t idx) {
+        TableObject& table = tableObjects[idx];
+
+        // Clear existing elements
+        table.shapeIndices.clear();
+        table.textIndices.clear();
+
+        if (table.numRows == 0 || table.numCols == 0) return;
+
+        // Calculate cell dimensions
+        std::vector<float> colWidths(table.numCols, table.cellWidth);
+        std::vector<float> rowHeights(table.numRows, table.cellHeight);
+
+        // Use custom widths/heights if specified
+        for (size_t i = 0; i < table.columnWidths.size() && i < colWidths.size(); i++) {
+            colWidths[i] = table.columnWidths[i];
+        }
+        for (size_t i = 0; i < table.rowHeights.size() && i < rowHeights.size(); i++) {
+            rowHeights[i] = table.rowHeights[i];
+        }
+
+        float currentY = table.posY;
+
+        for (int row = 0; row < table.numRows; row++) {
+            float currentX = table.posX;
+            float cellH = rowHeights[row];
+
+            for (int col = 0; col < table.numCols; col++) {
+                float cellW = colWidths[col];
+
+                // Create header background for first row
+                if (row == 0 && table.hasHeader) {
+                    size_t rectIdx = addRectangle(cellW, cellH);
+                    auto& rect = shapeObjects[rectIdx];
+                    rect.posX = currentX + cellW / 2.0f;
+                    rect.posY = currentY + cellH / 2.0f;
+                    rect.usePixelPosition = true;
+                    rect.fillR = table.headerColorR;
+                    rect.fillG = table.headerColorG;
+                    rect.fillB = table.headerColorB;
+                    rect.scheduledStartTime = table.scheduledStartTime;
+                    table.shapeIndices.push_back(rectIdx);
+                }
+
+                // Create cell border if grid is enabled
+                if (table.showGrid) {
+                    // Top line
+                    if (row == 0) {
+                        size_t lineIdx = addLine(currentX, currentY, currentX + cellW, currentY);
+                        auto& line = shapeObjects[lineIdx];
+                        line.fillR = table.gridColorR;
+                        line.fillG = table.gridColorG;
+                        line.fillB = table.gridColorB;
+                        line.scheduledStartTime = table.scheduledStartTime;
+                        table.shapeIndices.push_back(lineIdx);
+                    }
+                    // Bottom line
+                    size_t bottomIdx = addLine(currentX, currentY + cellH, currentX + cellW, currentY + cellH);
+                    auto& bottom = shapeObjects[bottomIdx];
+                    bottom.fillR = table.gridColorR;
+                    bottom.fillG = table.gridColorG;
+                    bottom.fillB = table.gridColorB;
+                    bottom.scheduledStartTime = table.scheduledStartTime;
+                    table.shapeIndices.push_back(bottomIdx);
+
+                    // Left line
+                    if (col == 0) {
+                        size_t leftIdx = addLine(currentX, currentY, currentX, currentY + cellH);
+                        auto& left = shapeObjects[leftIdx];
+                        left.fillR = table.gridColorR;
+                        left.fillG = table.gridColorG;
+                        left.fillB = table.gridColorB;
+                        left.scheduledStartTime = table.scheduledStartTime;
+                        table.shapeIndices.push_back(leftIdx);
+                    }
+                    // Right line
+                    size_t rightIdx = addLine(currentX + cellW, currentY, currentX + cellW, currentY + cellH);
+                    auto& right = shapeObjects[rightIdx];
+                    right.fillR = table.gridColorR;
+                    right.fillG = table.gridColorG;
+                    right.fillB = table.gridColorB;
+                    right.scheduledStartTime = table.scheduledStartTime;
+                    table.shapeIndices.push_back(rightIdx);
+                }
+
+                // Create cell text
+                if (row < static_cast<int>(table.cells.size()) &&
+                    col < static_cast<int>(table.cells[row].size()) &&
+                    !table.cells[row][col].empty()) {
+
+                    size_t textIdx = addText(table.cells[row][col]);
+                    auto& text = textObjects[textIdx];
+                    text.fontSize = table.fontSize;
+                    text.posX = currentX + cellW / 2.0f;
+                    text.posY = currentY + cellH / 2.0f;
+                    text.usePixelPosition = true;
+                    text.colorR = table.textColorR;
+                    text.colorG = table.textColorG;
+                    text.colorB = table.textColorB;
+                    text.scheduledStartTime = table.scheduledStartTime;
+                    table.textIndices.push_back(textIdx);
+                }
+
+                currentX += cellW;
+            }
+            currentY += cellH;
+        }
+
+        shapeVertexBufferDirty = true;
+        vertexBufferDirty = true;
+    }
+
+    // Add image from file path
+    size_t addImage(const std::string& path) {
+        ImageObject img;
+        img.imagePath = path;
+        img.scheduledStartTime = currentTimeCursor;
+
+        // Load image data using stb_image
+        int w, h, channels;
+        unsigned char* data = stbi_load(path.c_str(), &w, &h, &channels, 4);  // Force RGBA
+        if (!data) {
+            std::cerr << "Failed to load image: " << path << std::endl;
+            // Create a placeholder 1x1 transparent image
+            img.imageWidth = 1;
+            img.imageHeight = 1;
+            img.channels = 4;
+            img.displayWidth = 100.0f;
+            img.displayHeight = 100.0f;
+        } else {
+            img.imageWidth = w;
+            img.imageHeight = h;
+            img.channels = 4;
+            img.displayWidth = static_cast<float>(w);
+            img.displayHeight = static_cast<float>(h);
+        }
+
+        // Default position to center
+        img.posX = width / 2.0f;
+        img.posY = height / 2.0f;
+
+        // Store pixel data for deferred texture creation (Vulkan not yet initialized)
+        if (data) {
+            img.pixelData.assign(data, data + (w * h * 4));
+            stbi_image_free(data);
+        }
+
+        imageObjects.push_back(img);
+        size_t idx = imageObjects.size() - 1;
+
+        imageVertexBufferDirty = true;
+        return idx;
+    }
+
+    size_t addImage(const std::string& path, float dispWidth, float dispHeight) {
+        size_t idx = addImage(path);
+        if (idx < imageObjects.size()) {
+            imageObjects[idx].displayWidth = dispWidth;
+            imageObjects[idx].displayHeight = dispHeight;
+            imageVertexBufferDirty = true;
+        }
+        return idx;
+    }
+
+    void createImageTexture(ImageObject& obj, unsigned char* data, uint32_t texWidth, uint32_t texHeight) {
+        // Destroy old texture if exists
+        if (obj.texture != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            if (obj.descriptorSet != VK_NULL_HANDLE) {
+                vkFreeDescriptorSets(device, descriptorPool, 1, &obj.descriptorSet);
+                obj.descriptorSet = VK_NULL_HANDLE;
+            }
+            vkDestroyImageView(device, obj.textureView, nullptr);
+            vkDestroyImage(device, obj.texture, nullptr);
+            vkFreeMemory(device, obj.textureMemory, nullptr);
+            obj.texture = VK_NULL_HANDLE;
+            obj.textureView = VK_NULL_HANDLE;
+            obj.textureMemory = VK_NULL_HANDLE;
+        }
+
+        VkDeviceSize imageSize = texWidth * texHeight * 4;  // RGBA
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = imageSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image staging buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate image staging buffer memory!");
+        }
+
+        vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
+
+        void* mappedData;
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &mappedData);
+        memcpy(mappedData, data, imageSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create image - RGBA format
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = texWidth;
+        imageInfo.extent.height = texHeight;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        if (vkCreateImage(device, &imageInfo, nullptr, &obj.texture) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image texture!");
+        }
+
+        vkGetImageMemoryRequirements(device, obj.texture, &memRequirements);
+
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &obj.textureMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate image texture memory!");
+        }
+
+        vkBindImageMemory(device, obj.texture, obj.textureMemory, 0);
+
+        // Transition and copy
+        transitionImageLayout(obj.texture, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(stagingBuffer, obj.texture, texWidth, texHeight);
+        transitionImageLayout(obj.texture, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        // Create image view
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = obj.texture;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &obj.textureView) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image texture view!");
+        }
+
+        // Create descriptor set for this image (reuse math descriptor set layout)
+        createImageDescriptorSet(obj);
+        obj.textureDirty = false;
+    }
+
+    void createImageDescriptorSet(ImageObject& obj) {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &descriptorSetLayout;  // Reuse text/math descriptor set layout
+
+        if (vkAllocateDescriptorSets(device, &allocInfo, &obj.descriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate image descriptor set!");
+        }
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = obj.textureView;
+        imageInfo.sampler = mathSampler;  // Reuse the math/RGBA texture sampler
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = obj.descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    // Add graph from data arrays
+    size_t addGraph(size_t axesIdx, const std::vector<float>& xData, const std::vector<float>& yData) {
+        GraphObject graph;
+        graph.axesIndex = axesIdx;
+        graph.xData = xData;
+        graph.yData = yData;
+        graph.scheduledStartTime = currentTimeCursor;
+        graphObjects.push_back(graph);
+        graphVertexBufferDirty = true;
+        return graphObjects.size() - 1;
+    }
+
+    // Add graph from lambda function
+    size_t addGraphFromFunction(size_t axesIdx, std::function<float(float)> func, int numPoints = 100) {
+        if (axesIdx >= axesObjects.size()) return SIZE_MAX;
+        const AxesObject& axes = axesObjects[axesIdx];
+
+        std::vector<float> xData, yData;
+        float step = (axes.xMax - axes.xMin) / (numPoints - 1);
+        for (int i = 0; i < numPoints; i++) {
+            float x = axes.xMin + i * step;
+            xData.push_back(x);
+            yData.push_back(func(x));
+        }
+
+        return addGraph(axesIdx, xData, yData);
+    }
+
+    // Add mathematical vector (arrow from origin to endpoint in data coords)
+    size_t addVector(size_t axesIdx, float vx, float vy) {
+        VectorObject vec;
+        vec.axesIndex = axesIdx;
+        vec.vx = vx;
+        vec.vy = vy;
+        vec.scheduledStartTime = currentTimeCursor;
+        vectorObjects.push_back(vec);
+        vectorVertexBufferDirty = true;
+        return vectorObjects.size() - 1;
+    }
+
+    // ========== 3D Element Functions ==========
+
+    // Add 3D axes
+    size_t addAxes3D(float xMin, float xMax, float yMin, float yMax, float zMin, float zMax) {
+        Axes3DObject axes;
+        axes.xMin = xMin;
+        axes.xMax = xMax;
+        axes.yMin = yMin;
+        axes.yMax = yMax;
+        axes.zMin = zMin;
+        axes.zMax = zMax;
+
+        // Calculate reasonable tick spacing
+        float xRange = xMax - xMin;
+        float yRange = yMax - yMin;
+        float zRange = zMax - zMin;
+        axes.xTickSpacing = std::pow(10.0f, std::floor(std::log10(xRange / 5)));
+        axes.yTickSpacing = std::pow(10.0f, std::floor(std::log10(yRange / 5)));
+        axes.zTickSpacing = std::pow(10.0f, std::floor(std::log10(zRange / 5)));
+
+        axes.scheduledStartTime = currentTimeCursor;
+        axes3DObjects.push_back(axes);
+
+        size_t idx = axes3DObjects.size() - 1;
+        generateAxes3DVertices(idx);
+        shape3DVertexBufferDirty = true;
+
+        // Mark current scene as 3D mode
+        if (!scenes.empty()) {
+            scenes[activeSceneIndex].is3DMode = true;
+        }
+
+        return idx;
+    }
+
+    // Generate vertices for 3D axes (as thin cylinders)
+    void generateAxes3DVertices(size_t axesIdx) {
+        Axes3DObject& axes = axes3DObjects[axesIdx];
+        axes.vertexOffset = static_cast<uint32_t>(shape3DVertices.size());
+
+        float axisRadius = 0.02f;  // Thin axis lines
+        int segments = 8;  // Segments for cylinder approximation
+
+        // Generate X axis (red by default)
+        generateCylinderVertices(axes.xMin, 0, 0, axes.xMax, 0, 0, axisRadius, segments,
+                                 1.0f, 0.2f, 0.2f);  // Red
+
+        // Generate Y axis (green by default)
+        generateCylinderVertices(0, axes.yMin, 0, 0, axes.yMax, 0, axisRadius, segments,
+                                 0.2f, 1.0f, 0.2f);  // Green
+
+        // Generate Z axis (blue by default)
+        generateCylinderVertices(0, 0, axes.zMin, 0, 0, axes.zMax, axisRadius, segments,
+                                 0.2f, 0.2f, 1.0f);  // Blue
+
+        // Add arrow heads at positive ends
+        float arrowLength = 0.15f;
+        float arrowRadius = 0.05f;
+
+        // X arrow head
+        generateConeVertices(axes.xMax, 0, 0, axes.xMax + arrowLength, 0, 0, arrowRadius, segments,
+                             1.0f, 0.2f, 0.2f);
+
+        // Y arrow head
+        generateConeVertices(0, axes.yMax, 0, 0, axes.yMax + arrowLength, 0, arrowRadius, segments,
+                             0.2f, 1.0f, 0.2f);
+
+        // Z arrow head
+        generateConeVertices(0, 0, axes.zMax, 0, 0, axes.zMax + arrowLength, arrowRadius, segments,
+                             0.2f, 0.2f, 1.0f);
+
+        axes.vertexCount = static_cast<uint32_t>(shape3DVertices.size()) - axes.vertexOffset;
+    }
+
+    // Helper: Generate cylinder vertices between two 3D points
+    void generateCylinderVertices(float x1, float y1, float z1, float x2, float y2, float z2,
+                                   float radius, int segments, float r, float g, float b) {
+        // Calculate axis direction
+        float dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+        float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (length < 0.0001f) return;
+
+        // Normalize direction
+        float ax = dx / length, ay = dy / length, az = dz / length;
+
+        // Find perpendicular vectors using cross product
+        float px, py, pz;  // First perpendicular
+        if (std::abs(ax) < 0.9f) {
+            // Cross with X axis
+            px = 0; py = -az; pz = ay;
+        } else {
+            // Cross with Y axis
+            px = az; py = 0; pz = -ax;
+        }
+        float plen = std::sqrt(px*px + py*py + pz*pz);
+        px /= plen; py /= plen; pz /= plen;
+
+        // Second perpendicular (cross axis with first perp)
+        float qx = ay * pz - az * py;
+        float qy = az * px - ax * pz;
+        float qz = ax * py - ay * px;
+
+        // Generate vertices around the cylinder
+        for (int i = 0; i < segments; i++) {
+            float angle1 = 2.0f * M_PI * i / segments;
+            float angle2 = 2.0f * M_PI * ((i + 1) % segments) / segments;
+
+            float c1 = std::cos(angle1), s1 = std::sin(angle1);
+            float c2 = std::cos(angle2), s2 = std::sin(angle2);
+
+            // Normals
+            float n1x = px * c1 + qx * s1;
+            float n1y = py * c1 + qy * s1;
+            float n1z = pz * c1 + qz * s1;
+            float n2x = px * c2 + qx * s2;
+            float n2y = py * c2 + qy * s2;
+            float n2z = pz * c2 + qz * s2;
+
+            // Points on circles at start and end
+            float p1sx = x1 + radius * n1x, p1sy = y1 + radius * n1y, p1sz = z1 + radius * n1z;
+            float p1ex = x2 + radius * n1x, p1ey = y2 + radius * n1y, p1ez = z2 + radius * n1z;
+            float p2sx = x1 + radius * n2x, p2sy = y1 + radius * n2y, p2sz = z1 + radius * n2z;
+            float p2ex = x2 + radius * n2x, p2ey = y2 + radius * n2y, p2ez = z2 + radius * n2z;
+
+            // Two triangles for this segment of the cylinder
+            // Triangle 1: p1s, p1e, p2e
+            shape3DVertices.push_back({{p1sx, p1sy, p1sz}, {n1x, n1y, n1z}});
+            shape3DVertices.push_back({{p1ex, p1ey, p1ez}, {n1x, n1y, n1z}});
+            shape3DVertices.push_back({{p2ex, p2ey, p2ez}, {n2x, n2y, n2z}});
+
+            // Triangle 2: p1s, p2e, p2s
+            shape3DVertices.push_back({{p1sx, p1sy, p1sz}, {n1x, n1y, n1z}});
+            shape3DVertices.push_back({{p2ex, p2ey, p2ez}, {n2x, n2y, n2z}});
+            shape3DVertices.push_back({{p2sx, p2sy, p2sz}, {n2x, n2y, n2z}});
+        }
+    }
+
+    // Helper: Generate cone vertices (for arrow heads)
+    void generateConeVertices(float baseX, float baseY, float baseZ,
+                               float tipX, float tipY, float tipZ,
+                               float radius, int segments, float r, float g, float b) {
+        // Calculate axis direction
+        float dx = tipX - baseX, dy = tipY - baseY, dz = tipZ - baseZ;
+        float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (length < 0.0001f) return;
+
+        float ax = dx / length, ay = dy / length, az = dz / length;
+
+        // Find perpendicular vectors
+        float px, py, pz;
+        if (std::abs(ax) < 0.9f) {
+            px = 0; py = -az; pz = ay;
+        } else {
+            px = az; py = 0; pz = -ax;
+        }
+        float plen = std::sqrt(px*px + py*py + pz*pz);
+        px /= plen; py /= plen; pz /= plen;
+
+        float qx = ay * pz - az * py;
+        float qy = az * px - ax * pz;
+        float qz = ax * py - ay * px;
+
+        // Generate cone triangles
+        for (int i = 0; i < segments; i++) {
+            float angle1 = 2.0f * M_PI * i / segments;
+            float angle2 = 2.0f * M_PI * ((i + 1) % segments) / segments;
+
+            float c1 = std::cos(angle1), s1 = std::sin(angle1);
+            float c2 = std::cos(angle2), s2 = std::sin(angle2);
+
+            // Points on base circle
+            float b1x = baseX + radius * (px * c1 + qx * s1);
+            float b1y = baseY + radius * (py * c1 + qy * s1);
+            float b1z = baseZ + radius * (pz * c1 + qz * s1);
+            float b2x = baseX + radius * (px * c2 + qx * s2);
+            float b2y = baseY + radius * (py * c2 + qy * s2);
+            float b2z = baseZ + radius * (pz * c2 + qz * s2);
+
+            // Calculate face normal for cone side
+            float midX = (b1x + b2x) / 2 - baseX;
+            float midY = (b1y + b2y) / 2 - baseY;
+            float midZ = (b1z + b2z) / 2 - baseZ;
+            float toTipX = tipX - baseX, toTipY = tipY - baseY, toTipZ = tipZ - baseZ;
+            // Cross product for normal
+            float nx = midY * toTipZ - midZ * toTipY;
+            float ny = midZ * toTipX - midX * toTipZ;
+            float nz = midX * toTipY - midY * toTipX;
+            float nlen = std::sqrt(nx*nx + ny*ny + nz*nz);
+            if (nlen > 0.0001f) { nx /= nlen; ny /= nlen; nz /= nlen; }
+
+            // Side triangle: tip, b1, b2
+            shape3DVertices.push_back({{tipX, tipY, tipZ}, {nx, ny, nz}});
+            shape3DVertices.push_back({{b1x, b1y, b1z}, {nx, ny, nz}});
+            shape3DVertices.push_back({{b2x, b2y, b2z}, {nx, ny, nz}});
+
+            // Base triangle: base center, b2, b1 (facing opposite direction)
+            float baseNx = -ax, baseNy = -ay, baseNz = -az;
+            shape3DVertices.push_back({{baseX, baseY, baseZ}, {baseNx, baseNy, baseNz}});
+            shape3DVertices.push_back({{b2x, b2y, b2z}, {baseNx, baseNy, baseNz}});
+            shape3DVertices.push_back({{b1x, b1y, b1z}, {baseNx, baseNy, baseNz}});
+        }
+    }
+
+    // Add a surface from height function z = f(x, y)
+    size_t addSurface3D(std::function<float(float, float)> heightFunc,
+                        float xMin, float xMax, float yMin, float yMax) {
+        Surface3DObject surface;
+        surface.heightFunc = heightFunc;
+        surface.hasHeightFunc = true;
+        surface.xMin = xMin;
+        surface.xMax = xMax;
+        surface.yMin = yMin;
+        surface.yMax = yMax;
+        surface.scheduledStartTime = currentTimeCursor;
+        surface3DObjects.push_back(surface);
+
+        size_t idx = surface3DObjects.size() - 1;
+        generateSurfaceVertices(idx);
+        shape3DVertexBufferDirty = true;
+
+        // Mark current scene as 3D mode
+        if (!scenes.empty()) {
+            scenes[activeSceneIndex].is3DMode = true;
+        }
+
+        return idx;
+    }
+
+    // Generate vertices for surface tessellation
+    void generateSurfaceVertices(size_t surfaceIdx) {
+        Surface3DObject& surf = surface3DObjects[surfaceIdx];
+        surf.vertexOffset = static_cast<uint32_t>(shape3DVertices.size());
+
+        int uSegs = surf.uSegments;
+        int vSegs = surf.vSegments;
+
+        if (surf.hasHeightFunc) {
+            // Height function: z = f(x, y)
+            float xStep = (surf.xMax - surf.xMin) / uSegs;
+            float yStep = (surf.yMax - surf.yMin) / vSegs;
+
+            for (int i = 0; i < uSegs; i++) {
+                for (int j = 0; j < vSegs; j++) {
+                    // Get four corners of this cell
+                    float x0 = surf.xMin + i * xStep;
+                    float x1 = surf.xMin + (i + 1) * xStep;
+                    float y0 = surf.yMin + j * yStep;
+                    float y1 = surf.yMin + (j + 1) * yStep;
+
+                    float z00 = surf.heightFunc(x0, y0);
+                    float z10 = surf.heightFunc(x1, y0);
+                    float z01 = surf.heightFunc(x0, y1);
+                    float z11 = surf.heightFunc(x1, y1);
+
+                    // Calculate normals using cross product of edges
+                    // For triangle 1: (x0,y0,z00), (x1,y0,z10), (x0,y1,z01)
+                    float e1x = x1 - x0, e1y = 0, e1z = z10 - z00;
+                    float e2x = 0, e2y = y1 - y0, e2z = z01 - z00;
+                    float n1x = e1y * e2z - e1z * e2y;
+                    float n1y = e1z * e2x - e1x * e2z;
+                    float n1z = e1x * e2y - e1y * e2x;
+                    float n1len = std::sqrt(n1x*n1x + n1y*n1y + n1z*n1z);
+                    if (n1len > 0.0001f) { n1x /= n1len; n1y /= n1len; n1z /= n1len; }
+
+                    // For triangle 2: (x1,y1,z11), (x0,y1,z01), (x1,y0,z10)
+                    float e3x = x0 - x1, e3y = 0, e3z = z01 - z11;
+                    float e4x = 0, e4y = y0 - y1, e4z = z10 - z11;
+                    float n2x = e3y * e4z - e3z * e4y;
+                    float n2y = e3z * e4x - e3x * e4z;
+                    float n2z = e3x * e4y - e3y * e4x;
+                    float n2len = std::sqrt(n2x*n2x + n2y*n2y + n2z*n2z);
+                    if (n2len > 0.0001f) { n2x /= n2len; n2y /= n2len; n2z /= n2len; }
+
+                    // Triangle 1: (0,0), (1,0), (0,1)
+                    shape3DVertices.push_back({{x0, z00, y0}, {n1x, n1y, n1z}});
+                    shape3DVertices.push_back({{x1, z10, y0}, {n1x, n1y, n1z}});
+                    shape3DVertices.push_back({{x0, z01, y1}, {n1x, n1y, n1z}});
+
+                    // Triangle 2: (1,1), (0,1), (1,0)
+                    shape3DVertices.push_back({{x1, z11, y1}, {n2x, n2y, n2z}});
+                    shape3DVertices.push_back({{x0, z01, y1}, {n2x, n2y, n2z}});
+                    shape3DVertices.push_back({{x1, z10, y0}, {n2x, n2y, n2z}});
+                }
+            }
+        } else if (surf.hasParamFunc) {
+            // Parametric function: (x, y, z) = f(u, v)
+            float uStep = (surf.uMax - surf.uMin) / uSegs;
+            float vStep = (surf.vMax - surf.vMin) / vSegs;
+
+            for (int i = 0; i < uSegs; i++) {
+                for (int j = 0; j < vSegs; j++) {
+                    float u0 = surf.uMin + i * uStep;
+                    float u1 = surf.uMin + (i + 1) * uStep;
+                    float v0 = surf.vMin + j * vStep;
+                    float v1 = surf.vMin + (j + 1) * vStep;
+
+                    auto [x00, y00, z00] = surf.paramFunc(u0, v0);
+                    auto [x10, y10, z10] = surf.paramFunc(u1, v0);
+                    auto [x01, y01, z01] = surf.paramFunc(u0, v1);
+                    auto [x11, y11, z11] = surf.paramFunc(u1, v1);
+
+                    // Calculate normals
+                    float e1x = x10 - x00, e1y = y10 - y00, e1z = z10 - z00;
+                    float e2x = x01 - x00, e2y = y01 - y00, e2z = z01 - z00;
+                    float n1x = e1y * e2z - e1z * e2y;
+                    float n1y = e1z * e2x - e1x * e2z;
+                    float n1z = e1x * e2y - e1y * e2x;
+                    float n1len = std::sqrt(n1x*n1x + n1y*n1y + n1z*n1z);
+                    if (n1len > 0.0001f) { n1x /= n1len; n1y /= n1len; n1z /= n1len; }
+
+                    float e3x = x01 - x11, e3y = y01 - y11, e3z = z01 - z11;
+                    float e4x = x10 - x11, e4y = y10 - y11, e4z = z10 - z11;
+                    float n2x = e3y * e4z - e3z * e4y;
+                    float n2y = e3z * e4x - e3x * e4z;
+                    float n2z = e3x * e4y - e3y * e4x;
+                    float n2len = std::sqrt(n2x*n2x + n2y*n2y + n2z*n2z);
+                    if (n2len > 0.0001f) { n2x /= n2len; n2y /= n2len; n2z /= n2len; }
+
+                    // Triangle 1
+                    shape3DVertices.push_back({{x00, y00, z00}, {n1x, n1y, n1z}});
+                    shape3DVertices.push_back({{x10, y10, z10}, {n1x, n1y, n1z}});
+                    shape3DVertices.push_back({{x01, y01, z01}, {n1x, n1y, n1z}});
+
+                    // Triangle 2
+                    shape3DVertices.push_back({{x11, y11, z11}, {n2x, n2y, n2z}});
+                    shape3DVertices.push_back({{x01, y01, z01}, {n2x, n2y, n2z}});
+                    shape3DVertices.push_back({{x10, y10, z10}, {n2x, n2y, n2z}});
+                }
+            }
+        }
+
+        surf.vertexCount = static_cast<uint32_t>(shape3DVertices.size()) - surf.vertexOffset;
+    }
+
+    // Helper: mark 3D vertex buffer as needing rebuild
+    void markShape3DBufferDirty() {
+        shape3DVertexBufferDirty = true;
+    }
+
+    // Add a 3D shape (sphere, cube, cylinder, cone, arrow3D)
+    size_t addShape3D(Shape3DType type, float x, float y, float z) {
+        Shape3DObject shape;
+        shape.type = type;
+        shape.posX = x;
+        shape.posY = y;
+        shape.posZ = z;
+        shape.scheduledStartTime = currentTimeCursor;
+        shape3DObjects.push_back(shape);
+
+        size_t idx = shape3DObjects.size() - 1;
+        generateShape3DVertices(idx);
+        shape3DVertexBufferDirty = true;
+
+        // Mark current scene as 3D mode
+        if (!scenes.empty()) {
+            scenes[activeSceneIndex].is3DMode = true;
+        }
+
+        return idx;
+    }
+
+    // Generate vertices for a 3D shape
+    void generateShape3DVertices(size_t shapeIdx) {
+        Shape3DObject& shape = shape3DObjects[shapeIdx];
+        shape.vertexOffset = static_cast<uint32_t>(shape3DVertices.size());
+
+        switch (shape.type) {
+            case Shape3DType::Sphere:
+                generateSphereVertices(shape);
+                break;
+            case Shape3DType::Cube:
+                generateCubeVertices(shape);
+                break;
+            case Shape3DType::Cylinder:
+                generateCylinderShapeVertices(shape);
+                break;
+            case Shape3DType::Cone:
+                generateConeShapeVertices(shape);
+                break;
+            case Shape3DType::Arrow3D:
+                generateArrow3DVertices(shape);
+                break;
+        }
+
+        shape.vertexCount = static_cast<uint32_t>(shape3DVertices.size()) - shape.vertexOffset;
+    }
+
+    // Generate sphere vertices (UV sphere)
+    void generateSphereVertices(Shape3DObject& shape) {
+        int latSegs = shape.latSegments;
+        int lonSegs = shape.lonSegments;
+        float r = shape.radius;
+
+        for (int i = 0; i < latSegs; i++) {
+            float theta1 = M_PI * i / latSegs;
+            float theta2 = M_PI * (i + 1) / latSegs;
+
+            for (int j = 0; j < lonSegs; j++) {
+                float phi1 = 2.0f * M_PI * j / lonSegs;
+                float phi2 = 2.0f * M_PI * (j + 1) / lonSegs;
+
+                // Four vertices of this quad
+                float x1 = r * std::sin(theta1) * std::cos(phi1);
+                float y1 = r * std::cos(theta1);
+                float z1 = r * std::sin(theta1) * std::sin(phi1);
+
+                float x2 = r * std::sin(theta2) * std::cos(phi1);
+                float y2 = r * std::cos(theta2);
+                float z2 = r * std::sin(theta2) * std::sin(phi1);
+
+                float x3 = r * std::sin(theta2) * std::cos(phi2);
+                float y3 = r * std::cos(theta2);
+                float z3 = r * std::sin(theta2) * std::sin(phi2);
+
+                float x4 = r * std::sin(theta1) * std::cos(phi2);
+                float y4 = r * std::cos(theta1);
+                float z4 = r * std::sin(theta1) * std::sin(phi2);
+
+                // Normals (normalized positions for sphere)
+                float n1x = x1/r, n1y = y1/r, n1z = z1/r;
+                float n2x = x2/r, n2y = y2/r, n2z = z2/r;
+                float n3x = x3/r, n3y = y3/r, n3z = z3/r;
+                float n4x = x4/r, n4y = y4/r, n4z = z4/r;
+
+                // Triangle 1
+                shape3DVertices.push_back({{x1, y1, z1}, {n1x, n1y, n1z}});
+                shape3DVertices.push_back({{x2, y2, z2}, {n2x, n2y, n2z}});
+                shape3DVertices.push_back({{x3, y3, z3}, {n3x, n3y, n3z}});
+
+                // Triangle 2
+                shape3DVertices.push_back({{x1, y1, z1}, {n1x, n1y, n1z}});
+                shape3DVertices.push_back({{x3, y3, z3}, {n3x, n3y, n3z}});
+                shape3DVertices.push_back({{x4, y4, z4}, {n4x, n4y, n4z}});
+            }
+        }
+    }
+
+    // Generate cube vertices
+    void generateCubeVertices(Shape3DObject& shape) {
+        float w = shape.width / 2.0f;
+        float h = shape.height / 2.0f;
+        float d = shape.depth / 2.0f;
+
+        // 6 faces, 2 triangles each, 36 vertices total
+        // Front face (Z+)
+        shape3DVertices.push_back({{-w, -h, d}, {0, 0, 1}});
+        shape3DVertices.push_back({{w, -h, d}, {0, 0, 1}});
+        shape3DVertices.push_back({{w, h, d}, {0, 0, 1}});
+        shape3DVertices.push_back({{-w, -h, d}, {0, 0, 1}});
+        shape3DVertices.push_back({{w, h, d}, {0, 0, 1}});
+        shape3DVertices.push_back({{-w, h, d}, {0, 0, 1}});
+
+        // Back face (Z-)
+        shape3DVertices.push_back({{w, -h, -d}, {0, 0, -1}});
+        shape3DVertices.push_back({{-w, -h, -d}, {0, 0, -1}});
+        shape3DVertices.push_back({{-w, h, -d}, {0, 0, -1}});
+        shape3DVertices.push_back({{w, -h, -d}, {0, 0, -1}});
+        shape3DVertices.push_back({{-w, h, -d}, {0, 0, -1}});
+        shape3DVertices.push_back({{w, h, -d}, {0, 0, -1}});
+
+        // Top face (Y+)
+        shape3DVertices.push_back({{-w, h, d}, {0, 1, 0}});
+        shape3DVertices.push_back({{w, h, d}, {0, 1, 0}});
+        shape3DVertices.push_back({{w, h, -d}, {0, 1, 0}});
+        shape3DVertices.push_back({{-w, h, d}, {0, 1, 0}});
+        shape3DVertices.push_back({{w, h, -d}, {0, 1, 0}});
+        shape3DVertices.push_back({{-w, h, -d}, {0, 1, 0}});
+
+        // Bottom face (Y-)
+        shape3DVertices.push_back({{-w, -h, -d}, {0, -1, 0}});
+        shape3DVertices.push_back({{w, -h, -d}, {0, -1, 0}});
+        shape3DVertices.push_back({{w, -h, d}, {0, -1, 0}});
+        shape3DVertices.push_back({{-w, -h, -d}, {0, -1, 0}});
+        shape3DVertices.push_back({{w, -h, d}, {0, -1, 0}});
+        shape3DVertices.push_back({{-w, -h, d}, {0, -1, 0}});
+
+        // Right face (X+)
+        shape3DVertices.push_back({{w, -h, d}, {1, 0, 0}});
+        shape3DVertices.push_back({{w, -h, -d}, {1, 0, 0}});
+        shape3DVertices.push_back({{w, h, -d}, {1, 0, 0}});
+        shape3DVertices.push_back({{w, -h, d}, {1, 0, 0}});
+        shape3DVertices.push_back({{w, h, -d}, {1, 0, 0}});
+        shape3DVertices.push_back({{w, h, d}, {1, 0, 0}});
+
+        // Left face (X-)
+        shape3DVertices.push_back({{-w, -h, -d}, {-1, 0, 0}});
+        shape3DVertices.push_back({{-w, -h, d}, {-1, 0, 0}});
+        shape3DVertices.push_back({{-w, h, d}, {-1, 0, 0}});
+        shape3DVertices.push_back({{-w, -h, -d}, {-1, 0, 0}});
+        shape3DVertices.push_back({{-w, h, d}, {-1, 0, 0}});
+        shape3DVertices.push_back({{-w, h, -d}, {-1, 0, 0}});
+    }
+
+    // Generate cylinder shape vertices (for Shape3DObject)
+    void generateCylinderShapeVertices(Shape3DObject& shape) {
+        float r = shape.radius;
+        float h = shape.height / 2.0f;
+        int segs = shape.radialSegments;
+
+        for (int i = 0; i < segs; i++) {
+            float angle1 = 2.0f * M_PI * i / segs;
+            float angle2 = 2.0f * M_PI * ((i + 1) % segs) / segs;
+
+            float x1 = r * std::cos(angle1);
+            float z1 = r * std::sin(angle1);
+            float x2 = r * std::cos(angle2);
+            float z2 = r * std::sin(angle2);
+
+            // Side normals
+            float nx1 = std::cos(angle1), nz1 = std::sin(angle1);
+            float nx2 = std::cos(angle2), nz2 = std::sin(angle2);
+
+            // Side quad (2 triangles)
+            shape3DVertices.push_back({{x1, -h, z1}, {nx1, 0, nz1}});
+            shape3DVertices.push_back({{x2, -h, z2}, {nx2, 0, nz2}});
+            shape3DVertices.push_back({{x2, h, z2}, {nx2, 0, nz2}});
+
+            shape3DVertices.push_back({{x1, -h, z1}, {nx1, 0, nz1}});
+            shape3DVertices.push_back({{x2, h, z2}, {nx2, 0, nz2}});
+            shape3DVertices.push_back({{x1, h, z1}, {nx1, 0, nz1}});
+
+            // Top cap
+            shape3DVertices.push_back({{0, h, 0}, {0, 1, 0}});
+            shape3DVertices.push_back({{x1, h, z1}, {0, 1, 0}});
+            shape3DVertices.push_back({{x2, h, z2}, {0, 1, 0}});
+
+            // Bottom cap
+            shape3DVertices.push_back({{0, -h, 0}, {0, -1, 0}});
+            shape3DVertices.push_back({{x2, -h, z2}, {0, -1, 0}});
+            shape3DVertices.push_back({{x1, -h, z1}, {0, -1, 0}});
+        }
+    }
+
+    // Generate cone shape vertices (for Shape3DObject)
+    void generateConeShapeVertices(Shape3DObject& shape) {
+        float r = shape.radius;
+        float h = shape.height / 2.0f;
+        int segs = shape.radialSegments;
+
+        for (int i = 0; i < segs; i++) {
+            float angle1 = 2.0f * M_PI * i / segs;
+            float angle2 = 2.0f * M_PI * ((i + 1) % segs) / segs;
+
+            float x1 = r * std::cos(angle1);
+            float z1 = r * std::sin(angle1);
+            float x2 = r * std::cos(angle2);
+            float z2 = r * std::sin(angle2);
+
+            // Calculate normal for cone side
+            float slopeAngle = std::atan2(r, 2*h);
+            float ny = std::sin(slopeAngle);
+            float nxz = std::cos(slopeAngle);
+            float nx1 = nxz * std::cos(angle1), nz1 = nxz * std::sin(angle1);
+            float nx2 = nxz * std::cos(angle2), nz2 = nxz * std::sin(angle2);
+
+            // Side triangle (tip to base)
+            shape3DVertices.push_back({{0, h, 0}, {0, ny, 0}});
+            shape3DVertices.push_back({{x1, -h, z1}, {nx1, ny, nz1}});
+            shape3DVertices.push_back({{x2, -h, z2}, {nx2, ny, nz2}});
+
+            // Bottom cap
+            shape3DVertices.push_back({{0, -h, 0}, {0, -1, 0}});
+            shape3DVertices.push_back({{x2, -h, z2}, {0, -1, 0}});
+            shape3DVertices.push_back({{x1, -h, z1}, {0, -1, 0}});
+        }
+    }
+
+    // Generate arrow3D vertices (shaft cylinder + head cone)
+    void generateArrow3DVertices(Shape3DObject& shape) {
+        float startX = shape.posX, startY = shape.posY, startZ = shape.posZ;
+        float endX = shape.arrowEndX, endY = shape.arrowEndY, endZ = shape.arrowEndZ;
+
+        // Calculate arrow direction and length
+        float dx = endX - startX, dy = endY - startY, dz = endZ - startZ;
+        float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (length < 0.0001f) return;
+
+        float shaftLength = length - shape.arrowHeadLength;
+        if (shaftLength < 0) shaftLength = length * 0.7f;
+
+        // Shaft end position
+        float t = shaftLength / length;
+        float shaftEndX = startX + dx * t;
+        float shaftEndY = startY + dy * t;
+        float shaftEndZ = startZ + dz * t;
+
+        // Generate shaft (cylinder)
+        generateCylinderVertices(startX, startY, startZ, shaftEndX, shaftEndY, shaftEndZ,
+                                 shape.arrowShaftRadius, 12, shape.colorR, shape.colorG, shape.colorB);
+
+        // Generate head (cone)
+        generateConeVertices(shaftEndX, shaftEndY, shaftEndZ, endX, endY, endZ,
+                             shape.arrowHeadRadius, 12, shape.colorR, shape.colorG, shape.colorB);
+    }
+
+    // Rebuild 3D vertex buffer
+    void rebuild3DVertexBuffer() {
+        if (shape3DVertices.empty()) return;
+
+        // Clean up old buffer
+        if (shape3DVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, shape3DVertexBuffer, nullptr);
+            vkFreeMemory(device, shape3DVertexBufferMemory, nullptr);
+            shape3DVertexBuffer = VK_NULL_HANDLE;
+        }
+
+        VkDeviceSize bufferSize = sizeof(Shape3DVertex) * shape3DVertices.size();
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingBufferMemory);
+
+        // Copy data to staging buffer
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, shape3DVertices.data(), bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device local buffer
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                     shape3DVertexBuffer, shape3DVertexBufferMemory);
+
+        // Copy from staging to device local
+        copyBuffer(stagingBuffer, shape3DVertexBuffer, bufferSize);
+
+        // Cleanup staging
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        shape3DVertexBufferDirty = false;
+    }
+
+    // Ease-out cubic for smooth camera animation
+    float easeOutCubic3D(float t) {
+        return 1.0f - std::pow(1.0f - t, 3.0f);
+    }
+
+    // Update 3D camera UBO with view and projection matrices
+    void updateCamera3DUBO(float currentTime, float elapsedTime) {
+        (void)currentTime;  // Use timeline time for animation progression
+        float sceneTime = elapsedTime;
+
+        Camera3DState& cam = camera3D;
+
+        auto cartesianToSpherical = [](float dx, float dy, float dz, float& outTheta, float& outPhi, float& outDistance) {
+            outDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (outDistance <= 0.000001f) {
+                outTheta = 0.0f;
+                outPhi = 0.0f;
+                return;
+            }
+            float cosPhi = std::clamp(dy / outDistance, -1.0f, 1.0f);
+            outPhi = std::acos(cosPhi);
+            outTheta = std::atan2(dz, dx);
+        };
+
+        // Advance 3D camera timeline: apply due events and step active animation.
+        bool progressed = true;
+        int safetyCounter = 0;
+        while (progressed && safetyCounter++ < 1000) {
+            progressed = false;
+
+            if (!cam.animating) {
+                while (!pendingCamera3DEvents.empty() && sceneTime >= pendingCamera3DEvents.front().startTime) {
+                    Camera3DEvent ev = pendingCamera3DEvents.front();
+                    pendingCamera3DEvents.pop_front();
+
+                    if (ev.duration <= 0.0f) {
+                        // Instant camera change.
+                        cam.animating = false;
+                        cam.orbitAnimating = false;
+                        cam.animStartTime = -1.0f;
+                        cam.animDuration = 0.0f;
+
+                        switch (ev.type) {
+                            case Camera3DEventType::SetPose:
+                                cam.eyeX = ev.eyeX;
+                                cam.eyeY = ev.eyeY;
+                                cam.eyeZ = ev.eyeZ;
+                                cam.targetX = ev.targetX;
+                                cam.targetY = ev.targetY;
+                                cam.targetZ = ev.targetZ;
+                                break;
+                            case Camera3DEventType::SetFov:
+                                cam.fovY = ev.fovY;
+                                break;
+                            case Camera3DEventType::Orbit: {
+                                float x = ev.distance * std::sin(ev.phi) * std::cos(ev.theta);
+                                float y = ev.distance * std::cos(ev.phi);
+                                float z = ev.distance * std::sin(ev.phi) * std::sin(ev.theta);
+                                cam.eyeX = cam.targetX + x;
+                                cam.eyeY = cam.targetY + y;
+                                cam.eyeZ = cam.targetZ + z;
+                                break;
+                            }
+                            case Camera3DEventType::Reset:
+                                cam.eyeX = 0.0f;
+                                cam.eyeY = 2.0f;
+                                cam.eyeZ = 5.0f;
+                                cam.targetX = 0.0f;
+                                cam.targetY = 0.0f;
+                                cam.targetZ = 0.0f;
+                                cam.fovY = 45.0f;
+                                break;
+                        }
+
+                        progressed = true;
+                        continue;
+                    }
+
+                    // Start a timed camera animation from the current state.
+                    cam.startEyeX = cam.eyeX;
+                    cam.startEyeY = cam.eyeY;
+                    cam.startEyeZ = cam.eyeZ;
+                    cam.startTargetX = cam.targetX;
+                    cam.startTargetY = cam.targetY;
+                    cam.startTargetZ = cam.targetZ;
+                    cam.startFovY = cam.fovY;
+
+                    cam.animStartTime = sceneTime;
+                    cam.animDuration = ev.duration;
+                    cam.animating = true;
+                    cam.orbitAnimating = false;
+
+                    switch (ev.type) {
+                        case Camera3DEventType::SetPose:
+                            cam.destEyeX = ev.eyeX;
+                            cam.destEyeY = ev.eyeY;
+                            cam.destEyeZ = ev.eyeZ;
+                            cam.destTargetX = ev.targetX;
+                            cam.destTargetY = ev.targetY;
+                            cam.destTargetZ = ev.targetZ;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        case Camera3DEventType::SetFov:
+                            cam.destEyeX = cam.eyeX;
+                            cam.destEyeY = cam.eyeY;
+                            cam.destEyeZ = cam.eyeZ;
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destFovY = ev.fovY;
+                            break;
+                        case Camera3DEventType::Reset:
+                            cam.destEyeX = 0.0f;
+                            cam.destEyeY = 2.0f;
+                            cam.destEyeZ = 5.0f;
+                            cam.destTargetX = 0.0f;
+                            cam.destTargetY = 0.0f;
+                            cam.destTargetZ = 0.0f;
+                            cam.destFovY = 45.0f;
+                            break;
+                        case Camera3DEventType::Orbit: {
+                            float dx = cam.eyeX - cam.targetX;
+                            float dy = cam.eyeY - cam.targetY;
+                            float dz = cam.eyeZ - cam.targetZ;
+                            cartesianToSpherical(dx, dy, dz, cam.orbitStartTheta, cam.orbitStartPhi, cam.orbitStartDistance);
+
+                            cam.orbitDestTheta = ev.theta;
+                            cam.orbitDestPhi = ev.phi;
+                            cam.orbitDestDistance = ev.distance;
+                            cam.orbitAnimating = true;
+                            break;
+                        }
+                    }
+
+                    break;  // Started an animation; update it below.
+                }
+            }
+
+            if (cam.animating) {
+                break;
+            }
+        }
+
+        // Update animation if active
+        if (cam.animating && cam.animDuration > 0.0f) {
+            float animElapsed = sceneTime - cam.animStartTime;
+            float t = std::min(animElapsed / cam.animDuration, 1.0f);
+            float eased = easeOutCubic3D(t);
+
+            if (cam.orbitAnimating) {
+                float theta = cam.orbitStartTheta + (cam.orbitDestTheta - cam.orbitStartTheta) * eased;
+                float phi = cam.orbitStartPhi + (cam.orbitDestPhi - cam.orbitStartPhi) * eased;
+                float distance = cam.orbitStartDistance + (cam.orbitDestDistance - cam.orbitStartDistance) * eased;
+
+                float x = distance * std::sin(phi) * std::cos(theta);
+                float y = distance * std::cos(phi);
+                float z = distance * std::sin(phi) * std::sin(theta);
+                cam.eyeX = cam.targetX + x;
+                cam.eyeY = cam.targetY + y;
+                cam.eyeZ = cam.targetZ + z;
+            } else {
+                // Interpolate eye position
+                cam.eyeX = cam.startEyeX + (cam.destEyeX - cam.startEyeX) * eased;
+                cam.eyeY = cam.startEyeY + (cam.destEyeY - cam.startEyeY) * eased;
+                cam.eyeZ = cam.startEyeZ + (cam.destEyeZ - cam.startEyeZ) * eased;
+
+                // Interpolate target position
+                cam.targetX = cam.startTargetX + (cam.destTargetX - cam.startTargetX) * eased;
+                cam.targetY = cam.startTargetY + (cam.destTargetY - cam.startTargetY) * eased;
+                cam.targetZ = cam.startTargetZ + (cam.destTargetZ - cam.startTargetZ) * eased;
+
+                // Interpolate FOV
+                cam.fovY = cam.startFovY + (cam.destFovY - cam.startFovY) * eased;
+            }
+
+            // Animation complete
+            if (t >= 1.0f) {
+                cam.animating = false;
+                cam.orbitAnimating = false;
+            }
+        }
+
+        // Build view matrix (LookAt)
+        float viewMatrix[16];
+        buildLookAtMatrix(viewMatrix,
+            cam.eyeX, cam.eyeY, cam.eyeZ,
+            cam.targetX, cam.targetY, cam.targetZ,
+            cam.upX, cam.upY, cam.upZ);
+
+        // Build projection matrix (Perspective)
+        float projMatrix[16];
+        float aspect = static_cast<float>(width) / static_cast<float>(height);
+        buildPerspectiveMatrix(projMatrix, cam.fovY, aspect, cam.nearPlane, cam.farPlane);
+
+        // Combined matrices (view first, then projection)
+        float matrices[32];
+        memcpy(matrices, viewMatrix, 16 * sizeof(float));
+        memcpy(matrices + 16, projMatrix, 16 * sizeof(float));
+
+        // Upload to UBO
+        void* data;
+        vkMapMemory(device, camera3DUBOMemory, 0, sizeof(matrices), 0, &data);
+        memcpy(data, matrices, sizeof(matrices));
+        vkUnmapMemory(device, camera3DUBOMemory);
+    }
+
+    // Reset 3D camera to default state (immediate)
+    void resetCamera3DImmediate() {
+        camera3D = Camera3DState();  // Reset to defaults
+    }
+
+    // Build LookAt view matrix
+    void buildLookAtMatrix(float* m,
+        float eyeX, float eyeY, float eyeZ,
+        float targetX, float targetY, float targetZ,
+        float upX, float upY, float upZ) {
+
+        // Forward vector (from eye to target)
+        float fx = targetX - eyeX, fy = targetY - eyeY, fz = targetZ - eyeZ;
+        float flen = std::sqrt(fx*fx + fy*fy + fz*fz);
+        fx /= flen; fy /= flen; fz /= flen;
+
+        // Right vector (forward cross up)
+        float rx = fy * upZ - fz * upY;
+        float ry = fz * upX - fx * upZ;
+        float rz = fx * upY - fy * upX;
+        float rlen = std::sqrt(rx*rx + ry*ry + rz*rz);
+        rx /= rlen; ry /= rlen; rz /= rlen;
+
+        // Recalculate up vector (right cross forward)
+        float ux = ry * fz - rz * fy;
+        float uy = rz * fx - rx * fz;
+        float uz = rx * fy - ry * fx;
+
+        // Translation
+        float tx = -(rx * eyeX + ry * eyeY + rz * eyeZ);
+        float ty = -(ux * eyeX + uy * eyeY + uz * eyeZ);
+        float tz = -(-fx * eyeX + -fy * eyeY + -fz * eyeZ);
+
+        // Column-major order for Vulkan
+        m[0] = rx;  m[4] = ry;  m[8]  = rz;  m[12] = tx;
+        m[1] = ux;  m[5] = uy;  m[9]  = uz;  m[13] = ty;
+        m[2] = -fx; m[6] = -fy; m[10] = -fz; m[14] = tz;
+        m[3] = 0;   m[7] = 0;   m[11] = 0;   m[15] = 1;
+    }
+
+    // Build Perspective projection matrix
+    void buildPerspectiveMatrix(float* m, float fovY, float aspect, float nearZ, float farZ) {
+        float tanHalfFov = std::tan(fovY * M_PI / 360.0f);
+        memset(m, 0, 16 * sizeof(float));
+        m[0] = 1.0f / (aspect * tanHalfFov);
+        m[5] = -1.0f / tanHalfFov;  // Vulkan Y-flip
+        m[10] = farZ / (nearZ - farZ);
+        m[11] = -1.0f;
+        m[14] = (farZ * nearZ) / (nearZ - farZ);
+    }
+
+    // Update lighting UBO with current lighting state
+    void updateLightingUBO() {
+        float lightingData[68];
+
+        // Ambient
+        lightingData[0] = lighting.ambientR;
+        lightingData[1] = lighting.ambientG;
+        lightingData[2] = lighting.ambientB;
+        lightingData[3] = lighting.ambientIntensity;
+
+        // Directional light direction (normalize it)
+        float dirLen = std::sqrt(lighting.dirLightDirX * lighting.dirLightDirX +
+                                 lighting.dirLightDirY * lighting.dirLightDirY +
+                                 lighting.dirLightDirZ * lighting.dirLightDirZ);
+        if (dirLen > 0.0001f) {
+            lightingData[4] = lighting.dirLightDirX / dirLen;
+            lightingData[5] = lighting.dirLightDirY / dirLen;
+            lightingData[6] = lighting.dirLightDirZ / dirLen;
+        } else {
+            lightingData[4] = 0.577f; lightingData[5] = 0.577f; lightingData[6] = 0.577f;
+        }
+        lightingData[7] = lighting.dirLightEnabled ? 1.0f : 0.0f;
+
+        // Directional light color
+        lightingData[8] = lighting.dirLightR;
+        lightingData[9] = lighting.dirLightG;
+        lightingData[10] = lighting.dirLightB;
+        lightingData[11] = lighting.dirLightIntensity;
+
+        // Point lights
+        for (int i = 0; i < 4; i++) {
+            int baseIdx = 12 + i * 12;
+            const auto& pl = lighting.pointLights[i];
+            lightingData[baseIdx + 0] = pl.posX;
+            lightingData[baseIdx + 1] = pl.posY;
+            lightingData[baseIdx + 2] = pl.posZ;
+            lightingData[baseIdx + 3] = pl.enabled ? 1.0f : 0.0f;
+            lightingData[baseIdx + 4] = pl.colorR;
+            lightingData[baseIdx + 5] = pl.colorG;
+            lightingData[baseIdx + 6] = pl.colorB;
+            lightingData[baseIdx + 7] = pl.intensity;
+            lightingData[baseIdx + 8] = pl.constantAtten;
+            lightingData[baseIdx + 9] = pl.linearAtten;
+            lightingData[baseIdx + 10] = pl.quadraticAtten;
+            lightingData[baseIdx + 11] = 0.0f;  // unused
+        }
+
+        // Camera position (from 3D camera state)
+        lightingData[60] = camera3D.eyeX;
+        lightingData[61] = camera3D.eyeY;
+        lightingData[62] = camera3D.eyeZ;
+        lightingData[63] = 0.0f;
+
+        // Material properties
+        lightingData[64] = lighting.shininess;
+        lightingData[65] = lighting.specularStrength;
+        lightingData[66] = 0.0f;
+        lightingData[67] = 0.0f;
+
+        // Upload to UBO
+        void* data;
+        vkMapMemory(device, lightingUBOMemory, 0, sizeof(lightingData), 0, &data);
+        memcpy(data, lightingData, sizeof(lightingData));
+        vkUnmapMemory(device, lightingUBOMemory);
+    }
+
+	    // Set 3D mode for current scene
+	    void set3DMode(bool enable) {
+	        ModeEvent event;
+	        event.startTime = get3DModeEventStartTime();
+	        event.enabled = enable;
+	        enqueue3DModeEvent(std::move(event));
+	    }
+
+	    template <typename TObject>
+	    void enqueueAnimation(TObject& obj, AnimationQueueEntry entry) {
+	        const size_t insertPos = std::min(obj.currentQueueIndex, obj.animationQueue.size());
+	        auto begin = obj.animationQueue.begin() + static_cast<std::ptrdiff_t>(insertPos);
+	        auto it = std::upper_bound(
+	            begin, obj.animationQueue.end(), entry.startTime,
+	            [](float startTime, const AnimationQueueEntry& e) { return startTime < e.startTime; });
+	        obj.animationQueue.insert(it, std::move(entry));
+	    }
+
+	    template <typename TObject>
+	    AnimationQueueEntry makeQueuedAnimation(TObject& obj, AnimationType type, float duration) {
+	        AnimationQueueEntry entry;
+	        entry.type = type;
+	        entry.duration = duration;
+	        entry.easing = obj.easingFunction;
+	        entry.loopCount = obj.loopCount;
+	        entry.loopPingPong = obj.loopPingPong;
+
+	        float startTime = obj.chainNextAnimation ? obj.chainedStartTime : currentTimeCursor;
+	        entry.startTime = startTime + obj.elementDelay;
+
+	        // Consume one-shot timing modifiers so later scheduling doesn't retroactively affect earlier entries.
+	        obj.chainedStartTime = entry.startTime + duration;
+	        obj.elementDelay = 0.0f;
+	        obj.chainNextAnimation = false;
+
+	        // Consume one-shot loop modifiers (repeat/pingPong apply to the next scheduled animation only).
+	        obj.loopCount = 0;
+	        obj.currentLoopIteration = 0;
+	        obj.loopPingPong = false;
+	        obj.loopReverse = false;
+
+	        return entry;
+	    }
+
+	    void wait(float seconds) {
+	        currentTimeCursor += seconds;
+	    }
+
+	    void clearAll() {
+	        ClearEvent event;
+	        event.time = currentTimeCursor;
+	        event.fadeDuration = clearFadeDuration;
+
+	        // Record how many elements exist now - only these will be cleared by this event.
+	        event.textCount = textObjects.size();
+	        event.mathCount = mathObjects.size();
+	        event.shapeCount = shapeObjects.size();
+	        event.imageCount = imageObjects.size();
+	        event.graphCount = graphObjects.size();
+	        event.vectorCount = vectorObjects.size();
+	        event.axes3DCount = axes3DObjects.size();
+	        event.surface3DCount = surface3DObjects.size();
+	        event.shape3DCount = shape3DObjects.size();
+
+	        pendingClears.push_back(event);
+
+	        // Continue timeline after clear + fade duration so new elements appear after clear.
+	        currentTimeCursor = event.time + event.fadeDuration;
+	    }
+
+	    void triggerClearFadeOut(ClearEvent& event) {
+	        // Trigger FadeOut only on elements that existed when clear() was called
+	        float currentTime = static_cast<float>(glfwGetTime());
+	        for (size_t i = 0; i < event.textCount && i < textObjects.size(); i++) {
+            textObjects[i].animationType = AnimationType::FadeOut;
+            textObjects[i].animationDuration = event.fadeDuration;
+            textObjects[i].animationStartTime = currentTime;
+            textObjects[i].animationDirection = Direction::NONE;
+        }
+        for (size_t i = 0; i < event.mathCount && i < mathObjects.size(); i++) {
+            mathObjects[i].animationType = AnimationType::FadeOut;
+            mathObjects[i].animationDuration = event.fadeDuration;
+            mathObjects[i].animationStartTime = currentTime;
+            mathObjects[i].animationDirection = Direction::NONE;
+        }
+        for (size_t i = 0; i < event.shapeCount && i < shapeObjects.size(); i++) {
+            shapeObjects[i].animationType = AnimationType::FadeOut;
+            shapeObjects[i].animationDuration = event.fadeDuration;
+            shapeObjects[i].animationStartTime = currentTime;
+            shapeObjects[i].animationDirection = Direction::NONE;
+        }
+	        for (size_t i = 0; i < event.imageCount && i < imageObjects.size(); i++) {
+	            imageObjects[i].animationType = AnimationType::FadeOut;
+	            imageObjects[i].animationDuration = event.fadeDuration;
+	            imageObjects[i].animationStartTime = currentTime;
+	            imageObjects[i].animationDirection = Direction::NONE;
+	        }
+	        for (size_t i = 0; i < event.graphCount && i < graphObjects.size(); i++) {
+	            graphObjects[i].animationType = AnimationType::FadeOut;
+	            graphObjects[i].animationDuration = event.fadeDuration;
+	            graphObjects[i].animationStartTime = currentTime;
+	        }
+	        for (size_t i = 0; i < event.vectorCount && i < vectorObjects.size(); i++) {
+	            vectorObjects[i].animationType = AnimationType::FadeOut;
+	            vectorObjects[i].animationDuration = event.fadeDuration;
+	            vectorObjects[i].animationStartTime = currentTime;
+	        }
+	        for (size_t i = 0; i < event.axes3DCount && i < axes3DObjects.size(); i++) {
+	            axes3DObjects[i].animationType = AnimationType::FadeOut;
+	            axes3DObjects[i].animationDuration = event.fadeDuration;
+	            axes3DObjects[i].animationStartTime = currentTime;
+	        }
+	        for (size_t i = 0; i < event.surface3DCount && i < surface3DObjects.size(); i++) {
+	            surface3DObjects[i].animationType = AnimationType::FadeOut;
+	            surface3DObjects[i].animationDuration = event.fadeDuration;
+	            surface3DObjects[i].animationStartTime = currentTime;
+	        }
+	        for (size_t i = 0; i < event.shape3DCount && i < shape3DObjects.size(); i++) {
+	            shape3DObjects[i].animationType = AnimationType::FadeOut;
+	            shape3DObjects[i].animationDuration = event.fadeDuration;
+	            shape3DObjects[i].animationStartTime = currentTime;
+	        }
+	        event.fadeStarted = true;
+	    }
+
+	    void performClear(const ClearEvent& event) {
+	        // Wait for GPU to finish using resources before destroying them
+        vkDeviceWaitIdle(device);
+
+        // Mark pre-clear text elements as cleared
+        for (size_t i = 0; i < event.textCount && i < textObjects.size(); i++) {
+            textObjects[i].cleared = true;
+        }
+
+        // Clean up and mark pre-clear MathObject Vulkan resources
+        for (size_t i = 0; i < event.mathCount && i < mathObjects.size(); i++) {
+            if (mathObjects[i].texture != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, mathObjects[i].textureView, nullptr);
+                vkDestroyImage(device, mathObjects[i].texture, nullptr);
+                vkFreeMemory(device, mathObjects[i].textureMemory, nullptr);
+                mathObjects[i].texture = VK_NULL_HANDLE;
+                mathObjects[i].textureMemory = VK_NULL_HANDLE;
+                mathObjects[i].textureView = VK_NULL_HANDLE;
+            }
+            mathObjects[i].cleared = true;
+        }
+
+        // Mark pre-clear shape elements as cleared
+        for (size_t i = 0; i < event.shapeCount && i < shapeObjects.size(); i++) {
+            shapeObjects[i].cleared = true;
+        }
+
+	        // Clean up and mark pre-clear image Vulkan resources
+	        for (size_t i = 0; i < event.imageCount && i < imageObjects.size(); i++) {
+	            if (imageObjects[i].texture != VK_NULL_HANDLE) {
+	                vkDestroyImageView(device, imageObjects[i].textureView, nullptr);
+	                vkDestroyImage(device, imageObjects[i].texture, nullptr);
+	                vkFreeMemory(device, imageObjects[i].textureMemory, nullptr);
+	                imageObjects[i].texture = VK_NULL_HANDLE;
+	                imageObjects[i].textureMemory = VK_NULL_HANDLE;
+	                imageObjects[i].textureView = VK_NULL_HANDLE;
+	            }
+	            imageObjects[i].cleared = true;
+	        }
+
+	        // Mark pre-clear graph elements as cleared
+	        for (size_t i = 0; i < event.graphCount && i < graphObjects.size(); i++) {
+	            graphObjects[i].cleared = true;
+	        }
+
+	        // Mark pre-clear vector elements as cleared
+	        for (size_t i = 0; i < event.vectorCount && i < vectorObjects.size(); i++) {
+	            vectorObjects[i].cleared = true;
+	        }
+
+	        // Mark pre-clear 3D elements as cleared
+	        for (size_t i = 0; i < event.axes3DCount && i < axes3DObjects.size(); i++) {
+	            axes3DObjects[i].cleared = true;
+	        }
+	        for (size_t i = 0; i < event.surface3DCount && i < surface3DObjects.size(); i++) {
+	            surface3DObjects[i].cleared = true;
+	        }
+	        for (size_t i = 0; i < event.shape3DCount && i < shape3DObjects.size(); i++) {
+	            shape3DObjects[i].cleared = true;
+	        }
+
+	        vertexBufferDirty = true;
+	        mathVertexBufferDirty = true;
+	        shapeVertexBufferDirty = true;
+	        imageVertexBufferDirty = true;
+	        graphVertexBufferDirty = true;
+	        vectorVertexBufferDirty = true;
+	    }
+
+    // Helper functions for Group operations
+    void getElementSize(const ElementRef& ref, float& width, float& height) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                auto& obj = textObjects[ref.index];
+                width = obj.totalWidth;
+                height = obj.totalHeight;
+                break;
+            }
+            case ElementType::Math: {
+                auto& obj = mathObjects[ref.index];
+                width = static_cast<float>(obj.textureWidth);
+                height = static_cast<float>(obj.textureHeight);
+                break;
+            }
+            case ElementType::Shape: {
+                auto& obj = shapeObjects[ref.index];
+                switch (obj.type) {
+                    case ShapeType::Circle:
+                    case ShapeType::Dot:
+                        width = height = obj.radius * 2.0f;
+                        break;
+                    case ShapeType::Ellipse:
+                        width = obj.radiusX * 2.0f;
+                        height = obj.radiusY * 2.0f;
+                        break;
+                    case ShapeType::Rectangle:
+                    case ShapeType::RoundedRectangle:
+                        width = obj.width;
+                        height = obj.height;
+                        break;
+                    case ShapeType::Triangle:
+                    case ShapeType::RegularPolygon:
+                    case ShapeType::Star:
+                        width = height = obj.size;
+                        break;
+                    case ShapeType::Line:
+                    case ShapeType::Arrow:
+                    case ShapeType::DoubleArrow:
+                        width = std::abs(obj.x2 - obj.x1);
+                        height = std::abs(obj.y2 - obj.y1);
+                        if (width < 10.0f) width = 10.0f;  // Minimum for thin lines
+                        if (height < 10.0f) height = 10.0f;
+                        break;
+                    case ShapeType::Arc:
+                        width = height = obj.radius * 2.0f;
+                        break;
+                    case ShapeType::Brace:
+                        width = obj.braceWidth;
+                        height = obj.braceHeight;
+                        break;
+                    default:
+                        width = height = 100.0f;
+                        break;
+                }
+                break;
+            }
+            case ElementType::Image: {
+                auto& obj = imageObjects[ref.index];
+                width = obj.displayWidth;
+                height = obj.displayHeight;
+                break;
+            }
+            case ElementType::Graph: {
+                // Graphs don't have individual size - use default
+                width = height = 100.0f;
+                break;
+            }
+            case ElementType::Group: {
+                auto& grp = groupObjects[ref.index];
+                calculateGroupBounds(grp);
+                width = grp.boundsMaxX - grp.boundsMinX;
+                height = grp.boundsMaxY - grp.boundsMinY;
+                break;
+            }
+            default:
+                width = height = 100.0f;
+                break;
+        }
+    }
+
+    void getElementPosition(const ElementRef& ref, float& x, float& y) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                auto& obj = textObjects[ref.index];
+                x = obj.posX;
+                y = obj.posY;
+                break;
+            }
+            case ElementType::Math: {
+                auto& obj = mathObjects[ref.index];
+                x = obj.posX;
+                y = obj.posY;
+                break;
+            }
+            case ElementType::Shape: {
+                auto& obj = shapeObjects[ref.index];
+                x = obj.posX;
+                y = obj.posY;
+                break;
+            }
+            case ElementType::Image: {
+                auto& obj = imageObjects[ref.index];
+                x = obj.posX;
+                y = obj.posY;
+                break;
+            }
+            case ElementType::Graph: {
+                // Graphs are positioned via their axes - use center of window as fallback
+                x = static_cast<float>(width) / 2.0f;
+                y = static_cast<float>(height) / 2.0f;
+                break;
+            }
+            case ElementType::Group: {
+                auto& grp = groupObjects[ref.index];
+                calculateGroupBounds(grp);
+                x = (grp.boundsMinX + grp.boundsMaxX) / 2.0f;
+                y = (grp.boundsMinY + grp.boundsMaxY) / 2.0f;
+                break;
+            }
+            default:
+                x = y = 0.0f;
+                break;
+        }
+    }
+
+    void setElementPosition(const ElementRef& ref, float x, float y) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                auto& obj = textObjects[ref.index];
+                obj.posX = x;
+                obj.posY = y;
+                obj.usePixelPosition = true;
+                vertexBufferDirty = true;
+                break;
+            }
+            case ElementType::Math: {
+                auto& obj = mathObjects[ref.index];
+                obj.posX = x;
+                obj.posY = y;
+                obj.usePixelPosition = true;
+                mathVertexBufferDirty = true;
+                break;
+            }
+            case ElementType::Shape: {
+                auto& obj = shapeObjects[ref.index];
+                obj.posX = x;
+                obj.posY = y;
+                obj.usePixelPosition = true;
+                shapeVertexBufferDirty = true;
+                break;
+            }
+            case ElementType::Image: {
+                auto& obj = imageObjects[ref.index];
+                obj.posX = x;
+                obj.posY = y;
+                obj.usePixelPosition = true;
+                imageVertexBufferDirty = true;
+                break;
+            }
+            case ElementType::Graph: {
+                // Graphs can't be repositioned directly - skip
+                break;
+            }
+            case ElementType::Group: {
+                auto& grp = groupObjects[ref.index];
+                calculateGroupBounds(grp);
+                float currentX = (grp.boundsMinX + grp.boundsMaxX) / 2.0f;
+                float currentY = (grp.boundsMinY + grp.boundsMaxY) / 2.0f;
+                float dx = x - currentX;
+                float dy = y - currentY;
+                for (auto& member : grp.members) {
+                    float mx, my;
+                    getElementPosition(member, mx, my);
+                    setElementPosition(member, mx + dx, my + dy);
+                }
+                grp.boundsDirty = true;
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    void calculateGroupBounds(GroupObject& group) {
+        if (!group.boundsDirty) return;
+
+        if (group.members.empty()) {
+            group.boundsMinX = group.boundsMinY = 0.0f;
+            group.boundsMaxX = group.boundsMaxY = 0.0f;
+            group.boundsDirty = false;
+            return;
+        }
+
+        group.boundsMinX = group.boundsMinY = std::numeric_limits<float>::max();
+        group.boundsMaxX = group.boundsMaxY = std::numeric_limits<float>::lowest();
+
+        for (const auto& ref : group.members) {
+            float x, y, w, h;
+            getElementPosition(ref, x, y);
+            getElementSize(ref, w, h);
+
+            float left = x - w / 2.0f;
+            float right = x + w / 2.0f;
+            float top = y - h / 2.0f;
+            float bottom = y + h / 2.0f;
+
+            group.boundsMinX = std::min(group.boundsMinX, left);
+            group.boundsMaxX = std::max(group.boundsMaxX, right);
+            group.boundsMinY = std::min(group.boundsMinY, top);
+            group.boundsMaxY = std::max(group.boundsMaxY, bottom);
+        }
+
+        group.boundsDirty = false;
+    }
+
+    void run() {
+        basePath = getResourceBasePath();  // Get path to resources (with fallback)
+        std::cout << "Using resource basePath: " << basePath << std::endl;
+        initWindow();
+        initVulkan();
+        mainLoop();
+        cleanup();
+    }
+
+    // Friend declarations for element classes to access charData
+    friend class TextElement;
+    friend class MathElement;
+
+private:
+    std::string basePath;  // Directory where executable is located
+    GLFWwindow* window = nullptr;
+    VkInstance instance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue graphicsQueue = VK_NULL_HANDLE;
+    VkQueue presentQueue = VK_NULL_HANDLE;
+    VkQueue transferQueue = VK_NULL_HANDLE;   // Dedicated transfer queue
+    VkQueue computeQueue = VK_NULL_HANDLE;    // Async compute queue
+
+    // Multi-GPU support
+    std::vector<GPUDeviceInfo> availableGPUs;
+    GPUDeviceInfo primaryGPU;
+    GPUMetrics gpuMetrics;
+
+    // Transfer command pool (separate from graphics)
+    VkCommandPool transferCommandPool = VK_NULL_HANDLE;
+
+    // Timestamp query pool for GPU timing
+    VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
+    float timestampPeriod = 0.0f;  // nanoseconds per timestamp tick
+
+    // Hybrid execution context
+    struct HybridContext {
+        bool useCPUFallback = false;
+        bool useSecondaryGPU = false;
+        float loadThreshold = 0.8f;  // 80% load triggers fallback
+        uint32_t consecutiveOverloads = 0;
+        uint32_t fallbackActivations = 0;
+
+        static constexpr uint32_t OVERLOAD_FRAMES_THRESHOLD = 10;  // Need 10 consecutive overloaded frames
+    } hybridContext;
+
+    VkSwapchainKHR swapChain = VK_NULL_HANDLE;
+    std::vector<VkImage> swapChainImages;
+    VkFormat swapChainImageFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D swapChainExtent = {0, 0};
+    std::vector<VkImageView> swapChainImageViews;
+    std::vector<VkFramebuffer> swapChainFramebuffers;
+
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+
+    // Shape pipeline (no texture, solid color only)
+    VkPipelineLayout shapePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline shapeGraphicsPipeline = VK_NULL_HANDLE;
+
+    // Morph pipeline (vertex interpolation between shapes)
+    VkPipelineLayout morphPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline morphGraphicsPipeline = VK_NULL_HANDLE;
+
+    // 3D rendering resources
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
+    VkImageView depthImageView = VK_NULL_HANDLE;
+    VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+    VkRenderPass renderPass3D = VK_NULL_HANDLE;
+    VkRenderPass renderPassOverlay = VK_NULL_HANDLE;  // 2D overlay on 3D (loads previous content)
+    std::vector<VkFramebuffer> swapChainFramebuffers3D;
+    bool is3DModeEnabled = false;
+
+    // 3D pipeline
+    VkPipelineLayout shape3DPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline shape3DGraphicsPipeline = VK_NULL_HANDLE;
+    VkPipeline shape3DGraphicsPipelineNoDepthWrite = VK_NULL_HANDLE;
+
+    // 3D vertex buffer
+    VkBuffer shape3DVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory shape3DVertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t shape3DVertexCount = 0;
+    bool shape3DVertexBufferDirty = false;
+    std::vector<Shape3DVertex> shape3DVertices;  // CPU-side vertex data for 3D geometry
+
+    // 3D Camera UBO (view + projection matrices = 128 bytes)
+    VkBuffer camera3DUBO = VK_NULL_HANDLE;
+    VkDeviceMemory camera3DUBOMemory = VK_NULL_HANDLE;
+    VkDescriptorSetLayout camera3DDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet camera3DDescriptorSet = VK_NULL_HANDLE;
+
+    // Lighting UBO (ambient + directional + 4 point lights + camera pos + material = 256 bytes)
+    VkBuffer lightingUBO = VK_NULL_HANDLE;
+    VkDeviceMemory lightingUBOMemory = VK_NULL_HANDLE;
+    VkDescriptorSetLayout lightingDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet lightingDescriptorSet = VK_NULL_HANDLE;
+    LightingState lighting;
+
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
+    uint32_t vertexCount = 0;
+
+    // Font texture
+    VkImage fontImage = VK_NULL_HANDLE;
+    VkDeviceMemory fontImageMemory = VK_NULL_HANDLE;
+    VkImageView fontImageView = VK_NULL_HANDLE;
+    VkSampler fontSampler = VK_NULL_HANDLE;
+
+    // Math (LaTeX) rendering - shared sampler for all math textures
+    VkSampler mathSampler = VK_NULL_HANDLE;
+    bool microTexInitialized = false;
+
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+    // Font data
+    stbtt_bakedchar charData[96];
+    int fontTextureWidth = 1024;
+    int fontTextureHeight = 1024;
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> commandBuffers;
+
+    std::vector<VkSemaphore> imageAvailableSemaphores;
+    std::vector<VkSemaphore> renderFinishedSemaphores;
+    std::vector<VkFence> inFlightFences;
+    uint32_t currentFrame = 0;
+
+    void initWindow() {
+        glfwInit();
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        window = glfwCreateWindow(width, height, "Catalyst - Vulkan", nullptr, nullptr);
+    }
+
+    void initVulkan() {
+        createInstance();
+        setupDebugMessenger();
+        createSurface();
+        pickPhysicalDevice();
+        createLogicalDevice();
+        createSwapChain();
+        createImageViews();
+        createRenderPass();
+        createDescriptorSetLayout();
+        createGraphicsPipeline();
+        createShapeGraphicsPipeline();
+        createFramebuffers();
+        // 3D rendering setup
+        createDepthResources();
+        createRenderPass3D();
+        createRenderPassOverlay();  // 2D overlay on 3D
+        createFramebuffers3D();
+        createShape3DGraphicsPipeline();
+        createCommandPool();
+        createFontTexture();
+        initMicroTeX();
+        createMathSampler();
+        createDescriptorPool();
+        createDescriptorSets();
+        rebuildVertexBuffer();  // Build initial vertex buffer from texts
+        createCommandBuffers();
+        createSyncObjects();
+        createTimestampQueryPool();
+    }
+
+    void mainLoop() {
+        std::cout << ">>> mainLoop() starting with " << textObjects.size() << " texts" << std::endl;
+        sceneStartTime = glfwGetTime();  // Initialize scene timeline
+        while (!glfwWindowShouldClose(window)) {
+            glfwPollEvents();
+            drawFrame();
+        }
+
+        vkDeviceWaitIdle(device);
+    }
+
+    void cleanup() {
+        // Print final GPU metrics and hybrid execution stats
+        if (gpuMetrics.frameCount > 0) {
+            std::cout << "\n=== GPU Performance Summary ===\n";
+            std::cout << "Total frames: " << gpuMetrics.frameCount << "\n";
+            std::cout << "Average GPU time: " << gpuMetrics.avgFrameTimeMs << " ms\n";
+            std::cout << "Peak GPU time: " << gpuMetrics.gpuFrameTimeMs << " ms\n";
+            std::cout << "Fallback activations: " << hybridContext.fallbackActivations << "\n";
+            std::cout << "Available GPUs: " << availableGPUs.size() << "\n";
+            std::cout << "================================\n";
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
+
+        if (timestampQueryPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device, timestampQueryPool, nullptr);
+        }
+
+        vkDestroyCommandPool(device, commandPool, nullptr);
+        if (transferCommandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device, transferCommandPool, nullptr);
+        }
+
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
+
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+
+        vkDestroySampler(device, fontSampler, nullptr);
+        vkDestroyImageView(device, fontImageView, nullptr);
+        vkDestroyImage(device, fontImage, nullptr);
+        vkFreeMemory(device, fontImageMemory, nullptr);
+
+        // Cleanup math textures
+        for (auto& mathObj : mathObjects) {
+            if (mathObj.textureView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, mathObj.textureView, nullptr);
+            }
+            if (mathObj.texture != VK_NULL_HANDLE) {
+                vkDestroyImage(device, mathObj.texture, nullptr);
+            }
+            if (mathObj.textureMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, mathObj.textureMemory, nullptr);
+            }
+        }
+        if (mathSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, mathSampler, nullptr);
+        }
+        if (mathVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, mathVertexBuffer, nullptr);
+            vkFreeMemory(device, mathVertexBufferMemory, nullptr);
+        }
+
+        // Cleanup image textures
+        for (auto& imgObj : imageObjects) {
+            if (imgObj.textureView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, imgObj.textureView, nullptr);
+            }
+            if (imgObj.texture != VK_NULL_HANDLE) {
+                vkDestroyImage(device, imgObj.texture, nullptr);
+            }
+            if (imgObj.textureMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, imgObj.textureMemory, nullptr);
+            }
+        }
+        if (imageVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, imageVertexBuffer, nullptr);
+            vkFreeMemory(device, imageVertexBufferMemory, nullptr);
+        }
+
+        // Release MicroTeX
+        if (microTexInitialized) {
+            tex::LaTeX::release();
+        }
+
+        for (auto framebuffer : swapChainFramebuffers) {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
+        // Cleanup shape pipeline
+        vkDestroyPipeline(device, shapeGraphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(device, shapePipelineLayout, nullptr);
+
+        // Cleanup morph pipeline
+        if (morphGraphicsPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, morphGraphicsPipeline, nullptr);
+        }
+        if (morphPipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, morphPipelineLayout, nullptr);
+        }
+
+        // Cleanup morph vertex buffers from shape objects
+        for (auto& shapeObj : shapeObjects) {
+            if (shapeObj.morphState.morphVertexBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, shapeObj.morphState.morphVertexBuffer, nullptr);
+                vkFreeMemory(device, shapeObj.morphState.morphVertexMemory, nullptr);
+            }
+        }
+        // Cleanup morph vertex buffers from text objects
+        for (auto& textObj : textObjects) {
+            if (textObj.morphState.morphVertexBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, textObj.morphState.morphVertexBuffer, nullptr);
+                vkFreeMemory(device, textObj.morphState.morphVertexMemory, nullptr);
+            }
+        }
+
+        // Cleanup shape vertex buffer
+        if (shapeVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, shapeVertexBuffer, nullptr);
+            vkFreeMemory(device, shapeVertexBufferMemory, nullptr);
+        }
+
+        // Cleanup graph vertex buffer
+        if (graphVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, graphVertexBuffer, nullptr);
+            vkFreeMemory(device, graphVertexBufferMemory, nullptr);
+        }
+
+        // Cleanup camera UBO
+        if (cameraUBO != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, cameraUBO, nullptr);
+            vkFreeMemory(device, cameraUBOMemory, nullptr);
+        }
+        if (cameraDescriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, cameraDescriptorSetLayout, nullptr);
+        }
+
+        // Cleanup 3D resources
+        for (auto framebuffer : swapChainFramebuffers3D) {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+        if (renderPass3D != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device, renderPass3D, nullptr);
+        }
+        if (renderPassOverlay != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device, renderPassOverlay, nullptr);
+        }
+        cleanupDepthResources();
+
+        // Cleanup 3D pipeline
+        if (shape3DGraphicsPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, shape3DGraphicsPipeline, nullptr);
+        }
+        if (shape3DGraphicsPipelineNoDepthWrite != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, shape3DGraphicsPipelineNoDepthWrite, nullptr);
+        }
+        if (shape3DPipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, shape3DPipelineLayout, nullptr);
+        }
+
+        // Cleanup 3D vertex buffer
+        if (shape3DVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, shape3DVertexBuffer, nullptr);
+            vkFreeMemory(device, shape3DVertexBufferMemory, nullptr);
+        }
+
+        // Cleanup 3D camera UBO
+        if (camera3DUBO != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, camera3DUBO, nullptr);
+            vkFreeMemory(device, camera3DUBOMemory, nullptr);
+        }
+        if (camera3DDescriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, camera3DDescriptorSetLayout, nullptr);
+        }
+
+        // Cleanup lighting UBO
+        if (lightingUBO != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, lightingUBO, nullptr);
+            vkFreeMemory(device, lightingUBOMemory, nullptr);
+        }
+        if (lightingDescriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, lightingDescriptorSetLayout, nullptr);
+        }
+
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+        vkDestroyRenderPass(device, renderPass, nullptr);
+
+        for (auto imageView : swapChainImageViews) {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+        vkDestroyDevice(device, nullptr);
+
+        if (enableValidationLayers) {
+            auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+                instance, "vkDestroyDebugUtilsMessengerEXT");
+            if (func != nullptr) {
+                func(instance, debugMessenger, nullptr);
+            }
+        }
+
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        glfwDestroyWindow(window);
+        glfwTerminate();
+    }
+
+    void createInstance() {
+        if (enableValidationLayers && !checkValidationLayerSupport()) {
+            throw std::runtime_error("Validation layers requested, but not available!");
+        }
+
+        VkApplicationInfo appInfo{};
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        appInfo.pApplicationName = "Catalyst";
+        appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.pEngineName = "No Engine";
+        appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.apiVersion = VK_API_VERSION_1_3;
+
+        VkInstanceCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        createInfo.pApplicationInfo = &appInfo;
+
+        auto extensions = getRequiredExtensions();
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        createInfo.ppEnabledExtensionNames = extensions.data();
+
+        VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
+        if (enableValidationLayers) {
+            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.ppEnabledLayerNames = validationLayers.data();
+
+            populateDebugMessengerCreateInfo(debugCreateInfo);
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        } else {
+            createInfo.enabledLayerCount = 0;
+            createInfo.pNext = nullptr;
+        }
+
+        if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create Vulkan instance!");
+        }
+
+        std::cout << "Vulkan instance created successfully!\n";
+    }
+
+    void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
+        createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        createInfo.pfnUserCallback = debugCallback;
+    }
+
+    void setupDebugMessenger() {
+        if (!enableValidationLayers) return;
+
+        VkDebugUtilsMessengerCreateInfoEXT createInfo;
+        populateDebugMessengerCreateInfo(createInfo);
+
+        auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            instance, "vkCreateDebugUtilsMessengerEXT");
+        if (func == nullptr || func(instance, &createInfo, nullptr, &debugMessenger) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to set up debug messenger!");
+        }
+    }
+
+    void createSurface() {
+        if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create window surface!");
+        }
+    }
+
+    // Rate a GPU device - higher score = better
+    int rateDeviceSuitability(VkPhysicalDevice device) {
+        VkPhysicalDeviceProperties deviceProperties;
+        VkPhysicalDeviceFeatures deviceFeatures;
+        vkGetPhysicalDeviceProperties(device, &deviceProperties);
+        vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+        int score = 0;
+
+        // Strongly prefer discrete GPUs
+        if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            score += 10000;
+        } else if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+            score += 1000;  // Integrated GPU is fallback
+        } else if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU) {
+            score += 500;
+        }
+
+        // Maximum possible size of textures affects graphics quality
+        score += deviceProperties.limits.maxImageDimension2D;
+
+        // Prefer GPUs with more VRAM (approximate via max uniform buffer size)
+        score += deviceProperties.limits.maxUniformBufferRange / 10000;
+
+        // Prefer GPUs with more queues for parallelism
+        QueueFamilyIndices indices = findQueueFamilies(device);
+        if (indices.hasTransfer()) score += 500;
+        if (indices.hasCompute()) score += 500;
+
+        // Check device is suitable at all
+        if (!isDeviceSuitable(device)) {
+            return 0;  // Not usable
+        }
+
+        return score;
+    }
+
+    void pickPhysicalDevice() {
+        uint32_t deviceCount = 0;
+        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+
+        if (deviceCount == 0) {
+            throw std::runtime_error("Failed to find GPUs with Vulkan support!");
+        }
+
+        std::vector<VkPhysicalDevice> devices(deviceCount);
+        vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+        // Enumerate and score all GPUs
+        std::cout << "Found " << deviceCount << " GPU(s):\n";
+
+        for (const auto& dev : devices) {
+            GPUDeviceInfo gpuInfo;
+            gpuInfo.device = dev;
+            vkGetPhysicalDeviceProperties(dev, &gpuInfo.properties);
+            vkGetPhysicalDeviceMemoryProperties(dev, &gpuInfo.memoryProperties);
+            vkGetPhysicalDeviceFeatures(dev, &gpuInfo.features);
+            gpuInfo.queueFamilies = findQueueFamilies(dev);
+            gpuInfo.score = rateDeviceSuitability(dev);
+
+            const char* typeStr = "Unknown";
+            switch (gpuInfo.properties.deviceType) {
+                case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: typeStr = "Discrete"; break;
+                case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: typeStr = "Integrated"; break;
+                case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: typeStr = "Virtual"; break;
+                case VK_PHYSICAL_DEVICE_TYPE_CPU: typeStr = "CPU"; break;
+                default: break;
+            }
+
+            std::cout << "  - " << gpuInfo.properties.deviceName
+                      << " (" << typeStr << ") Score: " << gpuInfo.score << "\n";
+
+            if (gpuInfo.score > 0) {
+                availableGPUs.push_back(gpuInfo);
+            }
+        }
+
+        if (availableGPUs.empty()) {
+            throw std::runtime_error("Failed to find a suitable GPU!");
+        }
+
+        // Sort by score (highest first)
+        std::sort(availableGPUs.begin(), availableGPUs.end(),
+            [](const GPUDeviceInfo& a, const GPUDeviceInfo& b) {
+                return a.score > b.score;
+            });
+
+        // Select the best GPU as primary
+        primaryGPU = availableGPUs[0];
+        primaryGPU.isPrimary = true;
+        physicalDevice = primaryGPU.device;
+
+        // Store timestamp period for GPU timing
+        timestampPeriod = primaryGPU.properties.limits.timestampPeriod;
+
+        std::cout << "Selected GPU: " << primaryGPU.properties.deviceName
+                  << " (Score: " << primaryGPU.score << ")\n";
+
+        if (availableGPUs.size() > 1) {
+            std::cout << "Fallback GPU available: " << availableGPUs[1].properties.deviceName << "\n";
+        }
+    }
+
+    void createLogicalDevice() {
+        QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+        std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+        std::set<uint32_t> uniqueQueueFamilies = {
+            indices.graphicsFamily.value(),
+            indices.presentFamily.value()
+        };
+
+        // Add transfer queue if different from graphics
+        if (indices.transferFamily.has_value()) {
+            uniqueQueueFamilies.insert(indices.transferFamily.value());
+        }
+
+        // Add compute queue if different from graphics
+        if (indices.computeFamily.has_value()) {
+            uniqueQueueFamilies.insert(indices.computeFamily.value());
+        }
+
+        // Queue priorities: graphics highest, then compute, then transfer
+        float graphicsPriority = 1.0f;
+        float computePriority = 0.8f;
+        float transferPriority = 0.5f;
+
+        for (uint32_t queueFamily : uniqueQueueFamilies) {
+            VkDeviceQueueCreateInfo queueCreateInfo{};
+            queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            queueCreateInfo.queueFamilyIndex = queueFamily;
+            queueCreateInfo.queueCount = 1;
+
+            // Set priority based on queue type
+            if (queueFamily == indices.graphicsFamily.value()) {
+                queueCreateInfo.pQueuePriorities = &graphicsPriority;
+            } else if (indices.computeFamily.has_value() && queueFamily == indices.computeFamily.value()) {
+                queueCreateInfo.pQueuePriorities = &computePriority;
+            } else {
+                queueCreateInfo.pQueuePriorities = &transferPriority;
+            }
+
+            queueCreateInfos.push_back(queueCreateInfo);
+        }
+
+        VkPhysicalDeviceFeatures deviceFeatures{};
+
+        VkDeviceCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+        createInfo.pQueueCreateInfos = queueCreateInfos.data();
+        createInfo.pEnabledFeatures = &deviceFeatures;
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+        if (enableValidationLayers) {
+            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.ppEnabledLayerNames = validationLayers.data();
+        } else {
+            createInfo.enabledLayerCount = 0;
+        }
+
+        if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create logical device!");
+        }
+
+        // Get all queues
+        vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+        vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+
+        // Get transfer queue (may be same as graphics)
+        if (indices.transferFamily.has_value()) {
+            vkGetDeviceQueue(device, indices.transferFamily.value(), 0, &transferQueue);
+        } else {
+            transferQueue = graphicsQueue;  // Fallback
+        }
+
+        // Get compute queue (may be same as graphics)
+        if (indices.computeFamily.has_value()) {
+            vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
+        } else {
+            computeQueue = graphicsQueue;  // Fallback
+        }
+
+        std::cout << "Logical device created with queues:\n";
+        std::cout << "  - Graphics queue: family " << indices.graphicsFamily.value() << "\n";
+        std::cout << "  - Transfer queue: family " << indices.transferFamily.value()
+                  << (indices.transferFamily == indices.graphicsFamily ? " (shared)" : " (dedicated)") << "\n";
+        std::cout << "  - Compute queue: family " << indices.computeFamily.value()
+                  << (indices.computeFamily == indices.graphicsFamily ? " (shared)" : " (dedicated)") << "\n";
+    }
+
+    void createSwapChain() {
+        SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
+
+        VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+        VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+        VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+        uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
+            imageCount = swapChainSupport.capabilities.maxImageCount;
+        }
+
+        VkSwapchainCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        createInfo.surface = surface;
+        createInfo.minImageCount = imageCount;
+        createInfo.imageFormat = surfaceFormat.format;
+        createInfo.imageColorSpace = surfaceFormat.colorSpace;
+        createInfo.imageExtent = extent;
+        createInfo.imageArrayLayers = 1;
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+
+        if (indices.graphicsFamily != indices.presentFamily) {
+            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = 2;
+            createInfo.pQueueFamilyIndices = queueFamilyIndices;
+        } else {
+            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
+
+        createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
+        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        createInfo.presentMode = presentMode;
+        createInfo.clipped = VK_TRUE;
+        createInfo.oldSwapchain = VK_NULL_HANDLE;
+
+        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create swap chain!");
+        }
+
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
+        swapChainImages.resize(imageCount);
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
+
+        swapChainImageFormat = surfaceFormat.format;
+        swapChainExtent = extent;
+
+        std::cout << "Swap chain created successfully!\n";
+    }
+
+    void createImageViews() {
+        swapChainImageViews.resize(swapChainImages.size());
+
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+            VkImageViewCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            createInfo.image = swapChainImages[i];
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            createInfo.format = swapChainImageFormat;
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            createInfo.subresourceRange.baseMipLevel = 0;
+            createInfo.subresourceRange.levelCount = 1;
+            createInfo.subresourceRange.baseArrayLayer = 0;
+            createInfo.subresourceRange.layerCount = 1;
+
+            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image views!");
+            }
+        }
+    }
+
+    void createRenderPass() {
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = swapChainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorAttachmentRef{};
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create render pass!");
+        }
+    }
+
+    // Create 2D overlay render pass (loads 3D content instead of clearing)
+    void createRenderPassOverlay() {
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = swapChainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // Load previous 3D content
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;  // From 3D pass
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorAttachmentRef{};
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPassOverlay) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create overlay render pass!");
+        }
+    }
+
+    // Find a suitable depth format
+    VkFormat findDepthFormat() {
+        std::vector<VkFormat> candidates = {
+            VK_FORMAT_D32_SFLOAT,
+            VK_FORMAT_D32_SFLOAT_S8_UINT,
+            VK_FORMAT_D24_UNORM_S8_UINT
+        };
+
+        for (VkFormat format : candidates) {
+            VkFormatProperties props;
+            vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+            if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+                return format;
+            }
+        }
+        throw std::runtime_error("Failed to find supported depth format!");
+    }
+
+    // Create depth buffer resources
+    void createDepthResources() {
+        depthFormat = findDepthFormat();
+
+        // Create depth image
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = swapChainExtent.width;
+        imageInfo.extent.height = swapChainExtent.height;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = depthFormat;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateImage(device, &imageInfo, nullptr, &depthImage) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create depth image!");
+        }
+
+        // Allocate memory
+        VkMemoryRequirements memRequirements;
+        vkGetImageMemoryRequirements(device, depthImage, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate depth image memory!");
+        }
+
+        vkBindImageMemory(device, depthImage, depthImageMemory, 0);
+
+        // Create image view
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = depthImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = depthFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &depthImageView) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create depth image view!");
+        }
+    }
+
+    // Cleanup depth resources
+    void cleanupDepthResources() {
+        if (depthImageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, depthImageView, nullptr);
+            depthImageView = VK_NULL_HANDLE;
+        }
+        if (depthImage != VK_NULL_HANDLE) {
+            vkDestroyImage(device, depthImage, nullptr);
+            depthImage = VK_NULL_HANDLE;
+        }
+        if (depthImageMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, depthImageMemory, nullptr);
+            depthImageMemory = VK_NULL_HANDLE;
+        }
+    }
+
+    // Create 3D render pass with depth attachment
+    void createRenderPass3D() {
+        // Color attachment - output to COLOR_ATTACHMENT_OPTIMAL for 2D overlay
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = swapChainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Output to COLOR_ATTACHMENT_OPTIMAL so 2D overlay pass can load it
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        // Depth attachment
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = depthFormat;
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorAttachmentRef{};
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthAttachmentRef{};
+        depthAttachmentRef.attachment = 1;
+        depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+        subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        renderPassInfo.pAttachments = attachments.data();
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass3D) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create 3D render pass!");
+        }
+    }
+
+    // Create 3D framebuffers with depth attachment
+    void createFramebuffers3D() {
+        swapChainFramebuffers3D.resize(swapChainImageViews.size());
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+            std::array<VkImageView, 2> attachments = {
+                swapChainImageViews[i],
+                depthImageView
+            };
+
+            VkFramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = renderPass3D;
+            framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+            framebufferInfo.pAttachments = attachments.data();
+            framebufferInfo.width = swapChainExtent.width;
+            framebufferInfo.height = swapChainExtent.height;
+            framebufferInfo.layers = 1;
+
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers3D[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create 3D framebuffer!");
+            }
+        }
+    }
+
+    void createDescriptorSetLayout() {
+        // Set 0: Font texture sampler (for text/math pipelines)
+        VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+        samplerLayoutBinding.binding = 0;
+        samplerLayoutBinding.descriptorCount = 1;
+        samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBinding.pImmutableSamplers = nullptr;
+        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &samplerLayoutBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create descriptor set layout!");
+        }
+
+        // Set 1: Camera UBO (for all pipelines)
+        VkDescriptorSetLayoutBinding cameraUBOBinding{};
+        cameraUBOBinding.binding = 0;
+        cameraUBOBinding.descriptorCount = 1;
+        cameraUBOBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        cameraUBOBinding.pImmutableSamplers = nullptr;
+        cameraUBOBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo cameraLayoutInfo{};
+        cameraLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        cameraLayoutInfo.bindingCount = 1;
+        cameraLayoutInfo.pBindings = &cameraUBOBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &cameraLayoutInfo, nullptr, &cameraDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create camera descriptor set layout!");
+        }
+
+        // Set for 3D Camera UBO (view + projection matrices = 128 bytes)
+        VkDescriptorSetLayoutBinding camera3DUBOBinding{};
+        camera3DUBOBinding.binding = 0;
+        camera3DUBOBinding.descriptorCount = 1;
+        camera3DUBOBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        camera3DUBOBinding.pImmutableSamplers = nullptr;
+        camera3DUBOBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo camera3DLayoutInfo{};
+        camera3DLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        camera3DLayoutInfo.bindingCount = 1;
+        camera3DLayoutInfo.pBindings = &camera3DUBOBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &camera3DLayoutInfo, nullptr, &camera3DDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create 3D camera descriptor set layout!");
+        }
+
+        // Set for Lighting UBO (ambient, directional, point lights, camera pos, material)
+        VkDescriptorSetLayoutBinding lightingUBOBinding{};
+        lightingUBOBinding.binding = 0;
+        lightingUBOBinding.descriptorCount = 1;
+        lightingUBOBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        lightingUBOBinding.pImmutableSamplers = nullptr;
+        lightingUBOBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutCreateInfo lightingLayoutInfo{};
+        lightingLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        lightingLayoutInfo.bindingCount = 1;
+        lightingLayoutInfo.pBindings = &lightingUBOBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &lightingLayoutInfo, nullptr, &lightingDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create lighting descriptor set layout!");
+        }
+    }
+
+    static std::vector<char> readFile(const std::string& filename) {
+        std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open file: " + filename);
+        }
+
+        size_t fileSize = (size_t)file.tellg();
+        std::vector<char> buffer(fileSize);
+
+        file.seekg(0);
+        file.read(buffer.data(), fileSize);
+        file.close();
+
+        return buffer;
+    }
+
+    VkShaderModule createShaderModule(const std::vector<char>& code) {
+        VkShaderModuleCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.size();
+        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+        VkShaderModule shaderModule;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create shader module!");
+        }
+
+        return shaderModule;
+    }
+
+    void createGraphicsPipeline() {
+        auto vertShaderCode = readFile(basePath + "shaders/shader.vert.spv");
+        auto fragShaderCode = readFile(basePath + "shaders/shader.frag.spv");
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+        auto bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        // Push constants for animation offset, scale, rotation (vertex) + rendering params (fragment)
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = 20 * sizeof(float);  // offsetXY + scale + rotation + opacity + RGB + strokeWidth + strokeRGB + gradientEndRGB + gradientAngle + charRevealProgress + totalCharCount + strokeOpacity + fillOpacity
+
+        // Both set 0 (font texture) and set 1 (camera UBO)
+        VkDescriptorSetLayout setLayouts[] = { descriptorSetLayout, cameraDescriptorSetLayout };
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 2;
+        pipelineLayoutInfo.pSetLayouts = setLayouts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create pipeline layout!");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create graphics pipeline!");
+        }
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+        std::cout << "Graphics pipeline created successfully!\n";
+    }
+
+    void createShapeGraphicsPipeline() {
+        auto vertShaderCode = readFile(basePath + "shaders/shape.vert.spv");
+        auto fragShaderCode = readFile(basePath + "shaders/shape.frag.spv");
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+        // Use ShapeVertex instead of Vertex
+        auto bindingDescription = ShapeVertex::getBindingDescription();
+        auto attributeDescriptions = ShapeVertex::getAttributeDescriptions();
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        // Push constants: offsetXY + scale + rotation (vertex) + opacity + fillRGB + strokeWidth + strokeRGB (fragment)
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = 12 * sizeof(float);  // 4 vertex + 8 fragment
+
+        // Set 0 (dummy for consistency) and set 1 (camera UBO)
+        VkDescriptorSetLayout shapeSetLayouts[] = { descriptorSetLayout, cameraDescriptorSetLayout };
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 2;
+        pipelineLayoutInfo.pSetLayouts = shapeSetLayouts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shapePipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create shape pipeline layout!");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.layout = shapePipelineLayout;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shapeGraphicsPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create shape graphics pipeline!");
+        }
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+        std::cout << "Shape graphics pipeline created successfully!\n";
+
+        // ==========================================
+        // Create Morph Pipeline (vertex interpolation)
+        // ==========================================
+        auto morphVertShaderCode = readFile(basePath + "shaders/morph.vert.spv");
+        auto morphFragShaderCode = readFile(basePath + "shaders/morph.frag.spv");
+
+        VkShaderModule morphVertShaderModule = createShaderModule(morphVertShaderCode);
+        VkShaderModule morphFragShaderModule = createShaderModule(morphFragShaderCode);
+
+        VkPipelineShaderStageCreateInfo morphVertShaderStageInfo{};
+        morphVertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        morphVertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        morphVertShaderStageInfo.module = morphVertShaderModule;
+        morphVertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo morphFragShaderStageInfo{};
+        morphFragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        morphFragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        morphFragShaderStageInfo.module = morphFragShaderModule;
+        morphFragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo morphShaderStages[] = {morphVertShaderStageInfo, morphFragShaderStageInfo};
+
+        // Morph vertex input: sourcePos + targetPos (both vec2)
+        auto morphBindingDescription = MorphVertex::getBindingDescription();
+        auto morphAttributeDescriptions = MorphVertex::getAttributeDescriptions();
+
+        VkPipelineVertexInputStateCreateInfo morphVertexInputInfo{};
+        morphVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        morphVertexInputInfo.vertexBindingDescriptionCount = 1;
+        morphVertexInputInfo.pVertexBindingDescriptions = &morphBindingDescription;
+        morphVertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(morphAttributeDescriptions.size());
+        morphVertexInputInfo.pVertexAttributeDescriptions = morphAttributeDescriptions.data();
+
+        // Morph push constants: 5 floats vertex (morphProgress, scale, rotation, offsetX, offsetY) +
+        //                       8 floats fragment (opacity, sourceRGB, targetRGB, morphProgress)
+        VkPushConstantRange morphPushConstantRange{};
+        morphPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        morphPushConstantRange.offset = 0;
+        morphPushConstantRange.size = 13 * sizeof(float);  // 5 vertex + 8 fragment
+
+        // Set 0 (dummy for consistency) and set 1 (camera UBO)
+        VkDescriptorSetLayout morphSetLayouts[] = { descriptorSetLayout, cameraDescriptorSetLayout };
+
+        VkPipelineLayoutCreateInfo morphPipelineLayoutInfo{};
+        morphPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        morphPipelineLayoutInfo.setLayoutCount = 2;
+        morphPipelineLayoutInfo.pSetLayouts = morphSetLayouts;
+        morphPipelineLayoutInfo.pushConstantRangeCount = 1;
+        morphPipelineLayoutInfo.pPushConstantRanges = &morphPushConstantRange;
+
+        if (vkCreatePipelineLayout(device, &morphPipelineLayoutInfo, nullptr, &morphPipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create morph pipeline layout!");
+        }
+
+        // Reuse the same pipeline state as shape (input assembly, viewport, rasterizer, etc.)
+        VkGraphicsPipelineCreateInfo morphPipelineInfo{};
+        morphPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        morphPipelineInfo.stageCount = 2;
+        morphPipelineInfo.pStages = morphShaderStages;
+        morphPipelineInfo.pVertexInputState = &morphVertexInputInfo;
+        morphPipelineInfo.pInputAssemblyState = &inputAssembly;
+        morphPipelineInfo.pViewportState = &viewportState;
+        morphPipelineInfo.pRasterizationState = &rasterizer;
+        morphPipelineInfo.pMultisampleState = &multisampling;
+        morphPipelineInfo.pColorBlendState = &colorBlending;
+        morphPipelineInfo.layout = morphPipelineLayout;
+        morphPipelineInfo.renderPass = renderPass;
+        morphPipelineInfo.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &morphPipelineInfo, nullptr, &morphGraphicsPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create morph graphics pipeline!");
+        }
+
+        vkDestroyShaderModule(device, morphFragShaderModule, nullptr);
+        vkDestroyShaderModule(device, morphVertShaderModule, nullptr);
+
+        std::cout << "Morph graphics pipeline created successfully!\n";
+    }
+
+    // Create 3D graphics pipeline with depth testing
+    void createShape3DGraphicsPipeline() {
+        auto vertShaderCode = readFile(basePath + "shaders/shape3d.vert.spv");
+        auto fragShaderCode = readFile(basePath + "shaders/shape3d.frag.spv");
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+        // Use Shape3DVertex (pos[3] + normal[3])
+        auto bindingDescription = Shape3DVertex::getBindingDescription();
+        auto attributeDescriptions = Shape3DVertex::getAttributeDescriptions();
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;  // Enable backface culling for 3D
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        // Depth testing enabled
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        // Push constants: model matrix (64 bytes) + opacity + color RGB (16 bytes)
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = 64 + 16;  // mat4 + 4 floats
+
+        // Use set 0 (empty/dummy for consistency), set 1 (3D camera UBO), set 2 (lighting UBO)
+        VkDescriptorSetLayout shape3DSetLayouts[] = { descriptorSetLayout, camera3DDescriptorSetLayout, lightingDescriptorSetLayout };
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 3;
+        pipelineLayoutInfo.pSetLayouts = shape3DSetLayouts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shape3DPipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create 3D shape pipeline layout!");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;  // Enable depth testing
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.layout = shape3DPipelineLayout;
+        pipelineInfo.renderPass = renderPass3D;  // Use 3D render pass with depth
+        pipelineInfo.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shape3DGraphicsPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create 3D shape graphics pipeline!");
+        }
+
+        // Create a second 3D pipeline for translucent rendering (no depth writes).
+        // This prevents invisible/transparent objects from occluding others while fading out.
+        VkPipelineDepthStencilStateCreateInfo depthStencilNoWrite = depthStencil;
+        depthStencilNoWrite.depthWriteEnable = VK_FALSE;
+
+        VkGraphicsPipelineCreateInfo pipelineInfoNoWrite = pipelineInfo;
+        pipelineInfoNoWrite.pDepthStencilState = &depthStencilNoWrite;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfoNoWrite, nullptr, &shape3DGraphicsPipelineNoDepthWrite) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create 3D translucent pipeline!");
+        }
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+        std::cout << "3D Shape graphics pipeline created successfully!\n";
+    }
+
+    void createFramebuffers() {
+        swapChainFramebuffers.resize(swapChainImageViews.size());
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+            VkImageView attachments[] = {
+                swapChainImageViews[i]
+            };
+
+            VkFramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = renderPass;
+            framebufferInfo.attachmentCount = 1;
+            framebufferInfo.pAttachments = attachments;
+            framebufferInfo.width = swapChainExtent.width;
+            framebufferInfo.height = swapChainExtent.height;
+            framebufferInfo.layers = 1;
+
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create framebuffer!");
+            }
+        }
+    }
+
+    void createCommandPool() {
+        QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
+
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create command pool!");
+        }
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+
+        throw std::runtime_error("Failed to find suitable memory type!");
+    }
+
+    void createFontTexture() {
+        // Load font file
+        std::vector<char> fontData = readFile(basePath + "font/Raleway-Bold.ttf");
+
+        // Initialize stb_truetype font info for SDF generation
+        stbtt_fontinfo fontInfo;
+        if (!stbtt_InitFont(&fontInfo, reinterpret_cast<const unsigned char*>(fontData.data()), 0)) {
+            throw std::runtime_error("Failed to initialize font!");
+        }
+
+        // Create bitmap for font atlas (SDF version)
+        std::vector<unsigned char> fontBitmap(fontTextureWidth * fontTextureHeight, 0);
+
+        // SDF parameters
+        float scale = stbtt_ScaleForPixelHeight(&fontInfo, REFERENCE_FONT_SIZE);
+        int padding = 5;  // Padding for SDF (allows strokes up to ~10px)
+        unsigned char onedge_value = 128;  // 0.5 in normalized space = edge
+        float pixel_dist_scale = 64.0f;  // SDF precision
+
+        // Pack glyphs into atlas row by row
+        int atlasX = 0;
+        int atlasY = 0;
+        int rowHeight = 0;
+
+        // Generate SDF for each character and pack into atlas
+        for (int c = 32; c < 128; c++) {
+            int w, h, xoff, yoff;
+            unsigned char* sdf = stbtt_GetCodepointSDF(
+                &fontInfo, scale, c,
+                padding, onedge_value, pixel_dist_scale,
+                &w, &h, &xoff, &yoff
+            );
+
+            if (sdf == nullptr) {
+                // Character not in font or empty (like space)
+                // Get advance width for spacing
+                int advance, lsb;
+                stbtt_GetCodepointHMetrics(&fontInfo, c, &advance, &lsb);
+
+                charData[c - 32].x0 = 0;
+                charData[c - 32].y0 = 0;
+                charData[c - 32].x1 = 0;
+                charData[c - 32].y1 = 0;
+                charData[c - 32].xoff = 0;
+                charData[c - 32].yoff = 0;
+                charData[c - 32].xadvance = advance * scale;
+                continue;
+            }
+
+            // Check if we need to move to next row
+            if (atlasX + w > fontTextureWidth) {
+                atlasX = 0;
+                atlasY += rowHeight + 1;
+                rowHeight = 0;
+            }
+
+            // Check if we've run out of space
+            if (atlasY + h > fontTextureHeight) {
+                stbtt_FreeSDF(sdf, nullptr);
+                throw std::runtime_error("Font atlas too small for SDF glyphs!");
+            }
+
+            // Copy SDF data to atlas
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    fontBitmap[(atlasY + y) * fontTextureWidth + (atlasX + x)] = sdf[y * w + x];
+                }
+            }
+
+            // Store glyph metrics (compatible with stbtt_bakedchar)
+            charData[c - 32].x0 = (unsigned short)atlasX;
+            charData[c - 32].y0 = (unsigned short)atlasY;
+            charData[c - 32].x1 = (unsigned short)(atlasX + w);
+            charData[c - 32].y1 = (unsigned short)(atlasY + h);
+            charData[c - 32].xoff = (float)xoff;
+            charData[c - 32].yoff = (float)yoff;
+
+            // Get advance width
+            int advance, lsb;
+            stbtt_GetCodepointHMetrics(&fontInfo, c, &advance, &lsb);
+            charData[c - 32].xadvance = advance * scale;
+
+            // Update atlas position
+            atlasX += w + 1;  // 1 pixel padding between glyphs
+            rowHeight = std::max(rowHeight, h);
+
+            stbtt_FreeSDF(sdf, nullptr);
+        }
+
+        std::cout << "SDF font atlas created successfully!" << std::endl;
+
+        VkDeviceSize imageSize = fontTextureWidth * fontTextureHeight;
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = imageSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create staging buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate staging buffer memory!");
+        }
+
+        vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+        memcpy(data, fontBitmap.data(), imageSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create image
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = fontTextureWidth;
+        imageInfo.extent.height = fontTextureHeight;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = VK_FORMAT_R8_UNORM;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        if (vkCreateImage(device, &imageInfo, nullptr, &fontImage) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create font image!");
+        }
+
+        vkGetImageMemoryRequirements(device, fontImage, &memRequirements);
+
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &fontImageMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate font image memory!");
+        }
+
+        vkBindImageMemory(device, fontImage, fontImageMemory, 0);
+
+        // Transition image layout and copy buffer to image
+        transitionImageLayout(fontImage, VK_FORMAT_R8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(stagingBuffer, fontImage, fontTextureWidth, fontTextureHeight);
+        transitionImageLayout(fontImage, VK_FORMAT_R8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        // Create image view
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = fontImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_R8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &fontImageView) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create font image view!");
+        }
+
+        // Create sampler
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.maxAnisotropy = 1.0f;
+        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &fontSampler) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create font sampler!");
+        }
+
+        std::cout << "Font texture created successfully!\n";
+    }
+
+    void initMicroTeX() {
+        // Initialize Pango for font handling
+        Pango::init();
+
+        // Initialize MicroTeX with resource path
+        // MicroTeX's CMakeLists.txt copies res/ to build/lib/MicroTeX/res/
+        std::string resPath = basePath + "lib/MicroTeX/res";
+        tex::LaTeX::init(resPath);
+        microTexInitialized = true;
+        std::cout << "MicroTeX initialized with res path: " << resPath << "\n";
+    }
+
+    void createMathSampler() {
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.maxAnisotropy = 1.0f;
+        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &mathSampler) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create math sampler!");
+        }
+        std::cout << "Math sampler created successfully!\n";
+    }
+
+    // Convert std::string to std::wstring for MicroTeX
+    std::wstring utf8ToWide(const std::string& str) {
+        std::wstring result;
+        result.reserve(str.size());
+        for (size_t i = 0; i < str.size(); ) {
+            uint32_t cp;
+            unsigned char c = str[i];
+            if ((c & 0x80) == 0) {
+                cp = c;
+                i += 1;
+            } else if ((c & 0xE0) == 0xC0) {
+                cp = (c & 0x1F) << 6;
+                if (i + 1 < str.size()) cp |= (str[i+1] & 0x3F);
+                i += 2;
+            } else if ((c & 0xF0) == 0xE0) {
+                cp = (c & 0x0F) << 12;
+                if (i + 1 < str.size()) cp |= (str[i+1] & 0x3F) << 6;
+                if (i + 2 < str.size()) cp |= (str[i+2] & 0x3F);
+                i += 3;
+            } else if ((c & 0xF8) == 0xF0) {
+                cp = (c & 0x07) << 18;
+                if (i + 1 < str.size()) cp |= (str[i+1] & 0x3F) << 12;
+                if (i + 2 < str.size()) cp |= (str[i+2] & 0x3F) << 6;
+                if (i + 3 < str.size()) cp |= (str[i+3] & 0x3F);
+                i += 4;
+            } else {
+                i += 1;
+                continue;
+            }
+            result.push_back(static_cast<wchar_t>(cp));
+        }
+        return result;
+    }
+
+    void renderLatexToTexture(MathObject& obj) {
+        if (!microTexInitialized) return;
+
+        // Convert color to MicroTeX format (0xAARRGGBB)
+        uint8_t r = static_cast<uint8_t>(obj.colorR * 255);
+        uint8_t g = static_cast<uint8_t>(obj.colorG * 255);
+        uint8_t b = static_cast<uint8_t>(obj.colorB * 255);
+        tex::color fgColor = 0xFF000000 | (r << 16) | (g << 8) | b;
+
+        // Parse LaTeX and create render
+        std::wstring latexW = utf8ToWide(obj.latex);
+        tex::TeXRender* render = tex::LaTeX::parse(
+            latexW,
+            static_cast<int>(width),  // max width
+            obj.fontSize,
+            obj.fontSize / 3.0f,  // line space
+            fgColor
+        );
+
+        if (!render) {
+            std::cerr << "Failed to parse LaTeX: " << obj.latex << "\n";
+            return;
+        }
+
+        int texWidth = render->getWidth();
+        int texHeight = render->getHeight();
+
+        if (texWidth <= 0 || texHeight <= 0) {
+            std::cerr << "Invalid LaTeX render size: " << texWidth << "x" << texHeight << "\n";
+            delete render;
+            return;
+        }
+
+        // Add padding
+        int padding = 4;
+        texWidth += padding * 2;
+        texHeight += padding * 2;
+
+        // Create Cairo image surface (ARGB32 format)
+        auto surface = Cairo::ImageSurface::create(Cairo::FORMAT_ARGB32, texWidth, texHeight);
+        auto cr = Cairo::Context::create(surface);
+
+        // Clear with transparent background
+        cr->set_source_rgba(0, 0, 0, 0);
+        cr->paint();
+
+        // Render LaTeX formula
+        tex::Graphics2D_cairo g2(cr);
+        render->draw(g2, padding, padding);
+
+        // Flush surface to ensure all drawing is complete
+        surface->flush();
+
+        // Get pixel data from Cairo surface
+        unsigned char* data = surface->get_data();
+        int stride = surface->get_stride();
+
+        // Cairo uses BGRA (or ARGB in native byte order), need to convert to RGBA for Vulkan
+        std::vector<unsigned char> rgbaData(texWidth * texHeight * 4);
+        for (int y = 0; y < texHeight; y++) {
+            for (int x = 0; x < texWidth; x++) {
+                unsigned char* src = data + y * stride + x * 4;
+                unsigned char* dst = rgbaData.data() + (y * texWidth + x) * 4;
+                // Cairo BGRA -> Vulkan RGBA
+                dst[0] = src[2];  // R
+                dst[1] = src[1];  // G
+                dst[2] = src[0];  // B
+                dst[3] = src[3];  // A
+            }
+        }
+
+        // Create Vulkan texture from RGBA data
+        createMathTexture(obj, rgbaData.data(), texWidth, texHeight);
+
+        delete render;
+        obj.textureDirty = false;
+
+        std::cout << "Rendered LaTeX to " << texWidth << "x" << texHeight << " texture\n";
+    }
+
+    void createMathTexture(MathObject& obj, unsigned char* data, uint32_t texWidth, uint32_t texHeight) {
+        // Destroy old texture if exists
+        if (obj.texture != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            // Free old descriptor set before destroying texture
+            if (obj.descriptorSet != VK_NULL_HANDLE) {
+                vkFreeDescriptorSets(device, descriptorPool, 1, &obj.descriptorSet);
+                obj.descriptorSet = VK_NULL_HANDLE;
+            }
+            vkDestroyImageView(device, obj.textureView, nullptr);
+            vkDestroyImage(device, obj.texture, nullptr);
+            vkFreeMemory(device, obj.textureMemory, nullptr);
+            obj.texture = VK_NULL_HANDLE;
+            obj.textureView = VK_NULL_HANDLE;
+            obj.textureMemory = VK_NULL_HANDLE;
+        }
+
+        obj.textureWidth = texWidth;
+        obj.textureHeight = texHeight;
+
+        VkDeviceSize imageSize = texWidth * texHeight * 4;  // RGBA
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = imageSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create math staging buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate math staging buffer memory!");
+        }
+
+        vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
+
+        void* mappedData;
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &mappedData);
+        memcpy(mappedData, data, imageSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create image - RGBA format
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = texWidth;
+        imageInfo.extent.height = texHeight;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        if (vkCreateImage(device, &imageInfo, nullptr, &obj.texture) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create math texture image!");
+        }
+
+        vkGetImageMemoryRequirements(device, obj.texture, &memRequirements);
+
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &obj.textureMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate math texture image memory!");
+        }
+
+        vkBindImageMemory(device, obj.texture, obj.textureMemory, 0);
+
+        // Transition and copy
+        transitionImageLayout(obj.texture, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(stagingBuffer, obj.texture, texWidth, texHeight);
+        transitionImageLayout(obj.texture, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        // Create image view
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = obj.texture;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &obj.textureView) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create math texture image view!");
+        }
+
+        // Create descriptor set for this math object
+        createMathDescriptorSet(obj);
+    }
+
+    void createMathDescriptorSet(MathObject& obj) {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &descriptorSetLayout;
+
+        VkResult result = vkAllocateDescriptorSets(device, &allocInfo, &obj.descriptorSet);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate math descriptor set - pool may be exhausted (max 1000 math objects)");
+        }
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = obj.textureView;
+        imageInfo.sampler = mathSampler;
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = obj.descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    std::vector<Vertex> generateMathVertices(const MathObject& obj) {
+        std::vector<Vertex> vertices;
+
+        if (obj.textureWidth == 0 || obj.textureHeight == 0) {
+            return vertices;
+        }
+
+        // Use the rendered texture size scaled by fontSize ratio
+        float baseSize = 64.0f;  // Default reference size
+        float scale = obj.fontSize / baseSize;
+        float quadWidth = obj.textureWidth * scale;
+        float quadHeight = obj.textureHeight * scale;
+
+        // Convert to NDC
+        float scaleX = 2.0f / width;
+        float scaleY = 2.0f / height;
+        float margin = 0.02f;
+
+        float x, y;
+
+        if (obj.usePixelPosition) {
+            float clampedX = std::max(0.0f, std::min(obj.posX, (float)width - quadWidth));
+            float clampedY = std::max(0.0f, std::min(obj.posY, (float)height - quadHeight));
+            x = (clampedX / width) * 2.0f - 1.0f;
+            y = 1.0f - (clampedY / height) * 2.0f - quadHeight * scaleY / 2.0f;
+        } else {
+            float quadWidthNDC = quadWidth * scaleX;
+            float quadHeightNDC = quadHeight * scaleY;
+
+            switch (obj.anchor) {
+                case Position::CENTER:
+                    x = -quadWidthNDC / 2.0f;
+                    y = quadHeightNDC / 2.0f;
+                    break;
+                case Position::TOP:
+                    x = -quadWidthNDC / 2.0f;
+                    y = -1.0f + margin + quadHeightNDC;  // Y=-1 is top in Vulkan
+                    break;
+                case Position::BOTTOM:
+                    x = -quadWidthNDC / 2.0f;
+                    y = 1.0f - margin;  // Y=+1 is bottom in Vulkan
+                    break;
+                case Position::LEFT:
+                    x = -1.0f + margin;
+                    y = quadHeightNDC / 2.0f;
+                    break;
+                case Position::RIGHT:
+                    x = 1.0f - margin - quadWidthNDC;
+                    y = quadHeightNDC / 2.0f;
+                    break;
+                case Position::TLEFT:
+                    x = -1.0f + margin;
+                    y = -1.0f + margin + quadHeightNDC;  // Top-left
+                    break;
+                case Position::TRIGHT:
+                    x = 1.0f - margin - quadWidthNDC;
+                    y = -1.0f + margin + quadHeightNDC;  // Top-right
+                    break;
+                case Position::BLEFT:
+                    x = -1.0f + margin;
+                    y = 1.0f - margin;  // Bottom-left
+                    break;
+                case Position::BRIGHT:
+                    x = 1.0f - margin - quadWidthNDC;
+                    y = 1.0f - margin;  // Bottom-right
+                    break;
+            }
+        }
+
+        // Store base NDC position (center of quad) for MoveTo animation
+        float quadWidthNDC = quadWidth * scaleX;
+        float quadHeightNDC = quadHeight * scaleY;
+        obj.baseNdcX = x + quadWidthNDC / 2.0f;
+        obj.baseNdcY = y - quadHeightNDC / 2.0f;
+
+        // Create quad (2 triangles, 6 vertices)
+        float x0 = x;
+        float y0 = y;
+        float x1 = x + quadWidth * scaleX;
+        float y1 = y - quadHeight * scaleY;
+
+        // UV coordinates for full texture
+        // Cairo uses top-left origin (Y down), so flip V to correct orientation
+        float u0 = 0.0f, v0 = 1.0f;
+        float u1 = 1.0f, v1 = 0.0f;
+
+        // Triangle 1
+        vertices.push_back({{x0, y0}, {u0, v0}});
+        vertices.push_back({{x1, y0}, {u1, v0}});
+        vertices.push_back({{x0, y1}, {u0, v1}});
+
+        // Triangle 2
+        vertices.push_back({{x1, y0}, {u1, v0}});
+        vertices.push_back({{x1, y1}, {u1, v1}});
+        vertices.push_back({{x0, y1}, {u0, v1}});
+
+        return vertices;
+    }
+
+    void rebuildMathVertexBuffer() {
+        std::vector<Vertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        for (auto& mathObj : mathObjects) {
+            if (mathObj.cleared) {
+                mathObj.vertexCount = 0;  // Skip cleared elements
+                continue;
+            }
+
+            // Render LaTeX to texture if needed
+            if (mathObj.textureDirty && !mathObj.latex.empty()) {
+                renderLatexToTexture(mathObj);
+            }
+
+            auto vertices = generateMathVertices(mathObj);
+            mathObj.vertexOffset = currentOffset;
+            mathObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += mathObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+        }
+
+        mathVertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (mathVertexCount == 0) {
+            mathVertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(Vertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (mathVertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, mathVertexBuffer, nullptr);
+            vkFreeMemory(device, mathVertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            mathVertexBuffer, mathVertexBufferMemory);
+
+        copyBuffer(stagingBuffer, mathVertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        mathVertexBufferDirty = false;
+        std::cout << "Math vertex buffer rebuilt with " << mathVertexCount << " vertices for " << mathObjects.size() << " math object(s)!\n";
+    }
+
+    std::vector<Vertex> generateImageVertices(ImageObject& obj) {
+        std::vector<Vertex> vertices;
+
+        if (obj.displayWidth == 0 || obj.displayHeight == 0) {
+            return vertices;
+        }
+
+        float quadWidth = obj.displayWidth;
+        float quadHeight = obj.displayHeight;
+
+        // Convert to NDC
+        float scaleX = 2.0f / width;
+        float scaleY = 2.0f / height;
+        float margin = 0.02f;
+
+        float x, y;  // Center position in NDC
+
+        if (obj.usePixelPosition) {
+            // Convert pixel position to NDC (center point)
+            x = (obj.posX / width) * 2.0f - 1.0f;
+            y = 1.0f - (obj.posY / height) * 2.0f;  // Flip Y for Vulkan
+        } else {
+            float quadWidthNDC = quadWidth * scaleX;
+            float quadHeightNDC = quadHeight * scaleY;
+
+            switch (obj.anchor) {
+                case Position::CENTER:
+                    x = 0.0f;
+                    y = 0.0f;
+                    break;
+                case Position::TOP:
+                    x = 0.0f;
+                    y = -1.0f + margin + quadHeightNDC / 2.0f;
+                    break;
+                case Position::BOTTOM:
+                    x = 0.0f;
+                    y = 1.0f - margin - quadHeightNDC / 2.0f;
+                    break;
+                case Position::LEFT:
+                    x = -1.0f + margin + quadWidthNDC / 2.0f;
+                    y = 0.0f;
+                    break;
+                case Position::RIGHT:
+                    x = 1.0f - margin - quadWidthNDC / 2.0f;
+                    y = 0.0f;
+                    break;
+                case Position::TLEFT:
+                    x = -1.0f + margin + quadWidthNDC / 2.0f;
+                    y = -1.0f + margin + quadHeightNDC / 2.0f;
+                    break;
+                case Position::TRIGHT:
+                    x = 1.0f - margin - quadWidthNDC / 2.0f;
+                    y = -1.0f + margin + quadHeightNDC / 2.0f;
+                    break;
+                case Position::BLEFT:
+                    x = -1.0f + margin + quadWidthNDC / 2.0f;
+                    y = 1.0f - margin - quadHeightNDC / 2.0f;
+                    break;
+                case Position::BRIGHT:
+                    x = 1.0f - margin - quadWidthNDC / 2.0f;
+                    y = 1.0f - margin - quadHeightNDC / 2.0f;
+                    break;
+            }
+        }
+
+        // Store base position for animation
+        obj.baseNdcX = x;
+        obj.baseNdcY = y;
+
+        // Calculate quad corners (centered on position)
+        float halfW = quadWidth * scaleX / 2.0f;
+        float halfH = quadHeight * scaleY / 2.0f;
+
+        // Two triangles for a quad (6 vertices)
+        // Note: UV coordinates are flipped Y to correct for Vulkan's coordinate system
+        // Triangle 1: top-left, top-right, bottom-left
+        vertices.push_back({{x - halfW, y - halfH}, {0.0f, 0.0f}});  // top-left
+        vertices.push_back({{x + halfW, y - halfH}, {1.0f, 0.0f}});  // top-right
+        vertices.push_back({{x - halfW, y + halfH}, {0.0f, 1.0f}});  // bottom-left
+
+        // Triangle 2: top-right, bottom-right, bottom-left
+        vertices.push_back({{x + halfW, y - halfH}, {1.0f, 0.0f}});  // top-right
+        vertices.push_back({{x + halfW, y + halfH}, {1.0f, 1.0f}});  // bottom-right
+        vertices.push_back({{x - halfW, y + halfH}, {0.0f, 1.0f}});  // bottom-left
+
+        return vertices;
+    }
+
+    void rebuildImageVertexBuffer() {
+        std::vector<Vertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        for (auto& imgObj : imageObjects) {
+            // Create texture if pixel data is available but texture not yet created
+            if (imgObj.texture == VK_NULL_HANDLE && !imgObj.pixelData.empty()) {
+                createImageTexture(imgObj, imgObj.pixelData.data(),
+                                   imgObj.imageWidth, imgObj.imageHeight);
+                imgObj.pixelData.clear();  // Free the pixel data after texture creation
+                imgObj.pixelData.shrink_to_fit();
+            }
+
+            if (imgObj.texture == VK_NULL_HANDLE) {
+                imgObj.vertexCount = 0;  // Skip images without textures
+                continue;
+            }
+
+            auto vertices = generateImageVertices(imgObj);
+            imgObj.vertexOffset = currentOffset;
+            imgObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += imgObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+        }
+
+        imageVertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (imageVertexCount == 0) {
+            imageVertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(Vertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (imageVertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, imageVertexBuffer, nullptr);
+            vkFreeMemory(device, imageVertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            imageVertexBuffer, imageVertexBufferMemory);
+
+        copyBuffer(stagingBuffer, imageVertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        imageVertexBufferDirty = false;
+    }
+
+public:
+    // ==========================================
+    // Morph vertex normalization helpers (public for ShapeElement::morphTo access)
+    // ==========================================
+
+    // Get perimeter points for a circle (normalized to unit circle, centered at origin)
+    std::vector<std::pair<float, float>> getCirclePerimeter(int numPoints) {
+        std::vector<std::pair<float, float>> points;
+        for (int i = 0; i < numPoints; i++) {
+            float angle = (float)i / numPoints * 2.0f * 3.14159265f;
+            points.push_back({cos(angle), sin(angle)});
+        }
+        return points;
+    }
+
+    // Get perimeter points for a rectangle (normalized to unit size, centered at origin)
+    std::vector<std::pair<float, float>> getRectanglePerimeter(int numPoints, float aspectRatio = 1.0f) {
+        std::vector<std::pair<float, float>> points;
+        // Rectangle perimeter: right side, top, left side, bottom
+        // Perimeter = 2 * (w + h), we use w=aspectRatio, h=1
+        float w = aspectRatio;
+        float h = 1.0f;
+        float perimeter = 2.0f * (w + h);
+
+        for (int i = 0; i < numPoints; i++) {
+            float t = (float)i / numPoints * perimeter;
+            float x, y;
+
+            if (t < w) {
+                // Right side (top to bottom): x = w/2, y goes from h/2 to -h/2
+                x = w / 2.0f;
+                y = h / 2.0f - t * h / w;
+            } else if (t < w + h) {
+                // Bottom side (right to left): y = -h/2, x goes from w/2 to -w/2
+                x = w / 2.0f - (t - w);
+                y = -h / 2.0f;
+            } else if (t < 2 * w + h) {
+                // Left side (bottom to top): x = -w/2, y goes from -h/2 to h/2
+                x = -w / 2.0f;
+                y = -h / 2.0f + (t - w - h) * h / w;
+            } else {
+                // Top side (left to right): y = h/2, x goes from -w/2 to w/2
+                x = -w / 2.0f + (t - 2 * w - h);
+                y = h / 2.0f;
+            }
+
+            points.push_back({x, y});
+        }
+        return points;
+    }
+
+    // Get perimeter points for a triangle (equilateral, centered at origin)
+    std::vector<std::pair<float, float>> getTrianglePerimeter(int numPoints) {
+        std::vector<std::pair<float, float>> points;
+        // Equilateral triangle vertices (pointing up)
+        float h = 0.866f;  // sqrt(3)/2
+        std::pair<float, float> v0 = {0.0f, h * 2.0f / 3.0f};     // top
+        std::pair<float, float> v1 = {-0.5f, -h / 3.0f};          // bottom-left
+        std::pair<float, float> v2 = {0.5f, -h / 3.0f};           // bottom-right
+
+        float sideLen = 1.0f;
+        float perimeter = 3.0f * sideLen;
+
+        for (int i = 0; i < numPoints; i++) {
+            float t = (float)i / numPoints * perimeter;
+            float x, y;
+
+            if (t < sideLen) {
+                // Side 0->1 (top to bottom-left)
+                float frac = t / sideLen;
+                x = v0.first + frac * (v1.first - v0.first);
+                y = v0.second + frac * (v1.second - v0.second);
+            } else if (t < 2 * sideLen) {
+                // Side 1->2 (bottom-left to bottom-right)
+                float frac = (t - sideLen) / sideLen;
+                x = v1.first + frac * (v2.first - v1.first);
+                y = v1.second + frac * (v2.second - v1.second);
+            } else {
+                // Side 2->0 (bottom-right to top)
+                float frac = (t - 2 * sideLen) / sideLen;
+                x = v2.first + frac * (v0.first - v2.first);
+                y = v2.second + frac * (v0.second - v2.second);
+            }
+
+            points.push_back({x, y});
+        }
+        return points;
+    }
+
+    // Generate normalized morph vertices for a shape (as triangle fan from center)
+    std::vector<MorphVertex> generateMorphVertices(
+        ShapeObject& srcObj, ShapeObject& tgtObj,
+        float srcCenterX, float srcCenterY, float srcScaleX, float srcScaleY,
+        float tgtCenterX, float tgtCenterY, float tgtScaleX, float tgtScaleY
+    ) {
+        const int numPerimeterPoints = 64;  // Number of points around perimeter
+
+        // Get perimeter points for source shape
+        std::vector<std::pair<float, float>> srcPerimeter;
+        switch (srcObj.type) {
+            case ShapeType::Circle:
+                srcPerimeter = getCirclePerimeter(numPerimeterPoints);
+                break;
+            case ShapeType::Rectangle:
+                srcPerimeter = getRectanglePerimeter(numPerimeterPoints, srcObj.width / srcObj.height);
+                break;
+            case ShapeType::Triangle:
+                srcPerimeter = getTrianglePerimeter(numPerimeterPoints);
+                break;
+            default:
+                srcPerimeter = getCirclePerimeter(numPerimeterPoints);  // Fallback
+                break;
+        }
+
+        // Get perimeter points for target shape
+        std::vector<std::pair<float, float>> tgtPerimeter;
+        switch (tgtObj.type) {
+            case ShapeType::Circle:
+                tgtPerimeter = getCirclePerimeter(numPerimeterPoints);
+                break;
+            case ShapeType::Rectangle:
+                tgtPerimeter = getRectanglePerimeter(numPerimeterPoints, tgtObj.width / tgtObj.height);
+                break;
+            case ShapeType::Triangle:
+                tgtPerimeter = getTrianglePerimeter(numPerimeterPoints);
+                break;
+            default:
+                tgtPerimeter = getCirclePerimeter(numPerimeterPoints);  // Fallback
+                break;
+        }
+
+        // Generate triangle fan vertices (center + perimeter)
+        std::vector<MorphVertex> vertices;
+        for (int i = 0; i < numPerimeterPoints; i++) {
+            int next = (i + 1) % numPerimeterPoints;
+
+            // Source positions (scaled and translated)
+            float srcP0X = srcCenterX;
+            float srcP0Y = srcCenterY;
+            float srcP1X = srcCenterX + srcPerimeter[i].first * srcScaleX;
+            float srcP1Y = srcCenterY + srcPerimeter[i].second * srcScaleY;
+            float srcP2X = srcCenterX + srcPerimeter[next].first * srcScaleX;
+            float srcP2Y = srcCenterY + srcPerimeter[next].second * srcScaleY;
+
+            // Target positions (scaled and translated)
+            float tgtP0X = tgtCenterX;
+            float tgtP0Y = tgtCenterY;
+            float tgtP1X = tgtCenterX + tgtPerimeter[i].first * tgtScaleX;
+            float tgtP1Y = tgtCenterY + tgtPerimeter[i].second * tgtScaleY;
+            float tgtP2X = tgtCenterX + tgtPerimeter[next].first * tgtScaleX;
+            float tgtP2Y = tgtCenterY + tgtPerimeter[next].second * tgtScaleY;
+
+            // Triangle: center, point1, point2
+            vertices.push_back({{srcP0X, srcP0Y}, {tgtP0X, tgtP0Y}});
+            vertices.push_back({{srcP1X, srcP1Y}, {tgtP1X, tgtP1Y}});
+            vertices.push_back({{srcP2X, srcP2Y}, {tgtP2X, tgtP2Y}});
+        }
+
+        return vertices;
+    }
+
+    // Create GPU buffer for morph vertices
+    void createMorphVertexBuffer(ShapeObject& obj) {
+        if (obj.morphState.vertices.empty()) return;
+
+        VkDeviceSize bufferSize = sizeof(MorphVertex) * obj.morphState.vertices.size();
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingBufferMemory);
+
+        // Copy vertex data to staging buffer
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, obj.morphState.vertices.data(), bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local buffer
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                     obj.morphState.morphVertexBuffer, obj.morphState.morphVertexMemory);
+
+        // Copy from staging to device-local
+        copyBuffer(stagingBuffer, obj.morphState.morphVertexBuffer, bufferSize);
+
+        // Cleanup staging buffer
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        obj.morphState.normalizedVertexCount = static_cast<uint32_t>(obj.morphState.vertices.size());
+    }
+
+    // Cleanup morph state after morph completes
+    void cleanupMorphState(ShapeObject& obj) {
+        if (obj.morphState.morphVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, obj.morphState.morphVertexBuffer, nullptr);
+            vkFreeMemory(device, obj.morphState.morphVertexMemory, nullptr);
+            obj.morphState.morphVertexBuffer = VK_NULL_HANDLE;
+            obj.morphState.morphVertexMemory = VK_NULL_HANDLE;
+        }
+        obj.morphState.vertices.clear();
+        obj.morphState.active = false;
+        obj.morphState.normalizedVertexCount = 0;
+    }
+
+private:
+    // Shape vertex generation helpers
+    std::vector<ShapeVertex> generateCircleVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert radius from pixels to NDC
+        float aspectRatio = static_cast<float>(width) / height;
+        float ndcRadiusX = (obj.radius / width) * 2.0f;
+        float ndcRadiusY = (obj.radius / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            // Anchor positioning
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcRadiusY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcRadiusX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcRadiusX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcRadiusY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate triangle fan for circle (center + segments)
+        const int segments = 64;
+        for (int i = 0; i < segments; i++) {
+            float angle1 = (float)i / segments * 2.0f * 3.14159265f;
+            float angle2 = (float)(i + 1) / segments * 2.0f * 3.14159265f;
+
+            // Triangle: center, point1, point2
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle1), centerY + ndcRadiusY * sin(angle1)}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle2), centerY + ndcRadiusY * sin(angle2)}});
+        }
+
+        return vertices;
+    }
+
+    std::vector<ShapeVertex> generateRectangleVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert dimensions from pixels to NDC
+        float halfWidthNdc = (obj.width / 2.0f / width) * 2.0f;
+        float halfHeightNdc = (obj.height / 2.0f / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + halfWidthNdc; centerY =  1.0f - halfHeightNdc; break;
+                case Position::TOP:    centerX =  0.0f;                centerY =  1.0f - halfHeightNdc; break;
+                case Position::TRIGHT: centerX =  1.0f - halfWidthNdc; centerY =  1.0f - halfHeightNdc; break;
+                case Position::LEFT:   centerX = -1.0f + halfWidthNdc; centerY =  0.0f;                 break;
+                case Position::CENTER: centerX =  0.0f;                centerY =  0.0f;                 break;
+                case Position::RIGHT:  centerX =  1.0f - halfWidthNdc; centerY =  0.0f;                 break;
+                case Position::BLEFT:  centerX = -1.0f + halfWidthNdc; centerY = -1.0f + halfHeightNdc; break;
+                case Position::BOTTOM: centerX =  0.0f;                centerY = -1.0f + halfHeightNdc; break;
+                case Position::BRIGHT: centerX =  1.0f - halfWidthNdc; centerY = -1.0f + halfHeightNdc; break;
+                default:               centerX =  0.0f;                centerY =  0.0f;                 break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Two triangles for rectangle
+        float left = centerX - halfWidthNdc;
+        float right = centerX + halfWidthNdc;
+        float top = centerY + halfHeightNdc;
+        float bottom = centerY - halfHeightNdc;
+
+        // Triangle 1: top-left, top-right, bottom-right
+        vertices.push_back({{left, top}});
+        vertices.push_back({{right, top}});
+        vertices.push_back({{right, bottom}});
+
+        // Triangle 2: top-left, bottom-right, bottom-left
+        vertices.push_back({{left, top}});
+        vertices.push_back({{right, bottom}});
+        vertices.push_back({{left, bottom}});
+
+        return vertices;
+    }
+
+    std::vector<ShapeVertex> generateLineVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert line endpoints from pixels to NDC
+        float x1Ndc = (obj.x1 / width) * 2.0f - 1.0f;
+        float y1Ndc = -((obj.y1 / height) * 2.0f - 1.0f);
+        float x2Ndc = (obj.x2 / width) * 2.0f - 1.0f;
+        float y2Ndc = -((obj.y2 / height) * 2.0f - 1.0f);
+
+        // Calculate line thickness in NDC
+        float thicknessX = (obj.lineThickness / width) * 2.0f;
+        float thicknessY = (obj.lineThickness / height) * 2.0f;
+
+        // Calculate perpendicular direction
+        float dx = x2Ndc - x1Ndc;
+        float dy = y2Ndc - y1Ndc;
+        float len = sqrt(dx*dx + dy*dy);
+        if (len < 0.0001f) len = 0.0001f;
+        float perpX = -dy / len * thicknessX / 2.0f;
+        float perpY = dx / len * thicknessY / 2.0f;
+
+        // Set base position as midpoint of line
+        obj.baseNdcX = (x1Ndc + x2Ndc) / 2.0f;
+        obj.baseNdcY = (y1Ndc + y2Ndc) / 2.0f;
+
+        // Create quad as two triangles
+        vertices.push_back({{x1Ndc - perpX, y1Ndc - perpY}});
+        vertices.push_back({{x1Ndc + perpX, y1Ndc + perpY}});
+        vertices.push_back({{x2Ndc + perpX, y2Ndc + perpY}});
+
+        vertices.push_back({{x1Ndc - perpX, y1Ndc - perpY}});
+        vertices.push_back({{x2Ndc + perpX, y2Ndc + perpY}});
+        vertices.push_back({{x2Ndc - perpX, y2Ndc - perpY}});
+
+        return vertices;
+    }
+
+    std::vector<ShapeVertex> generateTriangleVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Equilateral triangle with given size (side length)
+        float halfBaseNdc = (obj.size / 2.0f / width) * 2.0f;
+        float heightNdc = (obj.size * 0.866f / height) * 2.0f;  // sqrt(3)/2 ≈ 0.866
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + halfBaseNdc; centerY =  1.0f - heightNdc/2; break;
+                case Position::TOP:    centerX =  0.0f;               centerY =  1.0f - heightNdc/2; break;
+                case Position::TRIGHT: centerX =  1.0f - halfBaseNdc; centerY =  1.0f - heightNdc/2; break;
+                case Position::LEFT:   centerX = -1.0f + halfBaseNdc; centerY =  0.0f;               break;
+                case Position::CENTER: centerX =  0.0f;               centerY =  0.0f;               break;
+                case Position::RIGHT:  centerX =  1.0f - halfBaseNdc; centerY =  0.0f;               break;
+                case Position::BLEFT:  centerX = -1.0f + halfBaseNdc; centerY = -1.0f + heightNdc/2; break;
+                case Position::BOTTOM: centerX =  0.0f;               centerY = -1.0f + heightNdc/2; break;
+                case Position::BRIGHT: centerX =  1.0f - halfBaseNdc; centerY = -1.0f + heightNdc/2; break;
+                default:               centerX =  0.0f;               centerY =  0.0f;               break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Triangle vertices (pointing up, centered at centerX, centerY)
+        float topY = centerY + heightNdc * 2.0f / 3.0f;
+        float bottomY = centerY - heightNdc / 3.0f;
+
+        vertices.push_back({{centerX, topY}});                           // Top vertex
+        vertices.push_back({{centerX - halfBaseNdc, bottomY}});          // Bottom-left
+        vertices.push_back({{centerX + halfBaseNdc, bottomY}});          // Bottom-right
+
+        return vertices;
+    }
+
+    std::vector<ShapeVertex> generateArrowVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert line endpoints from pixels to NDC
+        float x1Ndc = (obj.x1 / width) * 2.0f - 1.0f;
+        float y1Ndc = -((obj.y1 / height) * 2.0f - 1.0f);
+        float x2Ndc = (obj.x2 / width) * 2.0f - 1.0f;
+        float y2Ndc = -((obj.y2 / height) * 2.0f - 1.0f);
+
+        // Calculate direction vector
+        float dx = x2Ndc - x1Ndc;
+        float dy = y2Ndc - y1Ndc;
+        float len = sqrt(dx*dx + dy*dy);
+        if (len < 0.0001f) len = 0.0001f;
+        float dirX = dx / len;
+        float dirY = dy / len;
+
+        // Perpendicular direction for thickness
+        float perpX = -dirY;
+        float perpY = dirX;
+
+        // Convert dimensions to NDC
+        float headLenNdc = (obj.arrowHeadLength / width) * 2.0f;
+        float headWidthNdc = (obj.arrowHeadWidth / width) * 2.0f;
+        float thicknessNdcX = (obj.lineThickness / width) * 2.0f / 2.0f;
+        float thicknessNdcY = (obj.lineThickness / height) * 2.0f / 2.0f;
+
+        // Shaft ends at arrowhead base
+        float shaftEndX = x2Ndc - dirX * headLenNdc;
+        float shaftEndY = y2Ndc - dirY * headLenNdc;
+
+        // Shaft quad (2 triangles = 6 vertices)
+        vertices.push_back({{x1Ndc + perpX * thicknessNdcX, y1Ndc + perpY * thicknessNdcY}});
+        vertices.push_back({{x1Ndc - perpX * thicknessNdcX, y1Ndc - perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX - perpX * thicknessNdcX, shaftEndY - perpY * thicknessNdcY}});
+
+        vertices.push_back({{x1Ndc + perpX * thicknessNdcX, y1Ndc + perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX - perpX * thicknessNdcX, shaftEndY - perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX + perpX * thicknessNdcX, shaftEndY + perpY * thicknessNdcY}});
+
+        // Arrowhead triangle (3 vertices) - tip at x2,y2
+        float halfHeadWidth = headWidthNdc / 2.0f;
+        vertices.push_back({{x2Ndc, y2Ndc}});  // Tip
+        vertices.push_back({{shaftEndX - perpX * halfHeadWidth, shaftEndY - perpY * halfHeadWidth}});
+        vertices.push_back({{shaftEndX + perpX * halfHeadWidth, shaftEndY + perpY * halfHeadWidth}});
+
+        // Set base position as midpoint
+        obj.baseNdcX = (x1Ndc + x2Ndc) / 2.0f;
+        obj.baseNdcY = (y1Ndc + y2Ndc) / 2.0f;
+
+        return vertices;
+    }
+
+    std::vector<ShapeVertex> generateArcVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert radius from pixels to NDC
+        float ndcRadiusX = (obj.radius / width) * 2.0f;
+        float ndcRadiusY = (obj.radius / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            // Anchor positioning
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcRadiusY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcRadiusX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcRadiusX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcRadiusY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Convert angles from degrees to radians
+        float startRad = obj.arcStartAngle * 3.14159265f / 180.0f;
+        float endRad = obj.arcEndAngle * 3.14159265f / 180.0f;
+
+        // Calculate number of segments based on angle range
+        float angleRange = std::abs(endRad - startRad);
+        int segments = std::max(8, static_cast<int>(angleRange / (2.0f * 3.14159265f) * 64.0f));
+
+        // Generate triangle fan for arc (center + segments)
+        for (int i = 0; i < segments; i++) {
+            float t1 = static_cast<float>(i) / segments;
+            float t2 = static_cast<float>(i + 1) / segments;
+            float angle1 = startRad + t1 * (endRad - startRad);
+            float angle2 = startRad + t2 * (endRad - startRad);
+
+            // Triangle: center, point1, point2
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle1), centerY + ndcRadiusY * sin(angle1)}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle2), centerY + ndcRadiusY * sin(angle2)}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for Ellipse (like circle but with separate X/Y radii)
+    std::vector<ShapeVertex> generateEllipseVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+        const int segments = 64;
+
+        // Convert radii from pixels to NDC
+        float ndcRadiusX = (obj.radiusX / width) * 2.0f;
+        float ndcRadiusY = (obj.radiusY / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcRadiusY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcRadiusX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcRadiusX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcRadiusY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate triangle fan
+        for (int i = 0; i < segments; i++) {
+            float angle1 = (static_cast<float>(i) / segments) * 2.0f * 3.14159265f;
+            float angle2 = (static_cast<float>(i + 1) / segments) * 2.0f * 3.14159265f;
+
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle1), centerY + ndcRadiusY * sin(angle1)}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle2), centerY + ndcRadiusY * sin(angle2)}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for Dot (small circle)
+    std::vector<ShapeVertex> generateDotVertices(ShapeObject& obj) {
+        // Dot is just a small circle, reuse circle logic
+        std::vector<ShapeVertex> vertices;
+        const int segments = 32;  // Fewer segments for small dot
+
+        // Convert radius from pixels to NDC
+        float ndcRadiusX = (obj.radius / width) * 2.0f;
+        float ndcRadiusY = (obj.radius / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcRadiusY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcRadiusX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcRadiusX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcRadiusY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate triangle fan
+        for (int i = 0; i < segments; i++) {
+            float angle1 = (static_cast<float>(i) / segments) * 2.0f * 3.14159265f;
+            float angle2 = (static_cast<float>(i + 1) / segments) * 2.0f * 3.14159265f;
+
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle1), centerY + ndcRadiusY * sin(angle1)}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle2), centerY + ndcRadiusY * sin(angle2)}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for arbitrary Polygon
+    std::vector<ShapeVertex> generatePolygonVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        if (obj.polygonVerticesX.size() < 3 || obj.polygonVerticesX.size() != obj.polygonVerticesY.size()) {
+            return vertices;  // Need at least 3 vertices
+        }
+
+        // Calculate centroid for positioning
+        float centroidX = 0.0f, centroidY = 0.0f;
+        for (size_t i = 0; i < obj.polygonVerticesX.size(); i++) {
+            centroidX += obj.polygonVerticesX[i];
+            centroidY += obj.polygonVerticesY[i];
+        }
+        centroidX /= obj.polygonVerticesX.size();
+        centroidY /= obj.polygonVerticesY.size();
+
+        // Calculate center position for the polygon
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            // For anchor positioning, calculate bounds first
+            float minX = obj.polygonVerticesX[0], maxX = obj.polygonVerticesX[0];
+            float minY = obj.polygonVerticesY[0], maxY = obj.polygonVerticesY[0];
+            for (size_t i = 1; i < obj.polygonVerticesX.size(); i++) {
+                minX = std::min(minX, obj.polygonVerticesX[i]);
+                maxX = std::max(maxX, obj.polygonVerticesX[i]);
+                minY = std::min(minY, obj.polygonVerticesY[i]);
+                maxY = std::max(maxY, obj.polygonVerticesY[i]);
+            }
+            float halfW = ((maxX - minX) / width);
+            float halfH = ((maxY - minY) / height);
+
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + halfW; centerY =  1.0f - halfH; break;
+                case Position::TOP:    centerX =  0.0f;         centerY =  1.0f - halfH; break;
+                case Position::TRIGHT: centerX =  1.0f - halfW; centerY =  1.0f - halfH; break;
+                case Position::LEFT:   centerX = -1.0f + halfW; centerY =  0.0f;         break;
+                case Position::CENTER: centerX =  0.0f;         centerY =  0.0f;         break;
+                case Position::RIGHT:  centerX =  1.0f - halfW; centerY =  0.0f;         break;
+                case Position::BLEFT:  centerX = -1.0f + halfW; centerY = -1.0f + halfH; break;
+                case Position::BOTTOM: centerX =  0.0f;         centerY = -1.0f + halfH; break;
+                case Position::BRIGHT: centerX =  1.0f - halfW; centerY = -1.0f + halfH; break;
+                default:               centerX =  0.0f;         centerY =  0.0f;         break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Convert vertices to NDC and offset from centroid to center position
+        std::vector<float> ndcX, ndcY;
+        for (size_t i = 0; i < obj.polygonVerticesX.size(); i++) {
+            float px = obj.polygonVerticesX[i] - centroidX;
+            float py = obj.polygonVerticesY[i] - centroidY;
+            ndcX.push_back(centerX + (px / width) * 2.0f);
+            ndcY.push_back(centerY - (py / height) * 2.0f);
+        }
+
+        // Triangle fan from center
+        for (size_t i = 0; i < ndcX.size(); i++) {
+            size_t next = (i + 1) % ndcX.size();
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{ndcX[i], ndcY[i]}});
+            vertices.push_back({{ndcX[next], ndcY[next]}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for Regular Polygon (N-sided equilateral)
+    std::vector<ShapeVertex> generateRegularPolygonVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        if (obj.numSides < 3) obj.numSides = 3;
+
+        // Convert circumradius from pixels to NDC
+        float ndcRadiusX = (obj.circumradius / width) * 2.0f;
+        float ndcRadiusY = (obj.circumradius / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcRadiusY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcRadiusX; centerY =  1.0f - ndcRadiusY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcRadiusX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcRadiusX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcRadiusY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcRadiusX; centerY = -1.0f + ndcRadiusY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate triangle fan for regular polygon
+        for (int i = 0; i < obj.numSides; i++) {
+            float angle1 = (static_cast<float>(i) / obj.numSides) * 2.0f * 3.14159265f - 3.14159265f / 2.0f;
+            float angle2 = (static_cast<float>(i + 1) / obj.numSides) * 2.0f * 3.14159265f - 3.14159265f / 2.0f;
+
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle1), centerY + ndcRadiusY * sin(angle1)}});
+            vertices.push_back({{centerX + ndcRadiusX * cos(angle2), centerY + ndcRadiusY * sin(angle2)}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for Star
+    std::vector<ShapeVertex> generateStarVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        if (obj.numPoints < 3) obj.numPoints = 3;
+
+        // Convert radii from pixels to NDC
+        float ndcOuterX = (obj.outerRadius / width) * 2.0f;
+        float ndcOuterY = (obj.outerRadius / height) * 2.0f;
+        float ndcInnerX = (obj.innerRadius / width) * 2.0f;
+        float ndcInnerY = (obj.innerRadius / height) * 2.0f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + ndcOuterX; centerY =  1.0f - ndcOuterY; break;
+                case Position::TOP:    centerX =  0.0f;              centerY =  1.0f - ndcOuterY; break;
+                case Position::TRIGHT: centerX =  1.0f - ndcOuterX; centerY =  1.0f - ndcOuterY; break;
+                case Position::LEFT:   centerX = -1.0f + ndcOuterX; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;              centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - ndcOuterX; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + ndcOuterX; centerY = -1.0f + ndcOuterY; break;
+                case Position::BOTTOM: centerX =  0.0f;              centerY = -1.0f + ndcOuterY; break;
+                case Position::BRIGHT: centerX =  1.0f - ndcOuterX; centerY = -1.0f + ndcOuterY; break;
+                default:               centerX =  0.0f;              centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate star vertices (alternating outer/inner points)
+        int totalPoints = obj.numPoints * 2;
+        std::vector<float> starX, starY;
+        for (int i = 0; i < totalPoints; i++) {
+            float angle = (static_cast<float>(i) / totalPoints) * 2.0f * 3.14159265f - 3.14159265f / 2.0f;
+            if (i % 2 == 0) {
+                // Outer point
+                starX.push_back(centerX + ndcOuterX * cos(angle));
+                starY.push_back(centerY + ndcOuterY * sin(angle));
+            } else {
+                // Inner point
+                starX.push_back(centerX + ndcInnerX * cos(angle));
+                starY.push_back(centerY + ndcInnerY * sin(angle));
+            }
+        }
+
+        // Triangle fan from center
+        for (int i = 0; i < totalPoints; i++) {
+            int next = (i + 1) % totalPoints;
+            vertices.push_back({{centerX, centerY}});
+            vertices.push_back({{starX[i], starY[i]}});
+            vertices.push_back({{starX[next], starY[next]}});
+        }
+
+        return vertices;
+    }
+
+    // Generate vertices for Double Arrow
+    std::vector<ShapeVertex> generateDoubleArrowVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert endpoints to NDC
+        float ndcX1 = (obj.x1 / width) * 2.0f - 1.0f;
+        float ndcY1 = -((obj.y1 / height) * 2.0f - 1.0f);
+        float ndcX2 = (obj.x2 / width) * 2.0f - 1.0f;
+        float ndcY2 = -((obj.y2 / height) * 2.0f - 1.0f);
+
+        // Direction vector
+        float dx = ndcX2 - ndcX1;
+        float dy = ndcY2 - ndcY1;
+        float len = sqrt(dx * dx + dy * dy);
+        if (len < 0.0001f) return vertices;
+
+        // Normalize direction
+        float dirX = dx / len;
+        float dirY = dy / len;
+
+        // Perpendicular vector for thickness
+        float perpX = -dirY;
+        float perpY = dirX;
+
+        // Convert thickness and head dimensions to NDC
+        float halfThickness = (obj.lineThickness / 2.0f / width) * 2.0f;
+        float headLen = (obj.arrowHeadLength / width) * 2.0f;
+        float headWidth = (obj.arrowHeadWidth / 2.0f / width) * 2.0f;
+
+        // Store center for baseNdc
+        obj.baseNdcX = (ndcX1 + ndcX2) / 2.0f;
+        obj.baseNdcY = (ndcY1 + ndcY2) / 2.0f;
+
+        // Shaft endpoints (shortened to leave room for both heads)
+        float shaftStart1X = ndcX1 + dirX * headLen;
+        float shaftStart1Y = ndcY1 + dirY * headLen;
+        float shaftEnd2X = ndcX2 - dirX * headLen;
+        float shaftEnd2Y = ndcY2 - dirY * headLen;
+
+        // Shaft quad (2 triangles)
+        vertices.push_back({{shaftStart1X + perpX * halfThickness, shaftStart1Y + perpY * halfThickness}});
+        vertices.push_back({{shaftStart1X - perpX * halfThickness, shaftStart1Y - perpY * halfThickness}});
+        vertices.push_back({{shaftEnd2X + perpX * halfThickness, shaftEnd2Y + perpY * halfThickness}});
+
+        vertices.push_back({{shaftEnd2X + perpX * halfThickness, shaftEnd2Y + perpY * halfThickness}});
+        vertices.push_back({{shaftStart1X - perpX * halfThickness, shaftStart1Y - perpY * halfThickness}});
+        vertices.push_back({{shaftEnd2X - perpX * halfThickness, shaftEnd2Y - perpY * halfThickness}});
+
+        // Arrowhead 1 at (x1, y1) pointing backward
+        float head1BaseX = shaftStart1X;
+        float head1BaseY = shaftStart1Y;
+        vertices.push_back({{ndcX1, ndcY1}});  // Tip
+        vertices.push_back({{head1BaseX + perpX * headWidth, head1BaseY + perpY * headWidth}});
+        vertices.push_back({{head1BaseX - perpX * headWidth, head1BaseY - perpY * headWidth}});
+
+        // Arrowhead 2 at (x2, y2) pointing forward
+        float head2BaseX = shaftEnd2X;
+        float head2BaseY = shaftEnd2Y;
+        vertices.push_back({{ndcX2, ndcY2}});  // Tip
+        vertices.push_back({{head2BaseX - perpX * headWidth, head2BaseY - perpY * headWidth}});
+        vertices.push_back({{head2BaseX + perpX * headWidth, head2BaseY + perpY * headWidth}});
+
+        return vertices;
+    }
+
+    // Generate vertices for Brace (curly brace shape)
+    std::vector<ShapeVertex> generateBraceVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert dimensions to NDC
+        float halfHeight = (obj.braceHeight / 2.0f / height) * 2.0f;
+        float braceWidthNdc = (obj.braceWidth / width) * 2.0f;
+        float thickness = (obj.lineThickness / width) * 2.0f;
+        if (thickness < 0.002f) thickness = 0.002f;
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + braceWidthNdc; centerY =  1.0f - halfHeight; break;
+                case Position::TOP:    centerX =  0.0f;                  centerY =  1.0f - halfHeight; break;
+                case Position::TRIGHT: centerX =  1.0f - braceWidthNdc; centerY =  1.0f - halfHeight; break;
+                case Position::LEFT:   centerX = -1.0f + braceWidthNdc; centerY =  0.0f;              break;
+                case Position::CENTER: centerX =  0.0f;                  centerY =  0.0f;              break;
+                case Position::RIGHT:  centerX =  1.0f - braceWidthNdc; centerY =  0.0f;              break;
+                case Position::BLEFT:  centerX = -1.0f + braceWidthNdc; centerY = -1.0f + halfHeight; break;
+                case Position::BOTTOM: centerX =  0.0f;                  centerY = -1.0f + halfHeight; break;
+                case Position::BRIGHT: centerX =  1.0f - braceWidthNdc; centerY = -1.0f + halfHeight; break;
+                default:               centerX =  0.0f;                  centerY =  0.0f;              break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Flip direction if needed
+        float xDir = obj.braceFlipped ? -1.0f : 1.0f;
+
+        // Generate brace as a series of line segments forming an S-curve
+        // Brace shape: two cubic bezier-like curves meeting at center point
+        const int segments = 16;
+
+        auto generateCurveQuads = [&](float startY, float endY, float startX, float midX, float endX) {
+            for (int i = 0; i < segments; i++) {
+                float t1 = static_cast<float>(i) / segments;
+                float t2 = static_cast<float>(i + 1) / segments;
+
+                // Cubic bezier approximation
+                auto bezierX = [&](float t, float p0, float p1, float p2, float p3) {
+                    float u = 1 - t;
+                    return u*u*u*p0 + 3*u*u*t*p1 + 3*u*t*t*p2 + t*t*t*p3;
+                };
+                auto bezierY = [&](float t, float p0, float p1, float p2, float p3) {
+                    float u = 1 - t;
+                    return u*u*u*p0 + 3*u*u*t*p1 + 3*u*t*t*p2 + t*t*t*p3;
+                };
+
+                float x1 = centerX + xDir * bezierX(t1, startX, startX, midX, midX);
+                float y1 = centerY + bezierY(t1, startY, startY + (endY-startY)*0.5f, startY + (endY-startY)*0.5f, endY);
+                float x2 = centerX + xDir * bezierX(t2, startX, startX, midX, midX);
+                float y2 = centerY + bezierY(t2, startY, startY + (endY-startY)*0.5f, startY + (endY-startY)*0.5f, endY);
+
+                // Direction for perpendicular
+                float dx = x2 - x1;
+                float dy = y2 - y1;
+                float len = sqrt(dx*dx + dy*dy);
+                if (len < 0.0001f) continue;
+                float perpX = -dy / len * thickness / 2;
+                float perpY = dx / len * thickness / 2;
+
+                vertices.push_back({{x1 + perpX, y1 + perpY}});
+                vertices.push_back({{x1 - perpX, y1 - perpY}});
+                vertices.push_back({{x2 + perpX, y2 + perpY}});
+
+                vertices.push_back({{x2 + perpX, y2 + perpY}});
+                vertices.push_back({{x1 - perpX, y1 - perpY}});
+                vertices.push_back({{x2 - perpX, y2 - perpY}});
+            }
+        };
+
+        // Top curve: from top to center tip
+        generateCurveQuads(halfHeight, 0.0f, 0.0f, braceWidthNdc, braceWidthNdc);
+        // Bottom curve: from center tip to bottom
+        generateCurveQuads(0.0f, -halfHeight, braceWidthNdc, braceWidthNdc, 0.0f);
+
+        return vertices;
+    }
+
+    // Generate vertices for Rounded Rectangle
+    std::vector<ShapeVertex> generateRoundedRectangleVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+
+        // Convert dimensions to NDC
+        float halfW = (obj.width / 2.0f / width) * 2.0f;
+        float halfH = (obj.height / 2.0f / height) * 2.0f;
+        float cornerR_X = (obj.cornerRadius / width) * 2.0f;
+        float cornerR_Y = (obj.cornerRadius / height) * 2.0f;
+
+        // Clamp corner radius to not exceed half the smaller dimension
+        cornerR_X = std::min(cornerR_X, halfW);
+        cornerR_Y = std::min(cornerR_Y, halfH);
+
+        // Calculate center position
+        float centerX, centerY;
+        if (obj.usePixelPosition) {
+            centerX = (obj.posX / width) * 2.0f - 1.0f;
+            centerY = -((obj.posY / height) * 2.0f - 1.0f);
+        } else {
+            switch (obj.anchor) {
+                case Position::TLEFT:  centerX = -1.0f + halfW; centerY =  1.0f - halfH; break;
+                case Position::TOP:    centerX =  0.0f;         centerY =  1.0f - halfH; break;
+                case Position::TRIGHT: centerX =  1.0f - halfW; centerY =  1.0f - halfH; break;
+                case Position::LEFT:   centerX = -1.0f + halfW; centerY =  0.0f;         break;
+                case Position::CENTER: centerX =  0.0f;         centerY =  0.0f;         break;
+                case Position::RIGHT:  centerX =  1.0f - halfW; centerY =  0.0f;         break;
+                case Position::BLEFT:  centerX = -1.0f + halfW; centerY = -1.0f + halfH; break;
+                case Position::BOTTOM: centerX =  0.0f;         centerY = -1.0f + halfH; break;
+                case Position::BRIGHT: centerX =  1.0f - halfW; centerY = -1.0f + halfH; break;
+                default:               centerX =  0.0f;         centerY =  0.0f;         break;
+            }
+        }
+        obj.baseNdcX = centerX;
+        obj.baseNdcY = centerY;
+
+        // Generate rounded rectangle using triangle fan from center
+        const int cornerSegments = 8;
+
+        // Helper to add corner arc
+        auto addCornerArc = [&](float cx, float cy, float startAngle, float endAngle) {
+            for (int i = 0; i < cornerSegments; i++) {
+                float t1 = static_cast<float>(i) / cornerSegments;
+                float t2 = static_cast<float>(i + 1) / cornerSegments;
+                float a1 = startAngle + t1 * (endAngle - startAngle);
+                float a2 = startAngle + t2 * (endAngle - startAngle);
+
+                vertices.push_back({{centerX, centerY}});
+                vertices.push_back({{cx + cornerR_X * cos(a1), cy + cornerR_Y * sin(a1)}});
+                vertices.push_back({{cx + cornerR_X * cos(a2), cy + cornerR_Y * sin(a2)}});
+            }
+        };
+
+        // Top-right corner
+        addCornerArc(centerX + halfW - cornerR_X, centerY + halfH - cornerR_Y, 0, 3.14159265f / 2.0f);
+        // Top-left corner
+        addCornerArc(centerX - halfW + cornerR_X, centerY + halfH - cornerR_Y, 3.14159265f / 2.0f, 3.14159265f);
+        // Bottom-left corner
+        addCornerArc(centerX - halfW + cornerR_X, centerY - halfH + cornerR_Y, 3.14159265f, 3.14159265f * 1.5f);
+        // Bottom-right corner
+        addCornerArc(centerX + halfW - cornerR_X, centerY - halfH + cornerR_Y, 3.14159265f * 1.5f, 3.14159265f * 2.0f);
+
+        // Add rectangular sections connecting corners (as triangle fans from center)
+        // Top edge
+        vertices.push_back({{centerX, centerY}});
+        vertices.push_back({{centerX - halfW + cornerR_X, centerY + halfH}});
+        vertices.push_back({{centerX + halfW - cornerR_X, centerY + halfH}});
+
+        // Right edge
+        vertices.push_back({{centerX, centerY}});
+        vertices.push_back({{centerX + halfW, centerY + halfH - cornerR_Y}});
+        vertices.push_back({{centerX + halfW, centerY - halfH + cornerR_Y}});
+
+        // Bottom edge
+        vertices.push_back({{centerX, centerY}});
+        vertices.push_back({{centerX + halfW - cornerR_X, centerY - halfH}});
+        vertices.push_back({{centerX - halfW + cornerR_X, centerY - halfH}});
+
+        // Left edge
+        vertices.push_back({{centerX, centerY}});
+        vertices.push_back({{centerX - halfW, centerY - halfH + cornerR_Y}});
+        vertices.push_back({{centerX - halfW, centerY + halfH - cornerR_Y}});
+
+        return vertices;
+    }
+
+    // Generate cubic bezier curve vertices as a line strip (rendered with line thickness)
+    std::vector<ShapeVertex> generateCubicBezierVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+        const int segments = 64;
+
+        // Generate line strip vertices with thickness
+        std::vector<std::pair<float, float>> curvePoints;
+        for (int i = 0; i <= segments; i++) {
+            float t = i / (float)segments;
+            float u = 1.0f - t;
+
+            // Cubic bezier formula: B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3
+            float x = u*u*u*obj.bezierP0X + 3.0f*u*u*t*obj.bezierP1X +
+                      3.0f*u*t*t*obj.bezierP2X + t*t*t*obj.bezierP3X;
+            float y = u*u*u*obj.bezierP0Y + 3.0f*u*u*t*obj.bezierP1Y +
+                      3.0f*u*t*t*obj.bezierP2Y + t*t*t*obj.bezierP3Y;
+
+            // Convert to NDC
+            float ndcX = (x / width) * 2.0f - 1.0f;
+            float ndcY = (y / height) * 2.0f - 1.0f;
+            curvePoints.push_back({ndcX, ndcY});
+        }
+
+        // Generate thick line strip using quads (2 triangles per segment)
+        float thickness = obj.lineThickness;
+        float halfThick = (thickness / width);  // Convert pixel thickness to NDC
+
+        for (size_t i = 0; i < curvePoints.size() - 1; i++) {
+            float x1 = curvePoints[i].first;
+            float y1 = curvePoints[i].second;
+            float x2 = curvePoints[i + 1].first;
+            float y2 = curvePoints[i + 1].second;
+
+            // Calculate perpendicular direction for line width
+            float dx = x2 - x1;
+            float dy = y2 - y1;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 0.0001f) continue;
+
+            float nx = -dy / len * halfThick;
+            float ny = dx / len * halfThick;
+
+            // Two triangles forming a quad for this segment
+            vertices.push_back({{x1 - nx, y1 - ny}});
+            vertices.push_back({{x1 + nx, y1 + ny}});
+            vertices.push_back({{x2 + nx, y2 + ny}});
+
+            vertices.push_back({{x1 - nx, y1 - ny}});
+            vertices.push_back({{x2 + nx, y2 + ny}});
+            vertices.push_back({{x2 - nx, y2 - ny}});
+        }
+
+        return vertices;
+    }
+
+    // Generate custom path vertices from PathCommand list
+    std::vector<ShapeVertex> generateCustomPathVertices(ShapeObject& obj) {
+        std::vector<ShapeVertex> vertices;
+        if (obj.pathCommands.empty()) return vertices;
+
+        // First pass: generate curve points from path commands
+        std::vector<std::pair<float, float>> pathPoints;
+        float currentX = 0.0f, currentY = 0.0f;
+        float startX = 0.0f, startY = 0.0f;  // For close command
+
+        for (const auto& cmd : obj.pathCommands) {
+            switch (cmd.type) {
+                case PathCommandType::MoveTo:
+                    currentX = cmd.x;
+                    currentY = cmd.y;
+                    startX = currentX;
+                    startY = currentY;
+                    {
+                        float ndcX = (currentX / width) * 2.0f - 1.0f;
+                        float ndcY = (currentY / height) * 2.0f - 1.0f;
+                        pathPoints.push_back({ndcX, ndcY});
+                    }
+                    break;
+
+                case PathCommandType::LineTo:
+                    currentX = cmd.x;
+                    currentY = cmd.y;
+                    {
+                        float ndcX = (currentX / width) * 2.0f - 1.0f;
+                        float ndcY = (currentY / height) * 2.0f - 1.0f;
+                        pathPoints.push_back({ndcX, ndcY});
+                    }
+                    break;
+
+                case PathCommandType::CurveTo: {
+                    // Generate bezier curve points
+                    const int segments = 32;
+                    for (int i = 1; i <= segments; i++) {
+                        float t = i / (float)segments;
+                        float u = 1.0f - t;
+
+                        // Cubic bezier: P0=current, P1=ctrl1, P2=ctrl2, P3=target
+                        float x = u*u*u*currentX + 3.0f*u*u*t*cmd.cx1 +
+                                  3.0f*u*t*t*cmd.cx2 + t*t*t*cmd.x;
+                        float y = u*u*u*currentY + 3.0f*u*u*t*cmd.cy1 +
+                                  3.0f*u*t*t*cmd.cy2 + t*t*t*cmd.y;
+
+                        float ndcX = (x / width) * 2.0f - 1.0f;
+                        float ndcY = (y / height) * 2.0f - 1.0f;
+                        pathPoints.push_back({ndcX, ndcY});
+                    }
+                    currentX = cmd.x;
+                    currentY = cmd.y;
+                    break;
+                }
+
+                case PathCommandType::Close:
+                    if (std::abs(currentX - startX) > 0.001f || std::abs(currentY - startY) > 0.001f) {
+                        float ndcX = (startX / width) * 2.0f - 1.0f;
+                        float ndcY = (startY / height) * 2.0f - 1.0f;
+                        pathPoints.push_back({ndcX, ndcY});
+                    }
+                    currentX = startX;
+                    currentY = startY;
+                    break;
+            }
+        }
+
+        if (pathPoints.size() < 2) return vertices;
+
+        // Second pass: convert path to thick line strip
+        float thickness = obj.lineThickness > 0 ? obj.lineThickness : 2.0f;
+        float halfThick = (thickness / width);
+
+        for (size_t i = 0; i < pathPoints.size() - 1; i++) {
+            float x1 = pathPoints[i].first;
+            float y1 = pathPoints[i].second;
+            float x2 = pathPoints[i + 1].first;
+            float y2 = pathPoints[i + 1].second;
+
+            float dx = x2 - x1;
+            float dy = y2 - y1;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 0.0001f) continue;
+
+            float nx = -dy / len * halfThick;
+            float ny = dx / len * halfThick;
+
+            // Two triangles forming a quad for this segment
+            vertices.push_back({{x1 - nx, y1 - ny}});
+            vertices.push_back({{x1 + nx, y1 + ny}});
+            vertices.push_back({{x2 + nx, y2 + ny}});
+
+            vertices.push_back({{x1 - nx, y1 - ny}});
+            vertices.push_back({{x2 + nx, y2 + ny}});
+            vertices.push_back({{x2 - nx, y2 - ny}});
+        }
+
+        return vertices;
+    }
+
+    void rebuildShapeVertexBuffer() {
+        std::vector<ShapeVertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        for (auto& shapeObj : shapeObjects) {
+            if (shapeObj.cleared) {
+                shapeObj.vertexCount = 0;  // Skip cleared elements
+                continue;
+            }
+
+            std::vector<ShapeVertex> vertices;
+            switch (shapeObj.type) {
+                case ShapeType::Circle:
+                    vertices = generateCircleVertices(shapeObj);
+                    break;
+                case ShapeType::Rectangle:
+                    vertices = generateRectangleVertices(shapeObj);
+                    break;
+                case ShapeType::Line:
+                    vertices = generateLineVertices(shapeObj);
+                    break;
+                case ShapeType::Triangle:
+                    vertices = generateTriangleVertices(shapeObj);
+                    break;
+                case ShapeType::Arrow:
+                    vertices = generateArrowVertices(shapeObj);
+                    break;
+                case ShapeType::Arc:
+                    vertices = generateArcVertices(shapeObj);
+                    break;
+                case ShapeType::Ellipse:
+                    vertices = generateEllipseVertices(shapeObj);
+                    break;
+                case ShapeType::Dot:
+                    vertices = generateDotVertices(shapeObj);
+                    break;
+                case ShapeType::Polygon:
+                    vertices = generatePolygonVertices(shapeObj);
+                    break;
+                case ShapeType::RegularPolygon:
+                    vertices = generateRegularPolygonVertices(shapeObj);
+                    break;
+                case ShapeType::Star:
+                    vertices = generateStarVertices(shapeObj);
+                    break;
+                case ShapeType::DoubleArrow:
+                    vertices = generateDoubleArrowVertices(shapeObj);
+                    break;
+                case ShapeType::Brace:
+                    vertices = generateBraceVertices(shapeObj);
+                    break;
+                case ShapeType::RoundedRectangle:
+                    vertices = generateRoundedRectangleVertices(shapeObj);
+                    break;
+                case ShapeType::CubicBezier:
+                    vertices = generateCubicBezierVertices(shapeObj);
+                    break;
+                case ShapeType::CustomPath:
+                    vertices = generateCustomPathVertices(shapeObj);
+                    break;
+            }
+            shapeObj.vertexOffset = currentOffset;
+            shapeObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += shapeObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+        }
+
+        shapeVertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (shapeVertexCount == 0) {
+            shapeVertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(ShapeVertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (shapeVertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, shapeVertexBuffer, nullptr);
+            vkFreeMemory(device, shapeVertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            shapeVertexBuffer, shapeVertexBufferMemory);
+
+        copyBuffer(stagingBuffer, shapeVertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        shapeVertexBufferDirty = false;
+        std::cout << "Shape vertex buffer rebuilt with " << shapeVertexCount << " vertices for " << shapeObjects.size() << " shape(s)!\n";
+    }
+
+    std::vector<ShapeVertex> generateGraphVertices(GraphObject& graph) {
+        std::vector<ShapeVertex> vertices;
+
+        if (graph.xData.size() < 2 || graph.axesIndex >= axesObjects.size()) {
+            return vertices;
+        }
+
+        const AxesObject& axes = axesObjects[graph.axesIndex];
+
+        // Generate line segments connecting data points
+        for (size_t i = 0; i < graph.xData.size() - 1; i++) {
+            float x1Pixel = dataToPixelX(graph.xData[i], axes);
+            float y1Pixel = dataToPixelY(graph.yData[i], axes);
+            float x2Pixel = dataToPixelX(graph.xData[i+1], axes);
+            float y2Pixel = dataToPixelY(graph.yData[i+1], axes);
+
+            // Convert to NDC
+            float x1Ndc = (x1Pixel / width) * 2.0f - 1.0f;
+            float y1Ndc = -((y1Pixel / height) * 2.0f - 1.0f);
+            float x2Ndc = (x2Pixel / width) * 2.0f - 1.0f;
+            float y2Ndc = -((y2Pixel / height) * 2.0f - 1.0f);
+
+            // Calculate direction and perpendicular
+            float dx = x2Ndc - x1Ndc;
+            float dy = y2Ndc - y1Ndc;
+            float len = sqrt(dx*dx + dy*dy);
+            if (len < 0.0001f) continue;  // Skip zero-length segments
+
+            float dirX = dx / len;
+            float dirY = dy / len;
+            float perpX = -dirY;
+            float perpY = dirX;
+
+            // Thickness in NDC
+            float thicknessX = (graph.lineThickness / width) * 2.0f / 2.0f;
+            float thicknessY = (graph.lineThickness / height) * 2.0f / 2.0f;
+
+            // Create quad as two triangles
+            vertices.push_back({{x1Ndc - perpX * thicknessX, y1Ndc - perpY * thicknessY}});
+            vertices.push_back({{x1Ndc + perpX * thicknessX, y1Ndc + perpY * thicknessY}});
+            vertices.push_back({{x2Ndc + perpX * thicknessX, y2Ndc + perpY * thicknessY}});
+
+            vertices.push_back({{x1Ndc - perpX * thicknessX, y1Ndc - perpY * thicknessY}});
+            vertices.push_back({{x2Ndc + perpX * thicknessX, y2Ndc + perpY * thicknessY}});
+            vertices.push_back({{x2Ndc - perpX * thicknessX, y2Ndc - perpY * thicknessY}});
+        }
+
+        // Calculate center for animation base position
+        if (!graph.xData.empty()) {
+            float midIdx = graph.xData.size() / 2;
+            float midX = dataToPixelX(graph.xData[midIdx], axes);
+            float midY = dataToPixelY(graph.yData[midIdx], axes);
+            graph.baseNdcX = (midX / width) * 2.0f - 1.0f;
+            graph.baseNdcY = -((midY / height) * 2.0f - 1.0f);
+        }
+
+        return vertices;
+    }
+
+    void rebuildGraphVertexBuffer() {
+        std::vector<ShapeVertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        for (auto& graphObj : graphObjects) {
+            if (graphObj.cleared) {
+                graphObj.vertexCount = 0;
+                continue;
+            }
+            std::vector<ShapeVertex> vertices = generateGraphVertices(graphObj);
+            graphObj.vertexOffset = currentOffset;
+            graphObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += graphObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+        }
+
+        graphVertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (graphVertexCount == 0) {
+            graphVertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(ShapeVertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (graphVertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, graphVertexBuffer, nullptr);
+            vkFreeMemory(device, graphVertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            graphVertexBuffer, graphVertexBufferMemory);
+
+        copyBuffer(stagingBuffer, graphVertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        graphVertexBufferDirty = false;
+        std::cout << "Graph vertex buffer rebuilt with " << graphVertexCount << " vertices for " << graphObjects.size() << " graph(s)!\n";
+    }
+
+    std::vector<ShapeVertex> generateVectorVertices(VectorObject& vec) {
+        std::vector<ShapeVertex> vertices;
+
+        if (vec.axesIndex >= axesObjects.size()) {
+            return vertices;
+        }
+
+        const AxesObject& axes = axesObjects[vec.axesIndex];
+
+        // Convert origin and endpoint from data coords to pixel coords
+        float x1Pixel = dataToPixelX(vec.originX, axes);
+        float y1Pixel = dataToPixelY(vec.originY, axes);
+        float x2Pixel = dataToPixelX(vec.originX + vec.vx, axes);
+        float y2Pixel = dataToPixelY(vec.originY + vec.vy, axes);
+
+        // Convert to NDC
+        float x1Ndc = (x1Pixel / width) * 2.0f - 1.0f;
+        float y1Ndc = -((y1Pixel / height) * 2.0f - 1.0f);
+        float x2Ndc = (x2Pixel / width) * 2.0f - 1.0f;
+        float y2Ndc = -((y2Pixel / height) * 2.0f - 1.0f);
+
+        // Calculate direction vector
+        float dx = x2Ndc - x1Ndc;
+        float dy = y2Ndc - y1Ndc;
+        float len = sqrt(dx*dx + dy*dy);
+        if (len < 0.0001f) len = 0.0001f;
+        float dirX = dx / len;
+        float dirY = dy / len;
+
+        // Perpendicular direction for thickness
+        float perpX = -dirY;
+        float perpY = dirX;
+
+        // Convert dimensions to NDC
+        float headLenNdc = (vec.headLength / width) * 2.0f;
+        float headWidthNdc = (vec.headWidth / width) * 2.0f;
+        float thicknessNdcX = (vec.lineThickness / width) * 2.0f / 2.0f;
+        float thicknessNdcY = (vec.lineThickness / height) * 2.0f / 2.0f;
+
+        // Shaft ends at arrowhead base
+        float shaftEndX = x2Ndc - dirX * headLenNdc;
+        float shaftEndY = y2Ndc - dirY * headLenNdc;
+
+        // Shaft quad (2 triangles = 6 vertices)
+        vertices.push_back({{x1Ndc + perpX * thicknessNdcX, y1Ndc + perpY * thicknessNdcY}});
+        vertices.push_back({{x1Ndc - perpX * thicknessNdcX, y1Ndc - perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX - perpX * thicknessNdcX, shaftEndY - perpY * thicknessNdcY}});
+
+        vertices.push_back({{x1Ndc + perpX * thicknessNdcX, y1Ndc + perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX - perpX * thicknessNdcX, shaftEndY - perpY * thicknessNdcY}});
+        vertices.push_back({{shaftEndX + perpX * thicknessNdcX, shaftEndY + perpY * thicknessNdcY}});
+
+        // Arrowhead triangle (3 vertices) - tip at x2,y2
+        float halfHeadWidth = headWidthNdc / 2.0f;
+        vertices.push_back({{x2Ndc, y2Ndc}});  // Tip
+        vertices.push_back({{shaftEndX - perpX * halfHeadWidth, shaftEndY - perpY * halfHeadWidth}});
+        vertices.push_back({{shaftEndX + perpX * halfHeadWidth, shaftEndY + perpY * halfHeadWidth}});
+
+        return vertices;
+    }
+
+    void rebuildVectorVertexBuffer() {
+        std::vector<ShapeVertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        for (auto& vecObj : vectorObjects) {
+            if (vecObj.cleared) {
+                vecObj.vertexCount = 0;
+                continue;
+            }
+            std::vector<ShapeVertex> vertices = generateVectorVertices(vecObj);
+            vecObj.vertexOffset = currentOffset;
+            vecObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += vecObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+        }
+
+        vectorVertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (vectorVertexCount == 0) {
+            vectorVertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(ShapeVertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (vectorVertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, vectorVertexBuffer, nullptr);
+            vkFreeMemory(device, vectorVertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            vectorVertexBuffer, vectorVertexBufferMemory);
+
+        copyBuffer(stagingBuffer, vectorVertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        vectorVertexBufferDirty = false;
+    }
+
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        VkPipelineStageFlags sourceStage;
+        VkPipelineStageFlags destinationStage;
+
+        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        } else {
+            throw std::invalid_argument("Unsupported layout transition!");
+        }
+
+        vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        endSingleTimeCommands(commandBuffer);
+    }
+
+    void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {width, height, 1};
+
+        vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        endSingleTimeCommands(commandBuffer);
+    }
+
+    VkCommandBuffer beginSingleTimeCommands() {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
+
+        VkCommandBuffer commandBuffer;
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        return commandBuffer;
+    }
+
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphicsQueue);
+
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+    }
+
+    void createDescriptorPool() {
+        // Allow for: 1 font texture + up to 1000 math textures + camera UBOs + lighting UBO
+        std::array<VkDescriptorPoolSize, 2> poolSizes{};
+
+        // For combined image samplers (font + math textures)
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[0].descriptorCount = 1001;  // 1 font + 1000 math formulas
+
+        // For uniform buffers (2D camera UBO + 3D camera UBO + lighting UBO)
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[1].descriptorCount = 3;  // 2D camera + 3D camera + lighting
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;  // Allow freeing individual sets
+        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolInfo.pPoolSizes = poolSizes.data();
+        poolInfo.maxSets = 1004;  // 1 font + 1000 math formulas + 1 2D camera + 1 3D camera + 1 lighting
+
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create descriptor pool!");
+        }
+    }
+
+    void createDescriptorSets() {
+        // Font texture descriptor set (set 0)
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &descriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate descriptor sets!");
+        }
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = fontImageView;
+        imageInfo.sampler = fontSampler;
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+        // Create camera UBO buffer (64 bytes for mat4)
+        VkDeviceSize cameraBufferSize = sizeof(float) * 16;  // mat4 = 16 floats
+        createBuffer(cameraBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     cameraUBO, cameraUBOMemory);
+
+        // Initialize camera UBO with identity matrix
+        float identityMatrix[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+        void* data;
+        vkMapMemory(device, cameraUBOMemory, 0, cameraBufferSize, 0, &data);
+        memcpy(data, identityMatrix, cameraBufferSize);
+        vkUnmapMemory(device, cameraUBOMemory);
+
+        // Camera UBO descriptor set (set 1)
+        VkDescriptorSetAllocateInfo cameraAllocInfo{};
+        cameraAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        cameraAllocInfo.descriptorPool = descriptorPool;
+        cameraAllocInfo.descriptorSetCount = 1;
+        cameraAllocInfo.pSetLayouts = &cameraDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &cameraAllocInfo, &cameraDescriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate camera descriptor set!");
+        }
+
+        VkDescriptorBufferInfo cameraBufferInfo{};
+        cameraBufferInfo.buffer = cameraUBO;
+        cameraBufferInfo.offset = 0;
+        cameraBufferInfo.range = cameraBufferSize;
+
+        VkWriteDescriptorSet cameraDescriptorWrite{};
+        cameraDescriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        cameraDescriptorWrite.dstSet = cameraDescriptorSet;
+        cameraDescriptorWrite.dstBinding = 0;
+        cameraDescriptorWrite.dstArrayElement = 0;
+        cameraDescriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        cameraDescriptorWrite.descriptorCount = 1;
+        cameraDescriptorWrite.pBufferInfo = &cameraBufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &cameraDescriptorWrite, 0, nullptr);
+
+        // Create 3D camera UBO buffer (128 bytes for 2 mat4s: view + projection)
+        VkDeviceSize camera3DBufferSize = sizeof(float) * 32;  // 2 * mat4 = 32 floats
+        createBuffer(camera3DBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     camera3DUBO, camera3DUBOMemory);
+
+        // Initialize 3D camera UBO with identity matrices for view and projection
+        float camera3DIdentity[32] = {
+            // View matrix (identity)
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f,
+            // Projection matrix (identity)
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+        void* data3D;
+        vkMapMemory(device, camera3DUBOMemory, 0, camera3DBufferSize, 0, &data3D);
+        memcpy(data3D, camera3DIdentity, camera3DBufferSize);
+        vkUnmapMemory(device, camera3DUBOMemory);
+
+        // 3D Camera UBO descriptor set
+        VkDescriptorSetAllocateInfo camera3DAllocInfo{};
+        camera3DAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        camera3DAllocInfo.descriptorPool = descriptorPool;
+        camera3DAllocInfo.descriptorSetCount = 1;
+        camera3DAllocInfo.pSetLayouts = &camera3DDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &camera3DAllocInfo, &camera3DDescriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate 3D camera descriptor set!");
+        }
+
+        VkDescriptorBufferInfo camera3DBufferInfo{};
+        camera3DBufferInfo.buffer = camera3DUBO;
+        camera3DBufferInfo.offset = 0;
+        camera3DBufferInfo.range = camera3DBufferSize;
+
+        VkWriteDescriptorSet camera3DDescriptorWrite{};
+        camera3DDescriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        camera3DDescriptorWrite.dstSet = camera3DDescriptorSet;
+        camera3DDescriptorWrite.dstBinding = 0;
+        camera3DDescriptorWrite.dstArrayElement = 0;
+        camera3DDescriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        camera3DDescriptorWrite.descriptorCount = 1;
+        camera3DDescriptorWrite.pBufferInfo = &camera3DBufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &camera3DDescriptorWrite, 0, nullptr);
+
+        // Create Lighting UBO buffer (16 vec4s = 256 bytes)
+        // Layout: ambient(4) + dirDir(4) + dirColor(4) + point0pos(4) + point0color(4) + point0atten(4)
+        //         + point1pos(4) + point1color(4) + point1atten(4) + point2pos(4) + point2color(4) + point2atten(4)
+        //         + point3pos(4) + point3color(4) + point3atten(4) + cameraPos(4) + materialProps(4) = 68 floats = 272 bytes
+        VkDeviceSize lightingBufferSize = sizeof(float) * 68;
+        createBuffer(lightingBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     lightingUBO, lightingUBOMemory);
+
+        // Initialize lighting UBO with default values
+        float lightingData[68] = {0};
+        // Ambient: white, 0.3 intensity
+        lightingData[0] = 1.0f; lightingData[1] = 1.0f; lightingData[2] = 1.0f; lightingData[3] = 0.3f;
+        // Directional: direction (1,1,1), enabled
+        lightingData[4] = 0.577f; lightingData[5] = 0.577f; lightingData[6] = 0.577f; lightingData[7] = 1.0f;
+        // Directional: color white, 0.7 intensity
+        lightingData[8] = 1.0f; lightingData[9] = 1.0f; lightingData[10] = 1.0f; lightingData[11] = 0.7f;
+        // Point lights: all disabled initially (w=0)
+        for (int i = 0; i < 4; i++) {
+            int baseIdx = 12 + i * 12;
+            lightingData[baseIdx + 3] = 0.0f;  // position.w = 0 (disabled)
+            lightingData[baseIdx + 7] = 1.0f;  // color.w = 1.0 (intensity)
+            lightingData[baseIdx + 8] = 1.0f;  // constant attenuation
+            lightingData[baseIdx + 9] = 0.09f; // linear attenuation
+            lightingData[baseIdx + 10] = 0.032f; // quadratic attenuation
+        }
+        // Camera position (default: 0, 2, 5)
+        lightingData[60] = 0.0f; lightingData[61] = 2.0f; lightingData[62] = 5.0f; lightingData[63] = 0.0f;
+        // Material properties: shininess=32, specular=0.5
+        lightingData[64] = 32.0f; lightingData[65] = 0.5f; lightingData[66] = 0.0f; lightingData[67] = 0.0f;
+
+        void* dataLighting;
+        vkMapMemory(device, lightingUBOMemory, 0, lightingBufferSize, 0, &dataLighting);
+        memcpy(dataLighting, lightingData, lightingBufferSize);
+        vkUnmapMemory(device, lightingUBOMemory);
+
+        // Lighting UBO descriptor set
+        VkDescriptorSetAllocateInfo lightingAllocInfo{};
+        lightingAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        lightingAllocInfo.descriptorPool = descriptorPool;
+        lightingAllocInfo.descriptorSetCount = 1;
+        lightingAllocInfo.pSetLayouts = &lightingDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &lightingAllocInfo, &lightingDescriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate lighting descriptor set!");
+        }
+
+        VkDescriptorBufferInfo lightingBufferInfo{};
+        lightingBufferInfo.buffer = lightingUBO;
+        lightingBufferInfo.offset = 0;
+        lightingBufferInfo.range = lightingBufferSize;
+
+        VkWriteDescriptorSet lightingDescriptorWrite{};
+        lightingDescriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        lightingDescriptorWrite.dstSet = lightingDescriptorSet;
+        lightingDescriptorWrite.dstBinding = 0;
+        lightingDescriptorWrite.dstArrayElement = 0;
+        lightingDescriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        lightingDescriptorWrite.descriptorCount = 1;
+        lightingDescriptorWrite.pBufferInfo = &lightingBufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &lightingDescriptorWrite, 0, nullptr);
+    }
+
+    // Helper to create a buffer with specified properties
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                      VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate buffer memory!");
+        }
+
+        vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    }
+
+    // Copy buffer contents using transfer queue
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        VkBufferCopy copyRegion{};
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+        endSingleTimeCommands(commandBuffer);
+    }
+
+    void rebuildVertexBuffer() {
+        std::cout << ">>> rebuildVertexBuffer() called with " << textObjects.size() << " texts" << std::endl;
+        // Combine all text vertices into one buffer
+        std::vector<Vertex> allVertices;
+        uint32_t currentOffset = 0;
+
+        // DEBUG LOG - vertex generation
+        {
+            std::ofstream log("/tmp/catalyst_debug.log", std::ios::app);
+            log << "[VERTEX] Starting vertex generation for " << textObjects.size() << " texts" << std::endl;
+        }
+        for (size_t i = 0; i < textObjects.size(); i++) {
+            auto& textObj = textObjects[i];
+            if (textObj.cleared) {
+                textObj.vertexCount = 0;  // Skip cleared elements
+                std::ofstream log("/tmp/catalyst_debug.log", std::ios::app);
+                log << "[VERTEX] text[" << i << "] CLEARED - skipped" << std::endl;
+                continue;
+            }
+            auto vertices = generateTextVertices(textObj);
+            textObj.vertexOffset = currentOffset;
+            textObj.vertexCount = static_cast<uint32_t>(vertices.size());
+            currentOffset += textObj.vertexCount;
+            allVertices.insert(allVertices.end(), vertices.begin(), vertices.end());
+            // DEBUG LOG
+            {
+                std::ofstream log("/tmp/catalyst_debug.log", std::ios::app);
+                log << "[VERTEX] text[" << i << "] vertexCount=" << textObj.vertexCount
+                    << " text=\"" << textObj.text.substr(0, std::min(textObj.text.size(), size_t(20))) << "\"" << std::endl;
+            }
+        }
+
+        vertexCount = static_cast<uint32_t>(allVertices.size());
+
+        if (vertexCount == 0) {
+            vertexBufferDirty = false;
+            return;
+        }
+
+        VkDeviceSize bufferSize = sizeof(Vertex) * allVertices.size();
+
+        // Destroy old buffer if exists
+        if (vertexBuffer != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device);
+            vkDestroyBuffer(device, vertexBuffer, nullptr);
+            vkFreeMemory(device, vertexBufferMemory, nullptr);
+        }
+
+        // Create staging buffer (CPU-accessible)
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        // Copy vertex data to staging buffer
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, allVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // Create device-local vertex buffer (GPU memory - fast access)
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            vertexBuffer, vertexBufferMemory);
+
+        // Copy from staging to device-local buffer
+        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+        // Cleanup staging buffer
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        vertexBufferDirty = false;
+        std::cout << "Vertex buffer rebuilt with " << vertexCount << " vertices for " << textObjects.size() << " text(s)!\n";
+    }
+
+    // Helper: Calculate width of a single line of text
+    float calculateLineWidth(const std::string& line, float fontScale) {
+        float width = 0.0f;
+        for (char c : line) {
+            if (c >= 32 && c < 128) {
+                stbtt_bakedchar* b = &charData[c - 32];
+                width += b->xadvance * fontScale;
+            }
+        }
+        return width;
+    }
+
+    // Helper: Split text into lines (handles \n and optional word wrap)
+    std::vector<std::string> splitTextIntoLines(const std::string& text, float maxWidth, float fontScale) {
+        std::vector<std::string> lines;
+        std::string currentLine;
+        std::string currentWord;
+        float currentLineWidth = 0.0f;
+        float currentWordWidth = 0.0f;
+        float spaceWidth = charData[' ' - 32].xadvance * fontScale;
+
+        for (size_t i = 0; i <= text.length(); i++) {
+            char c = (i < text.length()) ? text[i] : '\0';
+
+            if (c == '\n' || c == '\0') {
+                // End of line or end of text - flush word and line
+                if (!currentWord.empty()) {
+                    if (!currentLine.empty() && maxWidth > 0 &&
+                        currentLineWidth + currentWordWidth > maxWidth) {
+                        lines.push_back(currentLine);
+                        currentLine = currentWord;
+                        currentLineWidth = currentWordWidth;
+                    } else {
+                        if (!currentLine.empty()) {
+                            currentLine += " ";
+                            currentLineWidth += spaceWidth;
+                        }
+                        currentLine += currentWord;
+                        currentLineWidth += currentWordWidth;
+                    }
+                    currentWord.clear();
+                    currentWordWidth = 0.0f;
+                }
+                if (c == '\n' || !currentLine.empty()) {
+                    lines.push_back(currentLine);
+                    currentLine.clear();
+                    currentLineWidth = 0.0f;
+                }
+            } else if (c == ' ' || c == '\t') {
+                // Word boundary - add word to line
+                if (!currentWord.empty()) {
+                    if (!currentLine.empty() && maxWidth > 0 &&
+                        currentLineWidth + currentWordWidth > maxWidth) {
+                        // Word doesn't fit - start new line
+                        lines.push_back(currentLine);
+                        currentLine = currentWord;
+                        currentLineWidth = currentWordWidth;
+                    } else {
+                        if (!currentLine.empty()) {
+                            currentLine += " ";
+                            currentLineWidth += spaceWidth;
+                        }
+                        currentLine += currentWord;
+                        currentLineWidth += currentWordWidth;
+                    }
+                    currentWord.clear();
+                    currentWordWidth = 0.0f;
+                }
+            } else if (c >= 32 && c < 128) {
+                // Regular character - add to current word
+                currentWord += c;
+                currentWordWidth += charData[c - 32].xadvance * fontScale;
+            }
+        }
+
+        // Ensure at least one line exists (even if empty)
+        if (lines.empty()) {
+            lines.push_back("");
+        }
+
+        return lines;
+    }
+
+    // Helper: Calculate bounds for multi-line text
+    void calculateMultilineBounds(const TextObject& textObj, float fontScale,
+                                   float& outTotalWidth, float& outTotalHeight,
+                                   std::vector<float>& outLineWidths) {
+        float lineSpacing = textObj.fontSize * textObj.lineHeight;
+
+        outTotalWidth = 0.0f;
+        outLineWidths.clear();
+
+        for (const auto& line : textObj.lines) {
+            float lineWidth = calculateLineWidth(line, fontScale);
+            outLineWidths.push_back(lineWidth);
+            outTotalWidth = std::max(outTotalWidth, lineWidth);
+        }
+
+        // Total height = (numLines - 1) * lineSpacing + fontSize
+        size_t numLines = textObj.lines.size();
+        outTotalHeight = (numLines > 0) ?
+            textObj.fontSize + (numLines - 1) * lineSpacing :
+            textObj.fontSize;
+    }
+
+    std::vector<Vertex> generateTextVertices(const TextObject& textObj) {
+        std::vector<Vertex> vertices;
+
+        // Font scaling: ratio of requested size to baked reference size
+        float fontScale = textObj.fontSize / REFERENCE_FONT_SIZE;
+
+        // Scale factor to convert from pixels to normalized device coordinates
+        float scaleX = 2.0f / width;
+        float scaleY = 2.0f / height;
+
+        // Split text into lines (handles \n and optional word wrap)
+        textObj.lines = splitTextIntoLines(textObj.text, textObj.maxWidth, fontScale);
+
+        // Calculate bounds for all lines
+        std::vector<float> lineWidths;
+        calculateMultilineBounds(textObj, fontScale,
+                                  textObj.totalWidth, textObj.totalHeight,
+                                  lineWidths);
+
+        // Line spacing in pixels
+        float lineSpacing = textObj.fontSize * textObj.lineHeight;
+
+        // Small margin from edges (in NDC)
+        float margin = 0.02f;
+
+        // Calculate block start position based on positioning mode
+        float blockStartX, blockStartY;
+
+        if (textObj.usePixelPosition) {
+            // Pixel positioning with bounds clamping
+            float clampedX = std::max(0.0f, std::min(textObj.posX, (float)width - textObj.totalWidth));
+            float clampedY = std::max(0.0f, std::min(textObj.posY, (float)height - textObj.totalHeight));
+            blockStartX = (clampedX / width) * 2.0f - 1.0f;
+            blockStartY = 1.0f - (clampedY / height) * 2.0f - textObj.fontSize * scaleY / 2.0f;
+        } else {
+            // Anchor positioning - calculate based on total text block bounds
+            float totalWidthNDC = textObj.totalWidth * scaleX;
+            float totalHeightNDC = textObj.totalHeight * scaleY;
+
+            // Font height in NDC for proper positioning
+            float fontHeightNDC = textObj.fontSize * scaleY;
+
+            switch (textObj.anchor) {
+                case Position::CENTER:
+                    blockStartX = -totalWidthNDC / 2.0f;
+                    blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                    break;
+                case Position::TOP:
+                    blockStartX = -totalWidthNDC / 2.0f;
+                    blockStartY = -1.0f + margin + fontHeightNDC;  // Y=-1 is top, offset by font height
+                    break;
+                case Position::BOTTOM:
+                    blockStartX = -totalWidthNDC / 2.0f;
+                    blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;  // Y=+1 is bottom
+                    break;
+                case Position::LEFT:
+                    blockStartX = -1.0f + margin;
+                    blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                    break;
+                case Position::RIGHT:
+                    blockStartX = 1.0f - margin - totalWidthNDC;
+                    blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                    break;
+                case Position::TLEFT:
+                    blockStartX = -1.0f + margin;
+                    blockStartY = -1.0f + margin + fontHeightNDC;  // Top-left
+                    break;
+                case Position::TRIGHT:
+                    blockStartX = 1.0f - margin - totalWidthNDC;
+                    blockStartY = -1.0f + margin + fontHeightNDC;  // Top-right
+                    break;
+                case Position::BLEFT:
+                    blockStartX = -1.0f + margin;
+                    blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;  // Bottom-left
+                    break;
+                case Position::BRIGHT:
+                    blockStartX = 1.0f - margin - totalWidthNDC;
+                    blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;  // Bottom-right
+                    break;
+            }
+        }
+
+        // Store base NDC position (center of text block) for MoveTo animation
+        float totalWidthNDC = textObj.totalWidth * scaleX;
+        float totalHeightNDC = textObj.totalHeight * scaleY;
+        textObj.baseNdcX = blockStartX + totalWidthNDC / 2.0f;
+        textObj.baseNdcY = blockStartY - totalHeightNDC / 2.0f;
+
+        // Render each line
+        int charIndex = 0;  // Track character index for per-character animations
+        for (size_t lineIndex = 0; lineIndex < textObj.lines.size(); lineIndex++) {
+            const std::string& line = textObj.lines[lineIndex];
+            float lineWidth = lineWidths[lineIndex];
+
+            // Calculate X offset based on alignment
+            float lineOffsetX = 0.0f;
+            switch (textObj.alignment) {
+                case TextAlignment::LEFT:
+                    lineOffsetX = 0.0f;
+                    break;
+                case TextAlignment::CENTER:
+                    lineOffsetX = (textObj.totalWidth - lineWidth) * scaleX / 2.0f;
+                    break;
+                case TextAlignment::RIGHT:
+                    lineOffsetX = (textObj.totalWidth - lineWidth) * scaleX;
+                    break;
+            }
+
+            // Y offset for this line (negative because Y goes down in NDC)
+            float lineOffsetY = -static_cast<float>(lineIndex) * lineSpacing * scaleY;
+
+            float x = blockStartX + lineOffsetX;
+            float y = blockStartY + lineOffsetY;
+
+            for (char c : line) {
+                if (c >= 32 && c < 128) {
+                    stbtt_bakedchar* b = &charData[c - 32];
+
+                    // Apply font scaling to glyph dimensions
+                    float x0 = x + b->xoff * fontScale * scaleX;
+                    float y0 = y + b->yoff * fontScale * scaleY;
+                    float x1 = x0 + (b->x1 - b->x0) * fontScale * scaleX;
+                    float y1 = y0 + (b->y1 - b->y0) * fontScale * scaleY;
+
+                    float s0 = b->x0 / (float)fontTextureWidth;
+                    float t0 = b->y0 / (float)fontTextureHeight;
+                    float s1 = b->x1 / (float)fontTextureWidth;
+                    float t1 = b->y1 / (float)fontTextureHeight;
+
+                    // Two triangles for quad - include charIndex for per-character animations
+                    float ci = static_cast<float>(charIndex);
+                    vertices.push_back({{x0, y0}, {s0, t0}, ci});
+                    vertices.push_back({{x1, y0}, {s1, t0}, ci});
+                    vertices.push_back({{x0, y1}, {s0, t1}, ci});
+
+                    vertices.push_back({{x1, y0}, {s1, t0}, ci});
+                    vertices.push_back({{x1, y1}, {s1, t1}, ci});
+                    vertices.push_back({{x0, y1}, {s0, t1}, ci});
+
+                    charIndex++;  // Increment for next character
+                    x += b->xadvance * fontScale * scaleX;
+                }
+            }
+        }
+
+        // Store total character count for animation calculations
+        textObj.totalCharCount = charIndex;
+
+        return vertices;
+    }
+
+    void createCommandBuffers() {
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = commandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+
+        if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate command buffers!");
+        }
+    }
+
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to begin recording command buffer!");
+        }
+
+        // Reset and write start timestamp
+        if (timestampQueryPool != VK_NULL_HANDLE) {
+            vkCmdResetQueryPool(commandBuffer, timestampQueryPool, currentFrame * 2, 2);
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                timestampQueryPool, currentFrame * 2);
+        }
+
+        // Check if we need to render 3D elements
+        bool has3DElements = !axes3DObjects.empty() || !surface3DObjects.empty() || !shape3DObjects.empty();
+        bool sceneIs3DMode = scenes.empty() ? is3DModeEnabled : scenes[activeSceneIndex].is3DMode;
+
+        // Render 3D elements first (if any)
+        if (has3DElements && sceneIs3DMode && shape3DVertexBuffer != VK_NULL_HANDLE && !shape3DVertices.empty()) {
+            VkRenderPassBeginInfo renderPassInfo3D{};
+            renderPassInfo3D.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            renderPassInfo3D.renderPass = renderPass3D;
+            renderPassInfo3D.framebuffer = swapChainFramebuffers3D[imageIndex];
+            renderPassInfo3D.renderArea.offset = {0, 0};
+            renderPassInfo3D.renderArea.extent = swapChainExtent;
+
+            std::array<VkClearValue, 2> clearValues{};
+            clearValues[0].color = {{bgR, bgG, bgB, 1.0f}};
+            clearValues[1].depthStencil = {1.0f, 0};
+            renderPassInfo3D.clearValueCount = static_cast<uint32_t>(clearValues.size());
+            renderPassInfo3D.pClearValues = clearValues.data();
+
+            vkCmdBeginRenderPass(commandBuffer, &renderPassInfo3D, VK_SUBPASS_CONTENTS_INLINE);
+
+            // Bind descriptor sets: set 0 (texture), set 1 (3D camera), set 2 (lighting)
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    shape3DPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    shape3DPipelineLayout, 1, 1, &camera3DDescriptorSet, 0, nullptr);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    shape3DPipelineLayout, 2, 1, &lightingDescriptorSet, 0, nullptr);
+
+            // Bind 3D vertex buffer
+            VkBuffer vertex3DBuffers[] = {shape3DVertexBuffer};
+            VkDeviceSize offsets3D[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertex3DBuffers, offsets3D);
+
+            constexpr float kOpaqueThreshold = 0.999f;
+
+            auto drawAxes3DPass = [&](bool translucent) {
+                for (const auto& axes3D : axes3DObjects) {
+                    if (axes3D.vertexCount == 0 || axes3D.cleared) continue;
+
+                    float opacity = axes3D.currentOpacity;
+                    if (opacity <= 0.0f) continue;
+                    bool isOpaque = opacity >= kOpaqueThreshold;
+                    if (translucent == isOpaque) continue;
+
+                    // Create model matrix (identity for axes at origin)
+                    float modelMatrix[16] = {
+                        1.0f, 0.0f, 0.0f, 0.0f,
+                        0.0f, 1.0f, 0.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f, 0.0f,
+                        0.0f, 0.0f, 0.0f, 1.0f
+                    };
+
+                    // Push constants: model matrix (64 bytes) + opacity + color (16 bytes)
+                    float pushConstants[20];
+                    memcpy(pushConstants, modelMatrix, 64);
+                    pushConstants[16] = opacity;
+                    pushConstants[17] = axes3D.colorR;
+                    pushConstants[18] = axes3D.colorG;
+                    pushConstants[19] = axes3D.colorB;
+
+                    vkCmdPushConstants(commandBuffer, shape3DPipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(pushConstants), pushConstants);
+
+                    vkCmdDraw(commandBuffer, axes3D.vertexCount, 1, axes3D.vertexOffset, 0);
+                }
+            };
+
+            auto drawSurfaces3DPass = [&](bool translucent) {
+                for (const auto& surface : surface3DObjects) {
+                    if (surface.vertexCount == 0 || surface.cleared) continue;
+
+                    float opacity = surface.currentOpacity;
+                    if (opacity <= 0.0f) continue;
+                    bool isOpaque = opacity >= kOpaqueThreshold;
+                    if (translucent == isOpaque) continue;
+
+                    // Create model matrix (identity for surface at origin)
+                    float modelMatrix[16] = {
+                        1.0f, 0.0f, 0.0f, 0.0f,
+                        0.0f, 1.0f, 0.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f, 0.0f,
+                        0.0f, 0.0f, 0.0f, 1.0f
+                    };
+
+                    // Push constants: model matrix (64 bytes) + opacity + color (16 bytes)
+                    float pushConstants[20];
+                    memcpy(pushConstants, modelMatrix, 64);
+                    pushConstants[16] = opacity;
+                    pushConstants[17] = surface.colorR;
+                    pushConstants[18] = surface.colorG;
+                    pushConstants[19] = surface.colorB;
+
+                    vkCmdPushConstants(commandBuffer, shape3DPipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(pushConstants), pushConstants);
+
+                    vkCmdDraw(commandBuffer, surface.vertexCount, 1, surface.vertexOffset, 0);
+                }
+            };
+
+            auto drawShapes3DPass = [&](bool translucent) {
+                for (const auto& shape : shape3DObjects) {
+                    if (shape.vertexCount == 0 || shape.cleared) continue;
+
+                    float opacity = shape.currentOpacity;
+                    if (opacity <= 0.0f) continue;
+                    bool isOpaque = opacity >= kOpaqueThreshold;
+                    if (translucent == isOpaque) continue;
+
+                    // Build model matrix with position, rotation, scale
+                    float cx = std::cos(shape.rotX), sx = std::sin(shape.rotX);
+                    float cy = std::cos(shape.rotY), sy = std::sin(shape.rotY);
+                    float cz = std::cos(shape.rotZ), sz = std::sin(shape.rotZ);
+
+                    // Combined rotation matrix (Euler angles: ZYX order)
+                    float m00 = cy * cz;
+                    float m01 = -cy * sz;
+                    float m02 = sy;
+                    float m10 = sx * sy * cz + cx * sz;
+                    float m11 = -sx * sy * sz + cx * cz;
+                    float m12 = -sx * cy;
+                    float m20 = -cx * sy * cz + sx * sz;
+                    float m21 = cx * sy * sz + sx * cz;
+                    float m22 = cx * cy;
+
+                    float modelMatrix[16] = {
+                        m00 * shape.scaleX, m01 * shape.scaleY, m02 * shape.scaleZ, 0.0f,
+                        m10 * shape.scaleX, m11 * shape.scaleY, m12 * shape.scaleZ, 0.0f,
+                        m20 * shape.scaleX, m21 * shape.scaleY, m22 * shape.scaleZ, 0.0f,
+                        shape.posX, shape.posY, shape.posZ, 1.0f
+                    };
+
+                    float pushConstants[20];
+                    memcpy(pushConstants, modelMatrix, 64);
+                    pushConstants[16] = opacity;
+                    pushConstants[17] = shape.colorR;
+                    pushConstants[18] = shape.colorG;
+                    pushConstants[19] = shape.colorB;
+
+                    vkCmdPushConstants(commandBuffer, shape3DPipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(pushConstants), pushConstants);
+
+                    vkCmdDraw(commandBuffer, shape.vertexCount, 1, shape.vertexOffset, 0);
+                }
+            };
+
+            // Opaque pass (writes depth)
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shape3DGraphicsPipeline);
+            drawAxes3DPass(false);
+            drawSurfaces3DPass(false);
+            drawShapes3DPass(false);
+
+            // Translucent pass (no depth writes) - prevents invisible objects from occluding others
+            VkPipeline translucentPipeline = shape3DGraphicsPipelineNoDepthWrite != VK_NULL_HANDLE
+                ? shape3DGraphicsPipelineNoDepthWrite
+                : shape3DGraphicsPipeline;
+            if (translucentPipeline != shape3DGraphicsPipeline) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, translucentPipeline);
+            }
+            drawAxes3DPass(true);
+            drawSurfaces3DPass(true);
+            drawShapes3DPass(true);
+
+            vkCmdEndRenderPass(commandBuffer);
+        }
+
+        // Determine if we should use overlay render pass (load 3D content) or normal (clear)
+        bool rendered3D = has3DElements && sceneIs3DMode && shape3DVertexBuffer != VK_NULL_HANDLE && !shape3DVertices.empty();
+
+        // 2D Render Pass (overlay on 3D if we rendered 3D, otherwise normal clear)
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = rendered3D ? renderPassOverlay : renderPass;
+        renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = swapChainExtent;
+
+        VkClearValue clearColor = {{{bgR, bgG, bgB, 1.0f}}};
+        // Only set clear values for normal render pass (overlay pass doesn't clear)
+        renderPassInfo.clearValueCount = rendered3D ? 0 : 1;
+        renderPassInfo.pClearValues = rendered3D ? nullptr : &clearColor;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+        // Bind camera descriptor set (set 1)
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+
+        // Build z-sorted index arrays for each element type
+        // Text objects sorted by zIndex
+        std::vector<size_t> textRenderOrder;
+        for (size_t i = 0; i < textObjects.size(); i++) {
+            if (!textObjects[i].cleared && textObjects[i].vertexCount > 0) {
+                textRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(textRenderOrder.begin(), textRenderOrder.end(),
+            [this](size_t a, size_t b) { return textObjects[a].zIndex < textObjects[b].zIndex; });
+
+        // Math objects sorted by zIndex
+        std::vector<size_t> mathRenderOrder;
+        for (size_t i = 0; i < mathObjects.size(); i++) {
+            if (!mathObjects[i].cleared && mathObjects[i].vertexCount > 0 && mathObjects[i].descriptorSet != VK_NULL_HANDLE) {
+                mathRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(mathRenderOrder.begin(), mathRenderOrder.end(),
+            [this](size_t a, size_t b) { return mathObjects[a].zIndex < mathObjects[b].zIndex; });
+
+        // Image objects sorted by zIndex
+        std::vector<size_t> imageRenderOrder;
+        for (size_t i = 0; i < imageObjects.size(); i++) {
+            if (!imageObjects[i].cleared && imageObjects[i].vertexCount > 0 && imageObjects[i].descriptorSet != VK_NULL_HANDLE) {
+                imageRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(imageRenderOrder.begin(), imageRenderOrder.end(),
+            [this](size_t a, size_t b) { return imageObjects[a].zIndex < imageObjects[b].zIndex; });
+
+        // Shape objects sorted by zIndex
+        std::vector<size_t> shapeRenderOrder;
+        for (size_t i = 0; i < shapeObjects.size(); i++) {
+            if (!shapeObjects[i].cleared && shapeObjects[i].vertexCount > 0 && !shapeObjects[i].morphState.active && !shapeObjects[i].isMorphTarget) {
+                shapeRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(shapeRenderOrder.begin(), shapeRenderOrder.end(),
+            [this](size_t a, size_t b) { return shapeObjects[a].zIndex < shapeObjects[b].zIndex; });
+
+        // Graph objects sorted by zIndex
+        std::vector<size_t> graphRenderOrder;
+        for (size_t i = 0; i < graphObjects.size(); i++) {
+            if (!graphObjects[i].cleared && graphObjects[i].vertexCount > 0) {
+                graphRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(graphRenderOrder.begin(), graphRenderOrder.end(),
+            [this](size_t a, size_t b) { return graphObjects[a].zIndex < graphObjects[b].zIndex; });
+
+        // Vector objects sorted by zIndex
+        std::vector<size_t> vectorRenderOrder;
+        for (size_t i = 0; i < vectorObjects.size(); i++) {
+            if (!vectorObjects[i].cleared && vectorObjects[i].vertexCount > 0) {
+                vectorRenderOrder.push_back(i);
+            }
+        }
+        std::stable_sort(vectorRenderOrder.begin(), vectorRenderOrder.end(),
+            [this](size_t a, size_t b) { return vectorObjects[a].zIndex < vectorObjects[b].zIndex; });
+
+        // Bind vertex buffer once (contains all texts)
+        if (vertexBuffer != VK_NULL_HANDLE && vertexCount > 0) {
+            VkBuffer vertexBuffers[] = {vertexBuffer};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+            // Draw each text in z-sorted order
+            for (size_t idx : textRenderOrder) {
+                const auto& textObj = textObjects[idx];
+
+                // Push animation offset, scale, rotation (vertex) + opacity, color, stroke, gradient, char animation (fragment)
+                float pushConstants[20] = {
+                    textObj.currentOffsetX,  // Vertex stage
+                    textObj.currentOffsetY,  // Vertex stage
+                    textObj.currentScale,    // Vertex stage (scale)
+                    textObj.currentRotation, // Vertex stage (rotation in radians)
+                    textObj.currentOpacity,  // Fragment stage (offset=16)
+                    textObj.colorR,
+                    textObj.colorG,
+                    textObj.colorB,
+                    textObj.strokeWidth,
+                    textObj.strokeColorR,
+                    textObj.strokeColorG,
+                    textObj.strokeColorB,
+                    textObj.useGradient ? textObj.gradientEndR : 0.0f,
+                    textObj.useGradient ? textObj.gradientEndG : 0.0f,
+                    textObj.useGradient ? textObj.gradientEndB : 0.0f,
+                    textObj.useGradient ? textObj.gradientAngle : 0.0f,
+                    // Per-character animation fields
+                    textObj.charRevealProgress,
+                    static_cast<float>(textObj.totalCharCount),
+                    // Separate stroke/fill opacities (use currentOpacity if not using separate mode)
+                    textObj.useSeparateStrokeFill ? textObj.strokeOpacity : textObj.currentOpacity,
+                    textObj.useSeparateStrokeFill ? textObj.fillOpacity : textObj.currentOpacity
+                };
+                vkCmdPushConstants(commandBuffer, pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this text using firstVertex for offset
+                vkCmdDraw(commandBuffer, textObj.vertexCount, 1, textObj.vertexOffset, 0);
+            }
+        }
+
+        // Draw math objects (LaTeX formulas) in z-sorted order
+        if (mathVertexBuffer != VK_NULL_HANDLE && mathVertexCount > 0) {
+            VkBuffer mathBuffers[] = {mathVertexBuffer};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, mathBuffers, offsets);
+
+            for (size_t idx : mathRenderOrder) {
+                const auto& mathObj = mathObjects[idx];
+
+                // Bind this formula's texture descriptor set
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipelineLayout, 0, 1, &mathObj.descriptorSet, 0, nullptr);
+
+                // Push animation offset, scale, rotation (vertex) + opacity and color (fragment)
+                // Math objects don't support stroke or gradient yet
+                float pushConstants[20] = {
+                    mathObj.currentOffsetX,  // Vertex stage
+                    mathObj.currentOffsetY,  // Vertex stage
+                    mathObj.currentScale,    // Vertex stage (scale)
+                    mathObj.currentRotation, // Vertex stage (rotation in radians)
+                    mathObj.currentOpacity,  // Fragment stage (offset=16)
+                    1.0f, 1.0f, 1.0f,  // Color is in the texture, use white multiplier
+                    0.0f,              // No stroke for math objects
+                    0.0f, 0.0f, 0.0f,  // Stroke color (unused)
+                    0.0f, 0.0f, 0.0f,  // Gradient end color (unused)
+                    0.0f,              // Gradient angle (disabled)
+                    1.0f,              // charRevealProgress = 1.0 (all visible)
+                    0.0f,              // totalCharCount = 0 (not used)
+                    mathObj.currentOpacity,  // strokeOpacity
+                    mathObj.currentOpacity   // fillOpacity
+                };
+                vkCmdPushConstants(commandBuffer, pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this math quad
+                vkCmdDraw(commandBuffer, mathObj.vertexCount, 1, mathObj.vertexOffset, 0);
+            }
+        }
+
+        // Draw image objects (textured quads like math objects) in z-sorted order
+        if (imageVertexBuffer != VK_NULL_HANDLE && imageVertexCount > 0) {
+            VkBuffer imageBuffers[] = {imageVertexBuffer};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, imageBuffers, offsets);
+
+            for (size_t idx : imageRenderOrder) {
+                const auto& imgObj = imageObjects[idx];
+
+                // Bind this image's texture descriptor set
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipelineLayout, 0, 1, &imgObj.descriptorSet, 0, nullptr);
+
+                // Push constants similar to math objects
+                float pushConstants[20] = {
+                    imgObj.currentOffsetX,   // Vertex stage
+                    imgObj.currentOffsetY,   // Vertex stage
+                    imgObj.currentScale,     // Vertex stage (scale)
+                    imgObj.currentRotation,  // Vertex stage (rotation in radians)
+                    imgObj.currentOpacity,   // Fragment stage (offset=16)
+                    1.0f, 1.0f, 1.0f,        // Color multiplier (white = use texture)
+                    0.0f,                    // No stroke for images
+                    0.0f, 0.0f, 0.0f,        // Stroke color (unused)
+                    0.0f, 0.0f, 0.0f,        // Gradient end color (unused)
+                    0.0f,                    // Gradient angle (disabled)
+                    1.0f,                    // charRevealProgress = 1.0 (all visible)
+                    0.0f,                    // totalCharCount = 0 (not used)
+                    imgObj.currentOpacity,   // strokeOpacity
+                    imgObj.currentOpacity    // fillOpacity
+                };
+                vkCmdPushConstants(commandBuffer, pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this image quad
+                vkCmdDraw(commandBuffer, imgObj.vertexCount, 1, imgObj.vertexOffset, 0);
+            }
+        }
+
+        // Draw shape objects (using shape pipeline - no texture) in z-sorted order
+        if (shapeVertexBuffer != VK_NULL_HANDLE && shapeVertexCount > 0) {
+            // Switch to shape pipeline
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapeGraphicsPipeline);
+            // Bind camera descriptor set (set 1)
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapePipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+
+            VkBuffer shapeBuffers[] = {shapeVertexBuffer};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, shapeBuffers, offsets);
+
+            for (size_t idx : shapeRenderOrder) {
+                const auto& shapeObj = shapeObjects[idx];
+
+                // Push constants: offsetXY + scale + rotation (vertex) + opacity + fillRGB + strokeWidth + strokeRGB (fragment)
+                float pushConstants[12] = {
+                    shapeObj.currentOffsetX,   // Vertex stage
+                    shapeObj.currentOffsetY,   // Vertex stage
+                    shapeObj.currentScale,     // Vertex stage (scale)
+                    shapeObj.currentRotation,  // Vertex stage (rotation in radians)
+                    shapeObj.currentOpacity,   // Fragment stage (offset=16)
+                    shapeObj.fillR,
+                    shapeObj.fillG,
+                    shapeObj.fillB,
+                    shapeObj.strokeWidth,
+                    shapeObj.strokeR,
+                    shapeObj.strokeG,
+                    shapeObj.strokeB
+                };
+                vkCmdPushConstants(commandBuffer, shapePipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this shape
+                vkCmdDraw(commandBuffer, shapeObj.vertexCount, 1, shapeObj.vertexOffset, 0);
+            }
+        }
+
+        // Draw morphing shapes (using morph pipeline - vertex interpolation)
+        if (morphGraphicsPipeline != VK_NULL_HANDLE) {
+            bool hasMorphingShapes = false;
+            for (const auto& shapeObj : shapeObjects) {
+                if (shapeObj.cleared) continue;
+                if (shapeObj.morphState.active && shapeObj.morphState.morphVertexBuffer != VK_NULL_HANDLE) {
+                    hasMorphingShapes = true;
+                    break;
+                }
+            }
+
+            if (hasMorphingShapes) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, morphGraphicsPipeline);
+                // Bind camera descriptor set (set 1)
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, morphPipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+
+                for (const auto& shapeObj : shapeObjects) {
+                    if (shapeObj.cleared) continue;
+                    if (!shapeObj.morphState.active) continue;
+                    if (shapeObj.morphState.morphVertexBuffer == VK_NULL_HANDLE) continue;
+                    if (shapeObj.morphState.normalizedVertexCount == 0) continue;
+
+                    // Bind morph vertex buffer
+                    VkBuffer morphBuffers[] = {shapeObj.morphState.morphVertexBuffer};
+                    VkDeviceSize morphOffsets[] = {0};
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 1, morphBuffers, morphOffsets);
+
+                    // Push constants for morph:
+                    // Vertex: morphProgress, scale, rotation, offsetX, offsetY (5 floats = 20 bytes)
+                    // Fragment: opacity, sourceRGB, targetRGB, morphProgress (8 floats = 32 bytes)
+                    float morphPushConstants[13] = {
+                        shapeObj.morphState.morphProgress,  // Vertex: morph progress
+                        shapeObj.currentScale,               // Vertex: scale
+                        shapeObj.currentRotation,            // Vertex: rotation
+                        shapeObj.currentOffsetX,             // Vertex: offset X
+                        shapeObj.currentOffsetY,             // Vertex: offset Y
+                        shapeObj.currentOpacity,             // Fragment: opacity
+                        shapeObj.morphState.sourceR,         // Fragment: source R
+                        shapeObj.morphState.sourceG,         // Fragment: source G
+                        shapeObj.morphState.sourceB,         // Fragment: source B
+                        shapeObj.morphState.targetR,         // Fragment: target R
+                        shapeObj.morphState.targetG,         // Fragment: target G
+                        shapeObj.morphState.targetB,         // Fragment: target B
+                        shapeObj.morphState.morphProgress    // Fragment: morph progress (for color)
+                    };
+                    vkCmdPushConstants(commandBuffer, morphPipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(morphPushConstants), morphPushConstants);
+
+                    // Draw morph
+                    vkCmdDraw(commandBuffer, shapeObj.morphState.normalizedVertexCount, 1, 0, 0);
+                }
+            }
+        }
+
+        // Render graphs (using shape pipeline - same vertex format) in z-sorted order
+        if (graphVertexCount > 0 && graphVertexBuffer != VK_NULL_HANDLE) {
+            VkBuffer graphBuffers[] = {graphVertexBuffer};
+            VkDeviceSize graphOffsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, graphBuffers, graphOffsets);
+
+            for (size_t idx : graphRenderOrder) {
+                auto& graphObj = graphObjects[idx];
+                if (graphObj.cleared) continue;
+
+                // Check scheduled start time
+                float sceneTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                if (sceneTime < graphObj.scheduledStartTime) {
+                    continue;  // Not yet scheduled to appear
+                }
+
+                // Push constants for this graph
+                float pushConstants[12] = {
+                    0.0f, 0.0f,  // No offset
+                    1.0f,        // Scale
+                    0.0f,        // Rotation
+                    graphObj.currentOpacity,
+                    graphObj.lineColorR,
+                    graphObj.lineColorG,
+                    graphObj.lineColorB,
+                    0.0f,  // Stroke width (not used for graph lines)
+                    0.0f, 0.0f, 0.0f  // Stroke color (not used)
+                };
+                vkCmdPushConstants(commandBuffer, shapePipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this graph
+                vkCmdDraw(commandBuffer, graphObj.vertexCount, 1, graphObj.vertexOffset, 0);
+            }
+        }
+
+        // Draw vectors (mathematical vector arrows) in z-sorted order
+        if (vectorVertexCount > 0 && vectorVertexBuffer != VK_NULL_HANDLE) {
+            VkBuffer vertexBuffers[] = {vectorVertexBuffer};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+            for (size_t idx : vectorRenderOrder) {
+                auto& vecObj = vectorObjects[idx];
+
+                // Check scheduled start time
+                float sceneTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+                if (sceneTime < vecObj.scheduledStartTime) {
+                    continue;  // Not yet scheduled to appear
+                }
+
+                // Push constants for this vector
+                float pushConstants[12] = {
+                    0.0f, 0.0f,  // No offset
+                    1.0f,        // Scale
+                    0.0f,        // Rotation
+                    vecObj.currentOpacity,
+                    vecObj.colorR,
+                    vecObj.colorG,
+                    vecObj.colorB,
+                    0.0f,  // Stroke width (not used)
+                    0.0f, 0.0f, 0.0f  // Stroke color (not used)
+                };
+                vkCmdPushConstants(commandBuffer, shapePipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(pushConstants), pushConstants);
+
+                // Draw this vector
+                vkCmdDraw(commandBuffer, vecObj.vertexCount, 1, vecObj.vertexOffset, 0);
+            }
+        }
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        // Write end timestamp
+        if (timestampQueryPool != VK_NULL_HANDLE) {
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                timestampQueryPool, currentFrame * 2 + 1);
+        }
+
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to record command buffer!");
+        }
+    }
+
+    void createSyncObjects() {
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create synchronization objects!");
+            }
+        }
+    }
+
+    void createTimestampQueryPool() {
+        // Check if timestamps are supported
+        if (timestampPeriod == 0.0f) {
+            std::cout << "GPU timestamps not supported - load monitoring disabled\n";
+            return;
+        }
+
+        VkQueryPoolCreateInfo queryPoolInfo{};
+        queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryPoolInfo.queryCount = MAX_FRAMES_IN_FLIGHT * 2;  // Start and end timestamp per frame
+
+        if (vkCreateQueryPool(device, &queryPoolInfo, nullptr, &timestampQueryPool) != VK_SUCCESS) {
+            std::cout << "Failed to create timestamp query pool - load monitoring disabled\n";
+            timestampQueryPool = VK_NULL_HANDLE;
+            return;
+        }
+
+        std::cout << "GPU timestamp queries enabled (period: " << timestampPeriod << " ns)\n";
+    }
+
+    void updateGPUMetrics() {
+        if (timestampQueryPool == VK_NULL_HANDLE) return;
+
+        // Skip metric collection for first few frames while queries initialize
+        if (gpuMetrics.frameCount < MAX_FRAMES_IN_FLIGHT) {
+            gpuMetrics.frameCount++;
+            return;
+        }
+
+        uint32_t prevFrame = (currentFrame + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+        uint64_t timestamps[2];
+
+        VkResult result = vkGetQueryPoolResults(device, timestampQueryPool,
+            prevFrame * 2, 2,
+            sizeof(timestamps), timestamps, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+
+        if (result == VK_SUCCESS) {
+            // Calculate GPU frame time in milliseconds
+            uint64_t elapsed = timestamps[1] - timestamps[0];
+            double elapsedNs = elapsed * timestampPeriod;
+            double elapsedMs = elapsedNs / 1000000.0;
+
+            // Update metrics with exponential moving average
+            gpuMetrics.frameCount++;
+            if (gpuMetrics.avgFrameTimeMs == 0.0) {
+                gpuMetrics.avgFrameTimeMs = elapsedMs;
+            } else {
+                gpuMetrics.avgFrameTimeMs = gpuMetrics.avgFrameTimeMs * 0.95 + elapsedMs * 0.05;
+            }
+            gpuMetrics.gpuFrameTimeMs = elapsedMs;
+
+            // Check overload status
+            gpuMetrics.isOverloaded = gpuMetrics.avgFrameTimeMs > GPUMetrics::OVERLOAD_THRESHOLD_MS;
+
+            // Hybrid fallback decision making
+            updateHybridContext();
+        }
+    }
+
+    void updateHybridContext() {
+        if (gpuMetrics.isOverloaded) {
+            hybridContext.consecutiveOverloads++;
+
+            // Activate fallback after consecutive overloaded frames
+            if (hybridContext.consecutiveOverloads >= HybridContext::OVERLOAD_FRAMES_THRESHOLD) {
+                if (!hybridContext.useCPUFallback && !hybridContext.useSecondaryGPU) {
+                    // Try secondary GPU first if available
+                    if (availableGPUs.size() > 1) {
+                        hybridContext.useSecondaryGPU = true;
+                        hybridContext.fallbackActivations++;
+                        std::cout << "[HYBRID] Activating secondary GPU fallback: "
+                                  << availableGPUs[1].properties.deviceName << "\n";
+                    } else {
+                        // Fall back to CPU for non-critical work
+                        hybridContext.useCPUFallback = true;
+                        hybridContext.fallbackActivations++;
+                        std::cout << "[HYBRID] Activating CPU fallback mode\n";
+                    }
+                }
+            }
+        } else {
+            hybridContext.consecutiveOverloads = 0;
+
+            // Deactivate fallback when load normalizes
+            if (hybridContext.useCPUFallback || hybridContext.useSecondaryGPU) {
+                if (gpuMetrics.avgFrameTimeMs < GPUMetrics::WARNING_THRESHOLD_MS) {
+                    hybridContext.useCPUFallback = false;
+                    hybridContext.useSecondaryGPU = false;
+                    std::cout << "[HYBRID] Load normalized, returning to primary GPU\n";
+                }
+            }
+        }
+
+        // Log status periodically (every 300 frames)
+        if (gpuMetrics.frameCount % 300 == 0 && gpuMetrics.frameCount > 0) {
+            std::cout << "[PERF] Frame " << gpuMetrics.frameCount
+                      << " | GPU: " << gpuMetrics.avgFrameTimeMs << "ms"
+                      << " | Fallback: " << (hybridContext.useCPUFallback ? "CPU" :
+                                            (hybridContext.useSecondaryGPU ? "GPU2" : "OFF"))
+                      << " | Activations: " << hybridContext.fallbackActivations << "\n";
+        }
+    }
+
+    bool shouldUseCPUFallback() const {
+        return hybridContext.useCPUFallback;
+    }
+
+    bool shouldUseSecondaryGPU() const {
+        return hybridContext.useSecondaryGPU;
+    }
+
+    // Emphasis animation easing functions
+    // Ping-pong smooth: goes 0 -> 1 -> 0 with smooth sine curve
+    float easePingPongSmooth(float t) {
+        return std::sin(t * 3.14159265f);  // 0→1→0 smoothly
+    }
+
+    // Sine wave: for Wiggle animation - oscillates multiple times
+    float easeSineWave(float t, int cycles) {
+        return std::sin(t * 2.0f * 3.14159265f * cycles);  // Multiple oscillations
+    }
+
+    // Linear ping-pong: goes 0 -> 1 -> 0 linearly
+    float easePingPong(float t) {
+        return t < 0.5f ? t * 2.0f : 2.0f - t * 2.0f;  // Linear 0→1→0
+    }
+
+    // ======== Comprehensive Easing Function ========
+    // Apply easing based on Easing enum - formulas from easings.net
+    float applyEasing(Easing easing, float t) {
+        const float PI = 3.14159265358979323846f;
+        const float c1 = 1.70158f;      // Back overshoot
+        const float c2 = c1 * 1.525f;   // EaseInOut back
+        const float c3 = c1 + 1.0f;
+        const float c4 = (2.0f * PI) / 3.0f;    // Elastic
+        const float c5 = (2.0f * PI) / 4.5f;    // ElasticInOut
+
+        switch (easing) {
+            case Easing::Linear:
+                return t;
+
+            // Quadratic
+            case Easing::EaseInQuad:
+                return t * t;
+            case Easing::EaseOutQuad:
+                return 1.0f - (1.0f - t) * (1.0f - t);
+            case Easing::EaseInOutQuad:
+                return t < 0.5f ? 2.0f * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 2.0f) / 2.0f;
+
+            // Cubic
+            case Easing::EaseInCubic:
+                return t * t * t;
+            case Easing::EaseOutCubic:
+                return 1.0f - std::pow(1.0f - t, 3.0f);
+            case Easing::EaseInOutCubic:
+                return t < 0.5f ? 4.0f * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+
+            // Quartic
+            case Easing::EaseInQuart:
+                return t * t * t * t;
+            case Easing::EaseOutQuart:
+                return 1.0f - std::pow(1.0f - t, 4.0f);
+            case Easing::EaseInOutQuart:
+                return t < 0.5f ? 8.0f * t * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 4.0f) / 2.0f;
+
+            // Quintic
+            case Easing::EaseInQuint:
+                return t * t * t * t * t;
+            case Easing::EaseOutQuint:
+                return 1.0f - std::pow(1.0f - t, 5.0f);
+            case Easing::EaseInOutQuint:
+                return t < 0.5f ? 16.0f * t * t * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 5.0f) / 2.0f;
+
+            // Sinusoidal
+            case Easing::EaseInSine:
+                return 1.0f - std::cos((t * PI) / 2.0f);
+            case Easing::EaseOutSine:
+                return std::sin((t * PI) / 2.0f);
+            case Easing::EaseInOutSine:
+                return -(std::cos(PI * t) - 1.0f) / 2.0f;
+
+            // Exponential
+            case Easing::EaseInExpo:
+                return t == 0.0f ? 0.0f : std::pow(2.0f, 10.0f * t - 10.0f);
+            case Easing::EaseOutExpo:
+                return t == 1.0f ? 1.0f : 1.0f - std::pow(2.0f, -10.0f * t);
+            case Easing::EaseInOutExpo:
+                return t == 0.0f ? 0.0f
+                     : t == 1.0f ? 1.0f
+                     : t < 0.5f ? std::pow(2.0f, 20.0f * t - 10.0f) / 2.0f
+                                : (2.0f - std::pow(2.0f, -20.0f * t + 10.0f)) / 2.0f;
+
+            // Circular
+            case Easing::EaseInCirc:
+                return 1.0f - std::sqrt(1.0f - t * t);
+            case Easing::EaseOutCirc:
+                return std::sqrt(1.0f - std::pow(t - 1.0f, 2.0f));
+            case Easing::EaseInOutCirc:
+                return t < 0.5f
+                     ? (1.0f - std::sqrt(1.0f - std::pow(2.0f * t, 2.0f))) / 2.0f
+                     : (std::sqrt(1.0f - std::pow(-2.0f * t + 2.0f, 2.0f)) + 1.0f) / 2.0f;
+
+            // Back (overshoot)
+            case Easing::EaseInBack:
+                return c3 * t * t * t - c1 * t * t;
+            case Easing::EaseOutBack:
+                return 1.0f + c3 * std::pow(t - 1.0f, 3.0f) + c1 * std::pow(t - 1.0f, 2.0f);
+            case Easing::EaseInOutBack:
+                return t < 0.5f
+                     ? (std::pow(2.0f * t, 2.0f) * ((c2 + 1.0f) * 2.0f * t - c2)) / 2.0f
+                     : (std::pow(2.0f * t - 2.0f, 2.0f) * ((c2 + 1.0f) * (t * 2.0f - 2.0f) + c2) + 2.0f) / 2.0f;
+
+            // Elastic (spring)
+            case Easing::EaseInElastic:
+                return t == 0.0f ? 0.0f
+                     : t == 1.0f ? 1.0f
+                     : -std::pow(2.0f, 10.0f * t - 10.0f) * std::sin((t * 10.0f - 10.75f) * c4);
+            case Easing::EaseOutElastic:
+                return t == 0.0f ? 0.0f
+                     : t == 1.0f ? 1.0f
+                     : std::pow(2.0f, -10.0f * t) * std::sin((t * 10.0f - 0.75f) * c4) + 1.0f;
+            case Easing::EaseInOutElastic:
+                return t == 0.0f ? 0.0f
+                     : t == 1.0f ? 1.0f
+                     : t < 0.5f
+                         ? -(std::pow(2.0f, 20.0f * t - 10.0f) * std::sin((20.0f * t - 11.125f) * c5)) / 2.0f
+                         : (std::pow(2.0f, -20.0f * t + 10.0f) * std::sin((20.0f * t - 11.125f) * c5)) / 2.0f + 1.0f;
+
+            // Bounce
+            case Easing::EaseInBounce:
+                return 1.0f - applyEasing(Easing::EaseOutBounce, 1.0f - t);
+            case Easing::EaseOutBounce: {
+                const float n1 = 7.5625f;
+                const float d1 = 2.75f;
+                if (t < 1.0f / d1) {
+                    return n1 * t * t;
+                } else if (t < 2.0f / d1) {
+                    float t2 = t - 1.5f / d1;
+                    return n1 * t2 * t2 + 0.75f;
+                } else if (t < 2.5f / d1) {
+                    float t2 = t - 2.25f / d1;
+                    return n1 * t2 * t2 + 0.9375f;
+                } else {
+                    float t2 = t - 2.625f / d1;
+                    return n1 * t2 * t2 + 0.984375f;
+                }
+            }
+            case Easing::EaseInOutBounce:
+                return t < 0.5f
+                     ? (1.0f - applyEasing(Easing::EaseOutBounce, 1.0f - 2.0f * t)) / 2.0f
+                     : (1.0f + applyEasing(Easing::EaseOutBounce, 2.0f * t - 1.0f)) / 2.0f;
+
+            // Manim-style easing functions
+            case Easing::Smooth:
+                // Smoothstep: 3t² - 2t³
+                return t * t * (3.0f - 2.0f * t);
+            case Easing::Smoother:
+                // Smootherstep: 6t⁵ - 15t⁴ + 10t³
+                return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+            case Easing::ThereAndBack:
+                // 0 → 1 → 0 using sine
+                return std::sin(t * PI);
+            case Easing::ThereAndBackWithPause:
+                // 0 → 1 (pause at 1) → 0
+                if (t < 0.4f) return std::sin(t * PI / 0.8f);
+                if (t > 0.6f) return std::sin((t - 0.2f) * PI / 0.8f);
+                return 1.0f;  // Pause at peak
+
+            default:
+                // Default to EaseOutCubic for unknown values
+                return 1.0f - std::pow(1.0f - t, 3.0f);
+        }
+    }
+
+    // ======== Movement Animation Helper Functions ========
+
+    // Catmull-Rom spline interpolation for smooth paths
+    float catmullRom(float p0, float p1, float p2, float p3, float t) {
+        float t2 = t * t;
+        float t3 = t2 * t;
+        return 0.5f * ((2.0f * p1) +
+                       (-p0 + p2) * t +
+                       (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+                       (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+    }
+
+    // Sample path at parameter t (0 to 1)
+    void samplePath(const std::vector<float>& pointsX,
+                    const std::vector<float>& pointsY,
+                    float t, bool smooth,
+                    float& outX, float& outY) {
+        if (pointsX.empty() || pointsY.empty()) {
+            outX = outY = 0.0f;
+            return;
+        }
+        size_t n = std::min(pointsX.size(), pointsY.size());
+        if (n == 1) {
+            outX = pointsX[0];
+            outY = pointsY[0];
+            return;
+        }
+
+        // Clamp t to [0, 1]
+        t = std::clamp(t, 0.0f, 1.0f);
+
+        // Map t to segment index
+        float segmentFloat = t * (n - 1);
+        size_t segment = static_cast<size_t>(segmentFloat);
+        if (segment >= n - 1) segment = n - 2;
+        float localT = segmentFloat - segment;
+
+        if (!smooth || n < 4) {
+            // Linear interpolation
+            outX = pointsX[segment] + localT * (pointsX[segment + 1] - pointsX[segment]);
+            outY = pointsY[segment] + localT * (pointsY[segment + 1] - pointsY[segment]);
+        } else {
+            // Catmull-Rom spline interpolation
+            size_t p0 = (segment == 0) ? 0 : segment - 1;
+            size_t p1 = segment;
+            size_t p2 = segment + 1;
+            size_t p3 = (segment + 2 >= n) ? n - 1 : segment + 2;
+
+            outX = catmullRom(pointsX[p0], pointsX[p1], pointsX[p2], pointsX[p3], localT);
+            outY = catmullRom(pointsY[p0], pointsY[p1], pointsY[p2], pointsY[p3], localT);
+        }
+    }
+
+    // Spiral position at parameter t (0 to 1)
+    void spiralPosition(float centerX, float centerY,
+                        float startRadius, float endRadius,
+                        float rotations, float t,
+                        float& outX, float& outY) {
+        float radius = startRadius + t * (endRadius - startRadius);
+        float angle = t * rotations * 2.0f * 3.14159265f;
+        outX = centerX + radius * std::cos(angle);
+        outY = centerY + radius * std::sin(angle);
+    }
+
+    // Apply homotopy transformation based on type
+    // Types: 0=wave, 1=ripple, 2=shear, 3=twist
+    void applyHomotopy(int type, float baseX, float baseY, float t,
+                       float amplitude, float frequency,
+                       float& outX, float& outY) {
+        float pingPong = std::sin(t * 3.14159265f);  // 0→1→0
+
+        switch (type) {
+            case 0: // Wave - sinusoidal displacement
+                outX = baseX + amplitude * std::sin(baseY * frequency * 3.14159265f) * pingPong;
+                outY = baseY;
+                break;
+            case 1: // Ripple - circular ripple from center
+                {
+                    float dist = std::sqrt(baseX * baseX + baseY * baseY);
+                    float ripple = amplitude * std::sin(dist * frequency * 3.14159265f) * pingPong;
+                    float angle = std::atan2(baseY, baseX);
+                    outX = baseX + ripple * std::cos(angle);
+                    outY = baseY + ripple * std::sin(angle);
+                }
+                break;
+            case 2: // Shear - horizontal shear transformation
+                outX = baseX + baseY * amplitude * pingPong;
+                outY = baseY;
+                break;
+            case 3: // Twist - rotational twist around center
+                {
+                    float dist = std::sqrt(baseX * baseX + baseY * baseY);
+                    float twistAngle = amplitude * dist * pingPong;
+                    float cosA = std::cos(twistAngle);
+                    float sinA = std::sin(twistAngle);
+                    outX = baseX * cosA - baseY * sinA;
+                    outY = baseX * sinA + baseY * cosA;
+                }
+                break;
+            default:
+                outX = baseX;
+                outY = baseY;
+                break;
+        }
+    }
+
+    // Get velocity from vector field based on type
+    // Types: 0=circular, 1=sink, 2=source, 3=saddle
+    void getVelocityField(int type, float x, float y, float& vx, float& vy) {
+        switch (type) {
+            case 0: // Circular - counter-clockwise rotation
+                vx = -y;
+                vy = x;
+                break;
+            case 1: // Sink - flow toward center
+                {
+                    float dist = std::sqrt(x * x + y * y) + 0.001f;  // Avoid division by zero
+                    vx = -x / dist;
+                    vy = -y / dist;
+                }
+                break;
+            case 2: // Source - flow away from center
+                {
+                    float dist = std::sqrt(x * x + y * y) + 0.001f;
+                    vx = x / dist;
+                    vy = y / dist;
+                }
+                break;
+            case 3: // Saddle - hyperbolic flow
+                vx = x;
+                vy = -y;
+                break;
+            default:
+                vx = vy = 0.0f;
+                break;
+        }
+    }
+
+    // ======== End Movement Animation Helper Functions ========
+
+    // Helper: Calculate directional offset based on direction and progress
+	    void calculateDirectionalOffset(Direction dir, float shiftAmount, float progress,
+	                                    float& offsetX, float& offsetY) {
+	        offsetX = 0.0f;
+	        offsetY = 0.0f;
+	        switch (dir) {
+            case Direction::UP:
+                // Coming from below: negative Y offset (NDC Y increases upward)
+                offsetY = -shiftAmount * progress;
+                break;
+            case Direction::DOWN:
+                // Coming from above: positive Y offset
+                offsetY = shiftAmount * progress;
+                break;
+            case Direction::LEFT:
+                // Coming from right: positive X offset
+                offsetX = shiftAmount * progress;
+                break;
+            case Direction::RIGHT:
+                // Coming from left: negative X offset
+                offsetX = -shiftAmount * progress;
+                break;
+            case Direction::NONE:
+            default:
+                break;
+	        }
+	    }
+
+	    void startQueuedTextAnimation(size_t index, float sceneTime) {
+	        if (index >= textObjects.size()) return;
+	        auto& obj = textObjects[index];
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+	        obj.easingFunction = entry.easing;
+	        obj.loopCount = entry.loopCount;
+	        obj.loopPingPong = entry.loopPingPong;
+	        obj.currentLoopIteration = 0;
+	        obj.loopReverse = false;
+
+	        obj.animationDirection = entry.direction;
+	        obj.animationShiftAmount = entry.shiftAmount;
+
+	        switch (entry.type) {
+	            case AnimationType::FadeIn:
+	                obj.currentOpacity = 0.0f;
+	                obj.charRevealProgress = 1.0f;
+	                obj.useSeparateStrokeFill = false;
+	                obj.strokeOpacity = 1.0f;
+	                obj.fillOpacity = 1.0f;
+	                break;
+	            case AnimationType::FadeOut:
+	                obj.currentOpacity = 1.0f;
+	                obj.charRevealProgress = 1.0f;
+	                obj.useSeparateStrokeFill = false;
+	                obj.strokeOpacity = 1.0f;
+	                obj.fillOpacity = 1.0f;
+	                break;
+	            case AnimationType::MoveTo: {
+	                obj.moveStartX = obj.currentOffsetX;
+	                obj.moveStartY = obj.currentOffsetY;
+	                float targetNdcX = (entry.targetX / width) * 2.0f - 1.0f;
+	                float targetNdcY = -((entry.targetY / height) * 2.0f - 1.0f);
+	                obj.moveTargetX = targetNdcX - obj.baseNdcX;
+	                obj.moveTargetY = targetNdcY - obj.baseNdcY;
+	                break;
+	            }
+	            case AnimationType::Scale:
+	                obj.scaleStart = obj.currentScale;
+	                obj.scaleTarget = entry.targetScale;
+	                break;
+	            case AnimationType::Rotate:
+	                obj.rotateStart = obj.currentRotation;
+	                obj.rotateTarget = entry.targetRotation * 3.14159265f / 180.0f;
+	                break;
+	            case AnimationType::Transform:
+	                obj.transformTarget = entry.elementTarget;
+	                obj.transformSourceOpacityStart = obj.currentOpacity;
+	                if (obj.transformTarget.valid) {
+	                    if (obj.transformTarget.type == ElementType::Text &&
+	                        obj.transformTarget.index < textObjects.size()) {
+	                        auto& tgt = textObjects[obj.transformTarget.index];
+	                        tgt.isTransformTarget = true;
+	                        tgt.transformControllerIndex = index;
+	                        tgt.transformControllerType = ElementType::Text;
+	                        tgt.currentOpacity = 0.0f;
+	                    } else if (obj.transformTarget.type == ElementType::Math &&
+	                               obj.transformTarget.index < mathObjects.size()) {
+	                        auto& tgt = mathObjects[obj.transformTarget.index];
+	                        tgt.isTransformTarget = true;
+	                        tgt.transformControllerIndex = index;
+	                        tgt.transformControllerType = ElementType::Text;
+	                        tgt.currentOpacity = 0.0f;
+	                    }
+	                }
+	                break;
+	            case AnimationType::Write:
+	                obj.currentOpacity = 1.0f;
+	                obj.charRevealProgress = 0.0f;
+	                obj.useSeparateStrokeFill = true;
+	                obj.strokeOpacity = 1.0f;
+	                obj.fillOpacity = 1.0f;
+	                break;
+	            case AnimationType::LetterByLetter:
+	                obj.currentOpacity = 1.0f;
+	                obj.charRevealProgress = 0.0f;
+	                obj.useSeparateStrokeFill = false;
+	                break;
+	            case AnimationType::DrawBorderThenFill:
+	                obj.currentOpacity = 1.0f;
+	                obj.charRevealProgress = 1.0f;
+	                obj.useSeparateStrokeFill = true;
+	                obj.strokeOpacity = 0.0f;
+	                obj.fillOpacity = 0.0f;
+	                break;
+	            case AnimationType::Indicate:
+	                obj.originalColorR = obj.colorR;
+	                obj.originalColorG = obj.colorG;
+	                obj.originalColorB = obj.colorB;
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisFlashColorR = entry.emphasisFlashR;
+	                obj.emphasisFlashColorG = entry.emphasisFlashG;
+	                obj.emphasisFlashColorB = entry.emphasisFlashB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::Flash:
+	                obj.originalColorR = obj.colorR;
+	                obj.originalColorG = obj.colorG;
+	                obj.originalColorB = obj.colorB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                break;
+	            case AnimationType::Wiggle:
+	                obj.originalRotation = obj.currentRotation;
+	                obj.emphasisWiggleCycles = entry.emphasisWiggleCycles;
+	                obj.emphasisWiggleAngle = entry.emphasisWiggleAngle;
+	                break;
+	            case AnimationType::Pulse:
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::FocusOn:
+	                for (auto& txt : textObjects) txt.originalOpacity = txt.currentOpacity;
+	                for (auto& shape : shapeObjects) shape.originalOpacity = shape.currentOpacity;
+	                for (auto& math : mathObjects) math.originalOpacity = math.currentOpacity;
+	                obj.isFocusTarget = true;
+	                break;
+	            case AnimationType::Circumscribe: {
+	                float padding = entry.circumscribePadding;
+	                float boxWidth = std::max(1.0f, obj.totalWidth + padding * 2.0f);
+	                float boxHeight = std::max(1.0f, obj.totalHeight + padding * 2.0f);
+
+	                float centerXPx = (obj.baseNdcX + 1.0f) * 0.5f * width;
+	                float centerYPx = (1.0f - obj.baseNdcY) * 0.5f * height;
+
+	                ShapeObject circumShape;
+	                circumShape.type = ShapeType::Rectangle;
+	                circumShape.width = boxWidth;
+	                circumShape.height = boxHeight;
+	                circumShape.usePixelPosition = true;
+	                circumShape.posX = centerXPx;
+	                circumShape.posY = centerYPx;
+	                circumShape.fillR = 0.0f;
+	                circumShape.fillG = 0.0f;
+	                circumShape.fillB = 0.0f;
+	                circumShape.strokeWidth = entry.circumscribeStrokeWidth;
+	                circumShape.strokeR = entry.circumscribeColorR;
+	                circumShape.strokeG = entry.circumscribeColorG;
+	                circumShape.strokeB = entry.circumscribeColorB;
+	                circumShape.currentOpacity = 0.0f;
+	                circumShape.scheduledStartTime = entry.startTime;
+	                circumShape.zIndex = obj.zIndex + 1;
+
+	                shapeObjects.push_back(circumShape);
+	                obj.circumscribeShapeIndex = shapeObjects.size() - 1;
+	                obj.hasCircumscribeShape = true;
+	                shapeVertexBufferDirty = true;
+	                break;
+	            }
+	            case AnimationType::MoveAlongPath:
+	                obj.pathPointsX = entry.pathPointsX;
+	                obj.pathPointsY = entry.pathPointsY;
+	                obj.pathSmooth = entry.pathSmooth;
+	                break;
+	            case AnimationType::SpiralIn:
+	            case AnimationType::SpiralOut:
+	                obj.spiralRotations = entry.spiralRotations;
+	                obj.spiralCenterX = 0.0f;
+	                obj.spiralCenterY = 0.0f;
+	                if (entry.type == AnimationType::SpiralIn) {
+	                    float startRadius = std::sqrt(obj.baseNdcX * obj.baseNdcX + obj.baseNdcY * obj.baseNdcY);
+	                    if (startRadius < 0.1f) startRadius = 0.5f;
+	                    obj.spiralStartRadius = startRadius;
+	                    obj.spiralEndRadius = 0.0f;
+	                } else {
+	                    obj.spiralStartRadius = 0.0f;
+	                    obj.spiralEndRadius = 0.5f;
+	                }
+	                break;
+	            case AnimationType::Homotopy:
+	                obj.homotopyType = entry.homotopyType;
+	                obj.homotopyAmplitude = entry.homotopyAmplitude;
+	                obj.homotopyFrequency = entry.homotopyFrequency;
+	                obj.homotopyBaseX = obj.baseNdcX + obj.currentOffsetX;
+	                obj.homotopyBaseY = obj.baseNdcY + obj.currentOffsetY;
+	                break;
+	            case AnimationType::PhaseFlow:
+	                obj.phaseFlowType = entry.phaseFlowType;
+	                obj.phaseFlowStrength = entry.phaseFlowStrength;
+	                obj.lastProgress = 0.0f;
+	                break;
+	            default:
+	                break;
+	        }
+	    }
+
+	    void startQueuedMathAnimation(size_t index, float sceneTime) {
+	        if (index >= mathObjects.size()) return;
+	        auto& obj = mathObjects[index];
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+	        obj.easingFunction = entry.easing;
+	        obj.loopCount = entry.loopCount;
+	        obj.loopPingPong = entry.loopPingPong;
+	        obj.currentLoopIteration = 0;
+	        obj.loopReverse = false;
+
+	        obj.animationDirection = entry.direction;
+	        obj.animationShiftAmount = entry.shiftAmount;
+
+	        switch (entry.type) {
+	            case AnimationType::FadeIn:
+	                obj.currentOpacity = 0.0f;
+	                break;
+	            case AnimationType::FadeOut:
+	                obj.currentOpacity = 1.0f;
+	                break;
+	            case AnimationType::MoveTo: {
+	                obj.moveStartX = obj.currentOffsetX;
+	                obj.moveStartY = obj.currentOffsetY;
+	                float targetNdcX = (entry.targetX / width) * 2.0f - 1.0f;
+	                float targetNdcY = -((entry.targetY / height) * 2.0f - 1.0f);
+	                obj.moveTargetX = targetNdcX - obj.baseNdcX;
+	                obj.moveTargetY = targetNdcY - obj.baseNdcY;
+	                break;
+	            }
+	            case AnimationType::Scale:
+	                obj.scaleStart = obj.currentScale;
+	                obj.scaleTarget = entry.targetScale;
+	                break;
+	            case AnimationType::Rotate:
+	                obj.rotateStart = obj.currentRotation;
+	                obj.rotateTarget = entry.targetRotation * 3.14159265f / 180.0f;
+	                break;
+	            case AnimationType::Transform:
+	                obj.transformTarget = entry.elementTarget;
+	                obj.transformSourceOpacityStart = obj.currentOpacity;
+	                if (obj.transformTarget.valid) {
+	                    if (obj.transformTarget.type == ElementType::Text &&
+	                        obj.transformTarget.index < textObjects.size()) {
+	                        auto& tgt = textObjects[obj.transformTarget.index];
+	                        tgt.isTransformTarget = true;
+	                        tgt.transformControllerIndex = index;
+	                        tgt.transformControllerType = ElementType::Math;
+	                        tgt.currentOpacity = 0.0f;
+	                    } else if (obj.transformTarget.type == ElementType::Math &&
+	                               obj.transformTarget.index < mathObjects.size()) {
+	                        auto& tgt = mathObjects[obj.transformTarget.index];
+	                        tgt.isTransformTarget = true;
+	                        tgt.transformControllerIndex = index;
+	                        tgt.transformControllerType = ElementType::Math;
+	                        tgt.currentOpacity = 0.0f;
+	                    }
+	                }
+	                break;
+	            case AnimationType::Indicate:
+	                obj.originalColorR = obj.colorR;
+	                obj.originalColorG = obj.colorG;
+	                obj.originalColorB = obj.colorB;
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisFlashColorR = entry.emphasisFlashR;
+	                obj.emphasisFlashColorG = entry.emphasisFlashG;
+	                obj.emphasisFlashColorB = entry.emphasisFlashB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::Flash:
+	                obj.originalColorR = obj.colorR;
+	                obj.originalColorG = obj.colorG;
+	                obj.originalColorB = obj.colorB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                break;
+	            case AnimationType::Wiggle:
+	                obj.originalRotation = obj.currentRotation;
+	                obj.emphasisWiggleCycles = entry.emphasisWiggleCycles;
+	                obj.emphasisWiggleAngle = entry.emphasisWiggleAngle;
+	                break;
+	            case AnimationType::Pulse:
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::FocusOn:
+	                for (auto& txt : textObjects) txt.originalOpacity = txt.currentOpacity;
+	                for (auto& shape : shapeObjects) shape.originalOpacity = shape.currentOpacity;
+	                for (auto& math : mathObjects) math.originalOpacity = math.currentOpacity;
+	                obj.isFocusTarget = true;
+	                break;
+	            case AnimationType::MoveAlongPath:
+	                obj.pathPointsX = entry.pathPointsX;
+	                obj.pathPointsY = entry.pathPointsY;
+	                obj.pathSmooth = entry.pathSmooth;
+	                break;
+	            case AnimationType::SpiralIn:
+	            case AnimationType::SpiralOut:
+	                obj.spiralRotations = entry.spiralRotations;
+	                obj.spiralCenterX = 0.0f;
+	                obj.spiralCenterY = 0.0f;
+	                if (entry.type == AnimationType::SpiralIn) {
+	                    float startRadius = std::sqrt(obj.baseNdcX * obj.baseNdcX + obj.baseNdcY * obj.baseNdcY);
+	                    if (startRadius < 0.1f) startRadius = 0.5f;
+	                    obj.spiralStartRadius = startRadius;
+	                    obj.spiralEndRadius = 0.0f;
+	                } else {
+	                    obj.spiralStartRadius = 0.0f;
+	                    obj.spiralEndRadius = 0.5f;
+	                }
+	                break;
+	            case AnimationType::Homotopy:
+	                obj.homotopyType = entry.homotopyType;
+	                obj.homotopyAmplitude = entry.homotopyAmplitude;
+	                obj.homotopyFrequency = entry.homotopyFrequency;
+	                obj.homotopyBaseX = obj.baseNdcX + obj.currentOffsetX;
+	                obj.homotopyBaseY = obj.baseNdcY + obj.currentOffsetY;
+	                break;
+	            case AnimationType::PhaseFlow:
+	                obj.phaseFlowType = entry.phaseFlowType;
+	                obj.phaseFlowStrength = entry.phaseFlowStrength;
+	                obj.lastProgress = 0.0f;
+	                break;
+	            default:
+	                break;
+	        }
+	    }
+
+	    void startQueuedImageAnimation(size_t index, float sceneTime) {
+	        if (index >= imageObjects.size()) return;
+	        auto& obj = imageObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+	        obj.easingFunction = entry.easing;
+	        obj.loopCount = entry.loopCount;
+	        obj.loopPingPong = entry.loopPingPong;
+	        obj.currentLoopIteration = 0;
+	        obj.loopReverse = false;
+
+	        obj.animationDirection = entry.direction;
+	        obj.animationShiftAmount = entry.shiftAmount;
+
+	        switch (entry.type) {
+	            case AnimationType::FadeIn:
+	                obj.currentOpacity = 0.0f;
+	                break;
+	            case AnimationType::FadeOut:
+	                obj.currentOpacity = 1.0f;
+	                break;
+	            case AnimationType::MoveTo: {
+	                obj.moveStartX = obj.currentOffsetX;
+	                obj.moveStartY = obj.currentOffsetY;
+	                float targetNdcX = (entry.targetX / width) * 2.0f - 1.0f;
+	                float targetNdcY = (entry.targetY / height) * 2.0f - 1.0f;
+	                obj.moveTargetX = targetNdcX - obj.baseNdcX;
+	                obj.moveTargetY = targetNdcY - obj.baseNdcY;
+	                break;
+	            }
+	            case AnimationType::Scale:
+	                obj.scaleStart = obj.currentScale;
+	                obj.scaleTarget = entry.targetScale;
+	                break;
+	            case AnimationType::Rotate:
+	                obj.rotateStart = obj.currentRotation;
+	                obj.rotateTarget = entry.targetRotation * 3.14159265f / 180.0f;
+	                break;
+	            default:
+	                break;
+	        }
+	    }
+
+	    void startQueuedShapeAnimation(size_t index, float sceneTime) {
+	        if (index >= shapeObjects.size()) return;
+	        auto& obj = shapeObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+	        obj.easingFunction = entry.easing;
+	        obj.loopCount = entry.loopCount;
+	        obj.loopPingPong = entry.loopPingPong;
+	        obj.currentLoopIteration = 0;
+	        obj.loopReverse = false;
+
+	        obj.animationDirection = entry.direction;
+	        obj.animationShiftAmount = entry.shiftAmount;
+
+	        switch (entry.type) {
+	            case AnimationType::FadeIn:
+	                obj.currentOpacity = 0.0f;
+	                break;
+	            case AnimationType::FadeOut:
+	                obj.currentOpacity = 1.0f;
+	                break;
+	            case AnimationType::MoveTo: {
+	                obj.moveStartX = obj.currentOffsetX;
+	                obj.moveStartY = obj.currentOffsetY;
+	                float targetNdcX = (entry.targetX / width) * 2.0f - 1.0f;
+	                float targetNdcY = -((entry.targetY / height) * 2.0f - 1.0f);
+	                obj.moveTargetX = targetNdcX - obj.baseNdcX;
+	                obj.moveTargetY = targetNdcY - obj.baseNdcY;
+	                break;
+	            }
+	            case AnimationType::Scale:
+	                obj.scaleStart = obj.currentScale;
+	                obj.scaleTarget = entry.targetScale;
+	                break;
+	            case AnimationType::Rotate:
+	                obj.rotateStart = obj.currentRotation;
+	                obj.rotateTarget = entry.targetRotation * 3.14159265f / 180.0f;
+	                break;
+	            case AnimationType::Morph:
+	                if (entry.morphTargetIndex < shapeObjects.size()) {
+	                    auto& tgtObj = shapeObjects[entry.morphTargetIndex];
+
+	                    obj.morphState.active = true;
+	                    obj.morphState.targetIndex = entry.morphTargetIndex;
+	                    obj.morphState.morphProgress = 0.0f;
+	                    obj.morphState.morphVertexBuffer = VK_NULL_HANDLE;
+	                    obj.morphState.morphVertexMemory = VK_NULL_HANDLE;
+	                    obj.morphState.sourceR = obj.fillR;
+	                    obj.morphState.sourceG = obj.fillG;
+	                    obj.morphState.sourceB = obj.fillB;
+	                    obj.morphState.targetR = tgtObj.fillR;
+	                    obj.morphState.targetG = tgtObj.fillG;
+	                    obj.morphState.targetB = tgtObj.fillB;
+
+	                    auto computeScale = [this](const ShapeObject& shape, float& outSX, float& outSY) {
+	                        if (shape.type == ShapeType::Circle) {
+	                            outSX = (shape.radius / width) * 2.0f;
+	                            outSY = (shape.radius / height) * 2.0f;
+	                        } else if (shape.type == ShapeType::Rectangle) {
+	                            outSX = (shape.width / 2.0f / width) * 2.0f;
+	                            outSY = (shape.height / 2.0f / height) * 2.0f;
+	                        } else if (shape.type == ShapeType::Triangle) {
+	                            outSX = (shape.size / width) * 2.0f;
+	                            outSY = (shape.size / height) * 2.0f;
+	                        } else {
+	                            outSX = outSY = 0.1f;
+	                        }
+	                    };
+
+	                    float srcScaleX, srcScaleY;
+	                    float tgtScaleX, tgtScaleY;
+	                    computeScale(obj, srcScaleX, srcScaleY);
+	                    computeScale(tgtObj, tgtScaleX, tgtScaleY);
+
+	                    float srcCenterX = obj.baseNdcX + obj.currentOffsetX;
+	                    float srcCenterY = obj.baseNdcY + obj.currentOffsetY;
+	                    float tgtCenterX = tgtObj.baseNdcX + tgtObj.currentOffsetX;
+	                    float tgtCenterY = tgtObj.baseNdcY + tgtObj.currentOffsetY;
+
+	                    obj.morphState.vertices = generateMorphVertices(
+	                        obj, tgtObj,
+	                        srcCenterX, srcCenterY, srcScaleX, srcScaleY,
+	                        tgtCenterX, tgtCenterY, tgtScaleX, tgtScaleY);
+
+	                    tgtObj.isMorphTarget = true;
+	                    tgtObj.currentOpacity = 0.0f;
+	                    obj.currentOpacity = 1.0f;
+	                }
+	                break;
+	            case AnimationType::Circumscribe: {
+	                float padding = entry.circumscribePadding;
+
+	                float baseWidthPx = 100.0f;
+	                float baseHeightPx = 100.0f;
+	                if (obj.type == ShapeType::Circle) {
+	                    baseWidthPx = obj.radius * 2.0f;
+	                    baseHeightPx = obj.radius * 2.0f;
+	                } else if (obj.type == ShapeType::Rectangle) {
+	                    baseWidthPx = obj.width;
+	                    baseHeightPx = obj.height;
+	                } else if (obj.type == ShapeType::Triangle) {
+	                    baseWidthPx = obj.size;
+	                    baseHeightPx = obj.size;
+	                } else if (obj.type == ShapeType::Ellipse) {
+	                    baseWidthPx = obj.radiusX * 2.0f;
+	                    baseHeightPx = obj.radiusY * 2.0f;
+	                }
+
+	                float scaledWidthPx = baseWidthPx * obj.currentScale;
+	                float scaledHeightPx = baseHeightPx * obj.currentScale;
+
+	                float boxWidth = std::max(1.0f, scaledWidthPx + padding * 2.0f);
+	                float boxHeight = std::max(1.0f, scaledHeightPx + padding * 2.0f);
+
+	                float centerXPx = (obj.baseNdcX + obj.currentOffsetX + 1.0f) * 0.5f * width;
+	                float centerYPx = (1.0f - (obj.baseNdcY + obj.currentOffsetY)) * 0.5f * height;
+
+	                ShapeObject circumShape;
+	                circumShape.type = ShapeType::Rectangle;
+	                circumShape.width = boxWidth;
+	                circumShape.height = boxHeight;
+	                circumShape.usePixelPosition = true;
+	                circumShape.posX = centerXPx;
+	                circumShape.posY = centerYPx;
+	                circumShape.fillR = 0.0f;
+	                circumShape.fillG = 0.0f;
+	                circumShape.fillB = 0.0f;
+	                circumShape.strokeWidth = entry.circumscribeStrokeWidth;
+	                circumShape.strokeR = entry.circumscribeColorR;
+	                circumShape.strokeG = entry.circumscribeColorG;
+	                circumShape.strokeB = entry.circumscribeColorB;
+	                circumShape.currentOpacity = 0.0f;
+	                circumShape.scheduledStartTime = entry.startTime;
+	                circumShape.zIndex = obj.zIndex + 1;
+
+	                shapeObjects.push_back(circumShape);
+	                obj.circumscribeShapeIndex = shapeObjects.size() - 1;
+	                obj.hasCircumscribeShape = true;
+	                shapeVertexBufferDirty = true;
+	                break;
+	            }
+	            case AnimationType::Indicate:
+	                obj.originalFillR = obj.fillR;
+	                obj.originalFillG = obj.fillG;
+	                obj.originalFillB = obj.fillB;
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisFlashColorR = entry.emphasisFlashR;
+	                obj.emphasisFlashColorG = entry.emphasisFlashG;
+	                obj.emphasisFlashColorB = entry.emphasisFlashB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::Flash:
+	                obj.originalFillR = obj.fillR;
+	                obj.originalFillG = obj.fillG;
+	                obj.originalFillB = obj.fillB;
+	                obj.emphasisIntensity = entry.emphasisIntensity;
+	                break;
+	            case AnimationType::Wiggle:
+	                obj.originalRotation = obj.currentRotation;
+	                obj.emphasisWiggleCycles = entry.emphasisWiggleCycles;
+	                obj.emphasisWiggleAngle = entry.emphasisWiggleAngle;
+	                break;
+	            case AnimationType::Pulse:
+	                obj.originalScale = obj.currentScale;
+	                obj.emphasisPeakScale = entry.emphasisPeakScale;
+	                break;
+	            case AnimationType::FocusOn:
+	                for (auto& txt : textObjects) txt.originalOpacity = txt.currentOpacity;
+	                for (auto& shape : shapeObjects) shape.originalOpacity = shape.currentOpacity;
+	                for (auto& math : mathObjects) math.originalOpacity = math.currentOpacity;
+	                obj.isFocusTarget = true;
+	                break;
+	            case AnimationType::MoveAlongPath:
+	                obj.pathPointsX = entry.pathPointsX;
+	                obj.pathPointsY = entry.pathPointsY;
+	                obj.pathSmooth = entry.pathSmooth;
+	                break;
+	            case AnimationType::SpiralIn:
+	            case AnimationType::SpiralOut:
+	                obj.spiralRotations = entry.spiralRotations;
+	                obj.spiralCenterX = 0.0f;
+	                obj.spiralCenterY = 0.0f;
+	                if (entry.type == AnimationType::SpiralIn) {
+	                    float startRadius = std::sqrt(obj.baseNdcX * obj.baseNdcX + obj.baseNdcY * obj.baseNdcY);
+	                    if (startRadius < 0.1f) startRadius = 0.5f;
+	                    obj.spiralStartRadius = startRadius;
+	                    obj.spiralEndRadius = 0.0f;
+	                } else {
+	                    obj.spiralStartRadius = 0.0f;
+	                    obj.spiralEndRadius = 0.5f;
+	                }
+	                break;
+	            case AnimationType::Homotopy:
+	                obj.homotopyType = entry.homotopyType;
+	                obj.homotopyAmplitude = entry.homotopyAmplitude;
+	                obj.homotopyFrequency = entry.homotopyFrequency;
+	                obj.homotopyBaseX = obj.baseNdcX + obj.currentOffsetX;
+	                obj.homotopyBaseY = obj.baseNdcY + obj.currentOffsetY;
+	                break;
+	            case AnimationType::PhaseFlow:
+	                obj.phaseFlowType = entry.phaseFlowType;
+	                obj.phaseFlowStrength = entry.phaseFlowStrength;
+	                obj.lastProgress = 0.0f;
+	                break;
+	            default:
+	                break;
+	        }
+	    }
+
+	    void startQueuedGraphAnimation(size_t index, float sceneTime) {
+	        if (index >= graphObjects.size()) return;
+	        auto& obj = graphObjects[index];
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+
+	        if (entry.type == AnimationType::FadeIn) obj.currentOpacity = 0.0f;
+	        if (entry.type == AnimationType::FadeOut) obj.currentOpacity = 1.0f;
+	    }
+
+	    void startQueuedVectorAnimation(size_t index, float sceneTime) {
+	        if (index >= vectorObjects.size()) return;
+	        auto& obj = vectorObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+
+	        if (entry.type == AnimationType::FadeIn) obj.currentOpacity = 0.0f;
+	        if (entry.type == AnimationType::FadeOut) obj.currentOpacity = 1.0f;
+	    }
+
+	    void startQueuedAxes3DAnimation(size_t index, float sceneTime) {
+	        if (index >= axes3DObjects.size()) return;
+	        auto& obj = axes3DObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+
+	        if (entry.type == AnimationType::FadeIn) obj.currentOpacity = 0.0f;
+	        if (entry.type == AnimationType::FadeOut) obj.currentOpacity = 1.0f;
+	    }
+
+	    void startQueuedSurface3DAnimation(size_t index, float sceneTime) {
+	        if (index >= surface3DObjects.size()) return;
+	        auto& obj = surface3DObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+
+	        if (entry.type == AnimationType::FadeIn) obj.currentOpacity = 0.0f;
+	        if (entry.type == AnimationType::FadeOut) obj.currentOpacity = 1.0f;
+	    }
+
+	    void startQueuedShape3DAnimation(size_t index, float sceneTime) {
+	        if (index >= shape3DObjects.size()) return;
+	        auto& obj = shape3DObjects[index];
+	        if (obj.cleared) return;
+	        if (obj.animationType != AnimationType::None) return;
+	        if (obj.currentQueueIndex >= obj.animationQueue.size()) return;
+
+	        const auto& entry = obj.animationQueue[obj.currentQueueIndex];
+	        if (sceneTime < entry.startTime) return;
+
+	        obj.currentQueueIndex++;
+
+	        obj.animationType = entry.type;
+	        obj.animationDuration = entry.duration;
+	        obj.scheduledStartTime = entry.startTime;
+	        obj.animationStartTime = -1.0f;
+	        obj.easingFunction = entry.easing;
+	        obj.loopCount = entry.loopCount;
+	        obj.loopPingPong = entry.loopPingPong;
+	        obj.currentLoopIteration = 0;
+	        obj.loopReverse = false;
+
+	        if (entry.type == AnimationType::FadeIn) obj.currentOpacity = 0.0f;
+	        if (entry.type == AnimationType::FadeOut) obj.currentOpacity = 1.0f;
+	    }
+
+        void updateAnimation() {
+            float currentTime = static_cast<float>(glfwGetTime());
+            float sceneTime = currentTime - static_cast<float>(sceneStartTime);
+
+        // Check for scheduled clear (two-phase per event: fade out, then clear).
+        if (!pendingClears.empty()) {
+            auto& clear = pendingClears.front();
+            if (sceneTime >= clear.time) {
+                if (!clear.fadeStarted) {
+                    // Phase 1: Start fade-out animation
+                    triggerClearFadeOut(clear);
+                } else if (sceneTime >= clear.time + clear.fadeDuration) {
+                    // Phase 2: Fade complete, actually clear
+                    performClear(clear);
+                    pendingClears.pop_front();
+                    return;  // Avoid animating stale state the same frame as a clear.
+                }
+                // During fade-out, continue to process animations below
+            }
+        }
+
+	        for (size_t i = 0; i < textObjects.size(); i++) {
+	            auto& textObj = textObjects[i];
+	            // Skip cleared elements
+	            if (textObj.cleared) continue;
+
+	            // Check if element is scheduled to appear yet
+	            if (sceneTime < textObj.scheduledStartTime) {
+	                textObj.currentOpacity = 0.0f;  // Hidden until scheduled
+	                continue;
+	            }
+
+	            // Skip if this element is controlled by a Transform animation
+	            if (textObj.isTransformTarget) continue;
+
+	            startQueuedTextAnimation(i, sceneTime);
+
+	            if (textObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (textObj.animationStartTime < 0)
+                textObj.animationStartTime = static_cast<float>(sceneStartTime) + textObj.scheduledStartTime;
+
+            float elapsed = currentTime - textObj.animationStartTime;
+            float progress = std::min(elapsed / textObj.animationDuration, 1.0f);
+
+            // Apply the stored easing function
+            float easedProgress = applyEasing(textObj.easingFunction, progress);
+
+            if (textObj.animationType == AnimationType::FadeIn) {
+                textObj.currentOpacity = easedProgress;
+                // Calculate directional offset (moving toward final position)
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(textObj.animationDirection,
+                                           textObj.animationShiftAmount,
+                                           offsetProgress,
+                                           textObj.currentOffsetX,
+                                           textObj.currentOffsetY);
+            } else if (textObj.animationType == AnimationType::FadeOut) {
+                textObj.currentOpacity = 1.0f - easedProgress;
+                // Calculate directional offset (moving away from position)
+                calculateDirectionalOffset(textObj.animationDirection,
+                                           textObj.animationShiftAmount,
+                                           easedProgress,
+                                           textObj.currentOffsetX,
+                                           textObj.currentOffsetY);
+            } else if (textObj.animationType == AnimationType::MoveTo) {
+                // Interpolate position from start to target
+                textObj.currentOffsetX = textObj.moveStartX +
+                    (textObj.moveTargetX - textObj.moveStartX) * easedProgress;
+                textObj.currentOffsetY = textObj.moveStartY +
+                    (textObj.moveTargetY - textObj.moveStartY) * easedProgress;
+            } else if (textObj.animationType == AnimationType::Scale) {
+                // Interpolate scale from start to target
+                textObj.currentScale = textObj.scaleStart +
+                    (textObj.scaleTarget - textObj.scaleStart) * easedProgress;
+            } else if (textObj.animationType == AnimationType::Rotate) {
+                // Interpolate rotation from start to target
+                textObj.currentRotation = textObj.rotateStart +
+                    (textObj.rotateTarget - textObj.rotateStart) * easedProgress;
+            } else if (textObj.animationType == AnimationType::Transform) {
+                // Cross-fade: source fades out, target fades in
+                textObj.currentOpacity = textObj.transformSourceOpacityStart * (1.0f - easedProgress);
+
+                // Update target element opacity
+                if (textObj.transformTarget.valid) {
+                    if (textObj.transformTarget.type == ElementType::Text) {
+                        textObjects[textObj.transformTarget.index].currentOpacity = easedProgress;
+                    } else {
+                        mathObjects[textObj.transformTarget.index].currentOpacity = easedProgress;
+                    }
+                }
+            } else if (textObj.animationType == AnimationType::Write) {
+                // Typewriter effect: reveal characters one by one
+                textObj.currentOpacity = 1.0f;
+                textObj.charRevealProgress = easedProgress;
+                textObj.useSeparateStrokeFill = true;
+                textObj.strokeOpacity = 1.0f;
+                textObj.fillOpacity = 1.0f;
+                // Handle directional offset
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(textObj.animationDirection,
+                                           textObj.animationShiftAmount,
+                                           offsetProgress,
+                                           textObj.currentOffsetX,
+                                           textObj.currentOffsetY);
+            } else if (textObj.animationType == AnimationType::LetterByLetter) {
+                // Letter by letter fade-in
+                textObj.currentOpacity = 1.0f;
+                textObj.charRevealProgress = easedProgress;
+                textObj.useSeparateStrokeFill = false;
+                // Handle directional offset
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(textObj.animationDirection,
+                                           textObj.animationShiftAmount,
+                                           offsetProgress,
+                                           textObj.currentOffsetX,
+                                           textObj.currentOffsetY);
+            } else if (textObj.animationType == AnimationType::DrawBorderThenFill) {
+                // Two-phase animation: stroke first, then fill
+                textObj.currentOpacity = 1.0f;
+                textObj.useSeparateStrokeFill = true;
+                textObj.charRevealProgress = 1.0f;  // All characters visible
+
+                // First half: stroke animates in
+                float strokePhaseEnd = 0.5f;
+                if (easedProgress < strokePhaseEnd) {
+                    float strokeProgress = easedProgress / strokePhaseEnd;
+                    textObj.strokeOpacity = strokeProgress;
+                    textObj.fillOpacity = 0.0f;
+                } else {
+                    // Second half: fill animates in
+                    float fillProgress = (easedProgress - strokePhaseEnd) / (1.0f - strokePhaseEnd);
+                    textObj.strokeOpacity = 1.0f;
+                    textObj.fillOpacity = fillProgress;
+                }
+            } else if (textObj.animationType == AnimationType::Pulse) {
+                // Pulse: scale up then back to original using ping-pong
+                float pp = easePingPongSmooth(progress);
+                textObj.currentScale = textObj.originalScale +
+                    (textObj.emphasisPeakScale - textObj.originalScale) * pp;
+            } else if (textObj.animationType == AnimationType::Wiggle) {
+                // Wiggle: oscillate rotation back and forth
+                float wiggle = easeSineWave(progress, textObj.emphasisWiggleCycles);
+                textObj.currentRotation = textObj.originalRotation + wiggle * textObj.emphasisWiggleAngle;
+            } else if (textObj.animationType == AnimationType::Flash) {
+                // Flash: quick brightness/color flash using ping-pong
+                float pp = easePingPong(progress);
+                float boost = 1.0f + pp * textObj.emphasisIntensity;
+                textObj.colorR = std::min(1.0f, textObj.originalColorR * boost);
+                textObj.colorG = std::min(1.0f, textObj.originalColorG * boost);
+                textObj.colorB = std::min(1.0f, textObj.originalColorB * boost);
+            } else if (textObj.animationType == AnimationType::Indicate) {
+                // Indicate: color flash + scale pulse combined
+                float pp = easePingPongSmooth(progress);
+                // Scale effect
+                textObj.currentScale = textObj.originalScale +
+                    (textObj.emphasisPeakScale - textObj.originalScale) * pp;
+                // Color flash effect - interpolate toward flash color
+                float colorIntensity = pp * textObj.emphasisIntensity;
+                textObj.colorR = textObj.originalColorR +
+                    (textObj.emphasisFlashColorR - textObj.originalColorR) * colorIntensity;
+                textObj.colorG = textObj.originalColorG +
+                    (textObj.emphasisFlashColorG - textObj.originalColorG) * colorIntensity;
+                textObj.colorB = textObj.originalColorB +
+                    (textObj.emphasisFlashColorB - textObj.originalColorB) * colorIntensity;
+            } else if (textObj.animationType == AnimationType::Circumscribe) {
+                // Circumscribe: animate a temporary shape around the element
+                if (textObj.hasCircumscribeShape && textObj.circumscribeShapeIndex < shapeObjects.size()) {
+                    auto& circumShape = shapeObjects[textObj.circumscribeShapeIndex];
+                    // First 70%: fade in, last 30%: fade out
+                    if (progress < 0.7f) {
+                        circumShape.currentOpacity = progress / 0.7f;
+                    } else {
+                        circumShape.currentOpacity = 1.0f - (progress - 0.7f) / 0.3f;
+                    }
+                }
+            } else if (textObj.animationType == AnimationType::FocusOn) {
+                // FocusOn: dim all other elements, highlight this one
+                float pp = easePingPongSmooth(progress);
+                float dimFactor = 1.0f - 0.7f * pp;  // Dim to 30% opacity
+                // This element stays at full opacity
+                textObj.currentOpacity = textObj.originalOpacity;
+                // Dim other text elements
+                for (size_t i = 0; i < textObjects.size(); i++) {
+                    if (&textObjects[i] != &textObj && !textObjects[i].cleared && !textObjects[i].isFocusTarget) {
+                        textObjects[i].currentOpacity = textObjects[i].originalOpacity * dimFactor;
+                    }
+                }
+                // Dim shape elements
+                for (auto& shape : shapeObjects) {
+                    if (!shape.cleared && !shape.isFocusTarget) {
+                        shape.currentOpacity = shape.originalOpacity * dimFactor;
+                    }
+                }
+                // Dim math elements
+                for (auto& math : mathObjects) {
+                    if (!math.cleared && !math.isFocusTarget) {
+                        math.currentOpacity = math.originalOpacity * dimFactor;
+                    }
+                }
+            } else if (textObj.animationType == AnimationType::MoveAlongPath) {
+                // MoveAlongPath: follow a path defined by points
+                if (!textObj.pathPointsX.empty()) {
+                    float pathX, pathY;
+                    samplePath(textObj.pathPointsX, textObj.pathPointsY,
+                               easedProgress, textObj.pathSmooth, pathX, pathY);
+                    textObj.currentOffsetX = pathX - textObj.baseNdcX;
+                    textObj.currentOffsetY = pathY - textObj.baseNdcY;
+                }
+            } else if (textObj.animationType == AnimationType::SpiralIn ||
+                       textObj.animationType == AnimationType::SpiralOut) {
+                // Spiral: move in a spiral pattern
+                float spiralX, spiralY;
+                spiralPosition(textObj.spiralCenterX, textObj.spiralCenterY,
+                               textObj.spiralStartRadius, textObj.spiralEndRadius,
+                               textObj.spiralRotations, easedProgress,
+                               spiralX, spiralY);
+                textObj.currentOffsetX = spiralX;
+                textObj.currentOffsetY = spiralY;
+            } else if (textObj.animationType == AnimationType::Homotopy) {
+                // Homotopy: apply continuous transformation
+                float newX, newY;
+                applyHomotopy(textObj.homotopyType,
+                              textObj.homotopyBaseX, textObj.homotopyBaseY,
+                              progress,
+                              textObj.homotopyAmplitude, textObj.homotopyFrequency,
+                              newX, newY);
+                textObj.currentOffsetX = newX - textObj.baseNdcX;
+                textObj.currentOffsetY = newY - textObj.baseNdcY;
+            } else if (textObj.animationType == AnimationType::PhaseFlow) {
+                // PhaseFlow: integrate velocity field
+                float dt = easedProgress - textObj.lastProgress;
+                if (dt > 0.0f) {
+                    float vx, vy;
+                    getVelocityField(textObj.phaseFlowType,
+                                     textObj.baseNdcX + textObj.currentOffsetX,
+                                     textObj.baseNdcY + textObj.currentOffsetY,
+                                     vx, vy);
+                    textObj.currentOffsetX += vx * dt * textObj.phaseFlowStrength;
+                    textObj.currentOffsetY += vy * dt * textObj.phaseFlowStrength;
+                }
+                textObj.lastProgress = easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                // Check if animation should loop
+                if (textObj.loopCount != 0) {
+                    // Reset animation for next loop iteration
+                    textObj.animationStartTime = -1.0f;
+                    textObj.scheduledStartTime = sceneTime;
+                    textObj.currentLoopIteration++;
+
+                    // Decrement loop count if not infinite (-1)
+                    if (textObj.loopCount > 0) {
+                        textObj.loopCount--;
+                    }
+
+                    // Handle ping-pong: toggle direction
+                    if (textObj.loopPingPong) {
+                        textObj.loopReverse = !textObj.loopReverse;
+                    }
+
+                    // Reset animation state for looping
+                    if (textObj.animationType == AnimationType::FadeIn) {
+                        textObj.currentOpacity = textObj.loopReverse ? 1.0f : 0.0f;
+                    } else if (textObj.animationType == AnimationType::FadeOut) {
+                        textObj.currentOpacity = textObj.loopReverse ? 0.0f : 1.0f;
+                    } else if (textObj.animationType == AnimationType::Scale) {
+                        if (textObj.loopReverse) {
+                            std::swap(textObj.scaleStart, textObj.scaleTarget);
+                        }
+                        textObj.currentScale = textObj.scaleStart;
+                    } else if (textObj.animationType == AnimationType::Rotate) {
+                        if (textObj.loopReverse) {
+                            std::swap(textObj.rotateStart, textObj.rotateTarget);
+                        }
+                        textObj.currentRotation = textObj.rotateStart;
+                    } else if (textObj.animationType == AnimationType::MoveTo) {
+                        if (textObj.loopReverse) {
+                            std::swap(textObj.moveStartX, textObj.moveTargetX);
+                            std::swap(textObj.moveStartY, textObj.moveTargetY);
+                        }
+                        textObj.currentOffsetX = textObj.moveStartX;
+                        textObj.currentOffsetY = textObj.moveStartY;
+                    }
+                    continue;  // Don't mark animation as complete
+                }
+
+                // Animation complete - keep final values for transform animations
+                if (textObj.animationType == AnimationType::MoveTo) {
+                    textObj.currentOffsetX = textObj.moveTargetX;
+                    textObj.currentOffsetY = textObj.moveTargetY;
+                } else if (textObj.animationType == AnimationType::Scale) {
+                    textObj.currentScale = textObj.scaleTarget;
+                } else if (textObj.animationType == AnimationType::Rotate) {
+                    textObj.currentRotation = textObj.rotateTarget;
+                } else if (textObj.animationType == AnimationType::Transform) {
+                    // Transform complete: source hidden, target fully visible
+                    textObj.currentOpacity = 0.0f;
+                    if (textObj.transformTarget.valid) {
+                        if (textObj.transformTarget.type == ElementType::Text) {
+                            auto& tgt = textObjects[textObj.transformTarget.index];
+                            tgt.currentOpacity = 1.0f;
+                            tgt.isTransformTarget = false;
+                        } else {
+                            auto& tgt = mathObjects[textObj.transformTarget.index];
+                            tgt.currentOpacity = 1.0f;
+                            tgt.isTransformTarget = false;
+                        }
+                    }
+                } else if (textObj.animationType == AnimationType::Write ||
+                           textObj.animationType == AnimationType::LetterByLetter) {
+                    // Per-character animations complete
+                    textObj.charRevealProgress = 1.0f;
+                    textObj.currentOffsetX = 0.0f;
+                    textObj.currentOffsetY = 0.0f;
+                    textObj.useSeparateStrokeFill = false;
+                    textObj.strokeOpacity = 1.0f;
+                    textObj.fillOpacity = 1.0f;
+                } else if (textObj.animationType == AnimationType::DrawBorderThenFill) {
+                    // DrawBorderThenFill complete: both stroke and fill fully visible
+                    textObj.strokeOpacity = 1.0f;
+                    textObj.fillOpacity = 1.0f;
+                    textObj.useSeparateStrokeFill = false;  // Return to normal rendering
+                } else if (textObj.animationType == AnimationType::Pulse ||
+                           textObj.animationType == AnimationType::Indicate) {
+                    // Restore original scale and color
+                    textObj.currentScale = textObj.originalScale;
+                    textObj.colorR = textObj.originalColorR;
+                    textObj.colorG = textObj.originalColorG;
+                    textObj.colorB = textObj.originalColorB;
+                } else if (textObj.animationType == AnimationType::Wiggle) {
+                    // Restore original rotation
+                    textObj.currentRotation = textObj.originalRotation;
+                } else if (textObj.animationType == AnimationType::Flash) {
+                    // Restore original color
+                    textObj.colorR = textObj.originalColorR;
+                    textObj.colorG = textObj.originalColorG;
+                    textObj.colorB = textObj.originalColorB;
+                } else if (textObj.animationType == AnimationType::Circumscribe) {
+                    // Clean up temporary circumscribe shape
+                    if (textObj.hasCircumscribeShape && textObj.circumscribeShapeIndex < shapeObjects.size()) {
+                        shapeObjects[textObj.circumscribeShapeIndex].cleared = true;
+                    }
+                    textObj.hasCircumscribeShape = false;
+                    textObj.circumscribeShapeIndex = SIZE_MAX;
+                } else if (textObj.animationType == AnimationType::FocusOn) {
+                    // Restore all elements to their original opacity
+                    for (auto& txt : textObjects) {
+                        if (!txt.cleared) {
+                            txt.currentOpacity = txt.originalOpacity;
+                        }
+                    }
+                    for (auto& shape : shapeObjects) {
+                        if (!shape.cleared) {
+                            shape.currentOpacity = shape.originalOpacity;
+                        }
+                    }
+                    for (auto& math : mathObjects) {
+                        if (!math.cleared) {
+                            math.currentOpacity = math.originalOpacity;
+                        }
+                    }
+                } else if (textObj.animationType == AnimationType::MoveAlongPath) {
+                    // Keep final path position
+                    if (!textObj.pathPointsX.empty()) {
+                        textObj.currentOffsetX = textObj.pathPointsX.back() - textObj.baseNdcX;
+                        textObj.currentOffsetY = textObj.pathPointsY.back() - textObj.baseNdcY;
+                    }
+                    textObj.pathPointsX.clear();
+                    textObj.pathPointsY.clear();
+                } else if (textObj.animationType == AnimationType::SpiralIn ||
+                           textObj.animationType == AnimationType::SpiralOut) {
+                    // Keep final spiral position (already set)
+                } else if (textObj.animationType == AnimationType::Homotopy) {
+                    // Homotopy returns to original position (ping-pong)
+                    textObj.currentOffsetX = 0.0f;
+                    textObj.currentOffsetY = 0.0f;
+                } else if (textObj.animationType == AnimationType::PhaseFlow) {
+                    // Keep final position (already set)
+                    textObj.lastProgress = 0.0f;
+                } else {
+                    // FadeIn/FadeOut reset offset to 0
+                    textObj.currentOffsetX = 0.0f;
+                    textObj.currentOffsetY = 0.0f;
+                }
+
+                // Reset loop state when animation completes
+                textObj.loopCount = 0;
+                textObj.currentLoopIteration = 0;
+                textObj.loopPingPong = false;
+                textObj.loopReverse = false;
+                textObj.animationType = AnimationType::None;
+            }
+        }
+
+        // Math object animations
+	        for (size_t i = 0; i < mathObjects.size(); i++) {
+	            auto& mathObj = mathObjects[i];
+	            // Skip cleared elements
+	            if (mathObj.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+            if (sceneTime < mathObj.scheduledStartTime) {
+                mathObj.currentOpacity = 0.0f;  // Hidden until scheduled
+                continue;
+            }
+
+	            // Skip if this element is controlled by a Transform animation
+	            if (mathObj.isTransformTarget) continue;
+
+	            startQueuedMathAnimation(i, sceneTime);
+
+	            if (mathObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (mathObj.animationStartTime < 0)
+                mathObj.animationStartTime = static_cast<float>(sceneStartTime) + mathObj.scheduledStartTime;
+
+            float elapsed = currentTime - mathObj.animationStartTime;
+            float progress = std::min(elapsed / mathObj.animationDuration, 1.0f);
+
+            // Apply the stored easing function
+            float easedProgress = applyEasing(mathObj.easingFunction, progress);
+
+            if (mathObj.animationType == AnimationType::FadeIn) {
+                mathObj.currentOpacity = easedProgress;
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(mathObj.animationDirection,
+                                           mathObj.animationShiftAmount,
+                                           offsetProgress,
+                                           mathObj.currentOffsetX,
+                                           mathObj.currentOffsetY);
+            } else if (mathObj.animationType == AnimationType::FadeOut) {
+                mathObj.currentOpacity = 1.0f - easedProgress;
+                calculateDirectionalOffset(mathObj.animationDirection,
+                                           mathObj.animationShiftAmount,
+                                           easedProgress,
+                                           mathObj.currentOffsetX,
+                                           mathObj.currentOffsetY);
+            } else if (mathObj.animationType == AnimationType::MoveTo) {
+                // Interpolate position from start to target
+                mathObj.currentOffsetX = mathObj.moveStartX +
+                    (mathObj.moveTargetX - mathObj.moveStartX) * easedProgress;
+                mathObj.currentOffsetY = mathObj.moveStartY +
+                    (mathObj.moveTargetY - mathObj.moveStartY) * easedProgress;
+            } else if (mathObj.animationType == AnimationType::Scale) {
+                // Interpolate scale from start to target
+                mathObj.currentScale = mathObj.scaleStart +
+                    (mathObj.scaleTarget - mathObj.scaleStart) * easedProgress;
+            } else if (mathObj.animationType == AnimationType::Rotate) {
+                // Interpolate rotation from start to target
+                mathObj.currentRotation = mathObj.rotateStart +
+                    (mathObj.rotateTarget - mathObj.rotateStart) * easedProgress;
+            } else if (mathObj.animationType == AnimationType::Transform) {
+                // Cross-fade: source fades out, target fades in
+                mathObj.currentOpacity = mathObj.transformSourceOpacityStart * (1.0f - easedProgress);
+
+                // Update target element opacity
+                if (mathObj.transformTarget.valid) {
+                    if (mathObj.transformTarget.type == ElementType::Text) {
+                        textObjects[mathObj.transformTarget.index].currentOpacity = easedProgress;
+                    } else {
+                        mathObjects[mathObj.transformTarget.index].currentOpacity = easedProgress;
+                    }
+                }
+            } else if (mathObj.animationType == AnimationType::Pulse) {
+                // Pulse: scale up then back to original using ping-pong
+                float pp = easePingPongSmooth(progress);
+                mathObj.currentScale = mathObj.originalScale +
+                    (mathObj.emphasisPeakScale - mathObj.originalScale) * pp;
+            } else if (mathObj.animationType == AnimationType::Wiggle) {
+                // Wiggle: oscillate rotation back and forth
+                float wiggle = easeSineWave(progress, mathObj.emphasisWiggleCycles);
+                mathObj.currentRotation = mathObj.originalRotation + wiggle * mathObj.emphasisWiggleAngle;
+            } else if (mathObj.animationType == AnimationType::Flash) {
+                // Flash: quick brightness/color flash using ping-pong
+                float pp = easePingPong(progress);
+                float boost = 1.0f + pp * mathObj.emphasisIntensity;
+                mathObj.colorR = std::min(1.0f, mathObj.originalColorR * boost);
+                mathObj.colorG = std::min(1.0f, mathObj.originalColorG * boost);
+                mathObj.colorB = std::min(1.0f, mathObj.originalColorB * boost);
+            } else if (mathObj.animationType == AnimationType::Indicate) {
+                // Indicate: color flash + scale pulse combined
+                float pp = easePingPongSmooth(progress);
+                // Scale effect
+                mathObj.currentScale = mathObj.originalScale +
+                    (mathObj.emphasisPeakScale - mathObj.originalScale) * pp;
+                // Color flash effect
+                float colorIntensity = pp * mathObj.emphasisIntensity;
+                mathObj.colorR = mathObj.originalColorR +
+                    (mathObj.emphasisFlashColorR - mathObj.originalColorR) * colorIntensity;
+                mathObj.colorG = mathObj.originalColorG +
+                    (mathObj.emphasisFlashColorG - mathObj.originalColorG) * colorIntensity;
+                mathObj.colorB = mathObj.originalColorB +
+                    (mathObj.emphasisFlashColorB - mathObj.originalColorB) * colorIntensity;
+            } else if (mathObj.animationType == AnimationType::Circumscribe) {
+                // Circumscribe: animate a temporary shape around the element
+                if (mathObj.hasCircumscribeShape && mathObj.circumscribeShapeIndex < shapeObjects.size()) {
+                    auto& circumShape = shapeObjects[mathObj.circumscribeShapeIndex];
+                    if (progress < 0.7f) {
+                        circumShape.currentOpacity = progress / 0.7f;
+                    } else {
+                        circumShape.currentOpacity = 1.0f - (progress - 0.7f) / 0.3f;
+                    }
+                }
+            } else if (mathObj.animationType == AnimationType::FocusOn) {
+                // FocusOn: dim all other elements
+                float pp = easePingPongSmooth(progress);
+                float dimFactor = 1.0f - 0.7f * pp;
+                mathObj.currentOpacity = mathObj.originalOpacity;
+                for (auto& txt : textObjects) {
+                    if (!txt.cleared && !txt.isFocusTarget) {
+                        txt.currentOpacity = txt.originalOpacity * dimFactor;
+                    }
+                }
+                for (auto& shape : shapeObjects) {
+                    if (!shape.cleared && !shape.isFocusTarget) {
+                        shape.currentOpacity = shape.originalOpacity * dimFactor;
+                    }
+                }
+                for (size_t i = 0; i < mathObjects.size(); i++) {
+                    if (&mathObjects[i] != &mathObj && !mathObjects[i].cleared && !mathObjects[i].isFocusTarget) {
+                        mathObjects[i].currentOpacity = mathObjects[i].originalOpacity * dimFactor;
+                    }
+                }
+            } else if (mathObj.animationType == AnimationType::MoveAlongPath) {
+                // MoveAlongPath: follow a path defined by points
+                if (!mathObj.pathPointsX.empty()) {
+                    float pathX, pathY;
+                    samplePath(mathObj.pathPointsX, mathObj.pathPointsY,
+                               easedProgress, mathObj.pathSmooth, pathX, pathY);
+                    mathObj.currentOffsetX = pathX - mathObj.baseNdcX;
+                    mathObj.currentOffsetY = pathY - mathObj.baseNdcY;
+                }
+            } else if (mathObj.animationType == AnimationType::SpiralIn ||
+                       mathObj.animationType == AnimationType::SpiralOut) {
+                // Spiral: move in a spiral pattern
+                float spiralX, spiralY;
+                spiralPosition(mathObj.spiralCenterX, mathObj.spiralCenterY,
+                               mathObj.spiralStartRadius, mathObj.spiralEndRadius,
+                               mathObj.spiralRotations, easedProgress,
+                               spiralX, spiralY);
+                mathObj.currentOffsetX = spiralX;
+                mathObj.currentOffsetY = spiralY;
+            } else if (mathObj.animationType == AnimationType::Homotopy) {
+                // Homotopy: apply continuous transformation
+                float newX, newY;
+                applyHomotopy(mathObj.homotopyType,
+                              mathObj.homotopyBaseX, mathObj.homotopyBaseY,
+                              progress,
+                              mathObj.homotopyAmplitude, mathObj.homotopyFrequency,
+                              newX, newY);
+                mathObj.currentOffsetX = newX - mathObj.baseNdcX;
+                mathObj.currentOffsetY = newY - mathObj.baseNdcY;
+            } else if (mathObj.animationType == AnimationType::PhaseFlow) {
+                // PhaseFlow: integrate velocity field
+                float dt = easedProgress - mathObj.lastProgress;
+                if (dt > 0.0f) {
+                    float vx, vy;
+                    getVelocityField(mathObj.phaseFlowType,
+                                     mathObj.baseNdcX + mathObj.currentOffsetX,
+                                     mathObj.baseNdcY + mathObj.currentOffsetY,
+                                     vx, vy);
+                    mathObj.currentOffsetX += vx * dt * mathObj.phaseFlowStrength;
+                    mathObj.currentOffsetY += vy * dt * mathObj.phaseFlowStrength;
+                }
+                mathObj.lastProgress = easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                // Check if animation should loop
+                if (mathObj.loopCount != 0) {
+                    // Reset animation for next loop iteration
+                    mathObj.animationStartTime = -1.0f;
+                    mathObj.scheduledStartTime = sceneTime;
+                    mathObj.currentLoopIteration++;
+
+                    // Decrement loop count if not infinite (-1)
+                    if (mathObj.loopCount > 0) {
+                        mathObj.loopCount--;
+                    }
+
+                    // Handle ping-pong: toggle direction
+                    if (mathObj.loopPingPong) {
+                        mathObj.loopReverse = !mathObj.loopReverse;
+                    }
+
+                    // Reset animation state for looping
+                    if (mathObj.animationType == AnimationType::FadeIn) {
+                        mathObj.currentOpacity = mathObj.loopReverse ? 1.0f : 0.0f;
+                    } else if (mathObj.animationType == AnimationType::FadeOut) {
+                        mathObj.currentOpacity = mathObj.loopReverse ? 0.0f : 1.0f;
+                    } else if (mathObj.animationType == AnimationType::Scale) {
+                        if (mathObj.loopReverse) {
+                            std::swap(mathObj.scaleStart, mathObj.scaleTarget);
+                        }
+                        mathObj.currentScale = mathObj.scaleStart;
+                    } else if (mathObj.animationType == AnimationType::Rotate) {
+                        if (mathObj.loopReverse) {
+                            std::swap(mathObj.rotateStart, mathObj.rotateTarget);
+                        }
+                        mathObj.currentRotation = mathObj.rotateStart;
+                    } else if (mathObj.animationType == AnimationType::MoveTo) {
+                        if (mathObj.loopReverse) {
+                            std::swap(mathObj.moveStartX, mathObj.moveTargetX);
+                            std::swap(mathObj.moveStartY, mathObj.moveTargetY);
+                        }
+                        mathObj.currentOffsetX = mathObj.moveStartX;
+                        mathObj.currentOffsetY = mathObj.moveStartY;
+                    }
+                    continue;  // Don't mark animation as complete
+                }
+
+                // Animation complete - keep final values for transform animations
+                if (mathObj.animationType == AnimationType::MoveTo) {
+                    mathObj.currentOffsetX = mathObj.moveTargetX;
+                    mathObj.currentOffsetY = mathObj.moveTargetY;
+                } else if (mathObj.animationType == AnimationType::Scale) {
+                    mathObj.currentScale = mathObj.scaleTarget;
+                } else if (mathObj.animationType == AnimationType::Rotate) {
+                    mathObj.currentRotation = mathObj.rotateTarget;
+                } else if (mathObj.animationType == AnimationType::Transform) {
+                    // Transform complete: source hidden, target fully visible
+                    mathObj.currentOpacity = 0.0f;
+                    if (mathObj.transformTarget.valid) {
+                        if (mathObj.transformTarget.type == ElementType::Text) {
+                            auto& tgt = textObjects[mathObj.transformTarget.index];
+                            tgt.currentOpacity = 1.0f;
+                            tgt.isTransformTarget = false;
+                        } else {
+                            auto& tgt = mathObjects[mathObj.transformTarget.index];
+                            tgt.currentOpacity = 1.0f;
+                            tgt.isTransformTarget = false;
+                        }
+                    }
+                } else if (mathObj.animationType == AnimationType::Pulse ||
+                           mathObj.animationType == AnimationType::Indicate) {
+                    mathObj.currentScale = mathObj.originalScale;
+                    mathObj.colorR = mathObj.originalColorR;
+                    mathObj.colorG = mathObj.originalColorG;
+                    mathObj.colorB = mathObj.originalColorB;
+                } else if (mathObj.animationType == AnimationType::Wiggle) {
+                    mathObj.currentRotation = mathObj.originalRotation;
+                } else if (mathObj.animationType == AnimationType::Flash) {
+                    mathObj.colorR = mathObj.originalColorR;
+                    mathObj.colorG = mathObj.originalColorG;
+                    mathObj.colorB = mathObj.originalColorB;
+                } else if (mathObj.animationType == AnimationType::Circumscribe) {
+                    if (mathObj.hasCircumscribeShape && mathObj.circumscribeShapeIndex < shapeObjects.size()) {
+                        shapeObjects[mathObj.circumscribeShapeIndex].cleared = true;
+                    }
+                    mathObj.hasCircumscribeShape = false;
+                    mathObj.circumscribeShapeIndex = SIZE_MAX;
+                } else if (mathObj.animationType == AnimationType::FocusOn) {
+                    for (auto& txt : textObjects) {
+                        if (!txt.cleared) txt.currentOpacity = txt.originalOpacity;
+                    }
+                    for (auto& shape : shapeObjects) {
+                        if (!shape.cleared) shape.currentOpacity = shape.originalOpacity;
+                    }
+                    for (auto& math : mathObjects) {
+                        if (!math.cleared) math.currentOpacity = math.originalOpacity;
+                    }
+                } else if (mathObj.animationType == AnimationType::MoveAlongPath) {
+                    // Keep final path position
+                    if (!mathObj.pathPointsX.empty()) {
+                        mathObj.currentOffsetX = mathObj.pathPointsX.back() - mathObj.baseNdcX;
+                        mathObj.currentOffsetY = mathObj.pathPointsY.back() - mathObj.baseNdcY;
+                    }
+                    mathObj.pathPointsX.clear();
+                    mathObj.pathPointsY.clear();
+                } else if (mathObj.animationType == AnimationType::SpiralIn ||
+                           mathObj.animationType == AnimationType::SpiralOut) {
+                    // Keep final spiral position (already set)
+                } else if (mathObj.animationType == AnimationType::Homotopy) {
+                    // Homotopy returns to original position (ping-pong)
+                    mathObj.currentOffsetX = 0.0f;
+                    mathObj.currentOffsetY = 0.0f;
+                } else if (mathObj.animationType == AnimationType::PhaseFlow) {
+                    // Keep final position (already set)
+                    mathObj.lastProgress = 0.0f;
+                } else {
+                    // FadeIn/FadeOut reset offset to 0
+                    mathObj.currentOffsetX = 0.0f;
+                    mathObj.currentOffsetY = 0.0f;
+                }
+
+                // Reset loop state when animation completes
+                mathObj.loopCount = 0;
+                mathObj.currentLoopIteration = 0;
+                mathObj.loopPingPong = false;
+                mathObj.loopReverse = false;
+                mathObj.animationType = AnimationType::None;
+            }
+        }
+
+        // Image object animations
+	        for (size_t i = 0; i < imageObjects.size(); i++) {
+	            auto& imgObj = imageObjects[i];
+	            // Skip cleared elements
+	            if (imgObj.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+            if (sceneTime < imgObj.scheduledStartTime) {
+                imgObj.currentOpacity = 0.0f;  // Hidden until scheduled
+                continue;
+            }
+
+	            startQueuedImageAnimation(i, sceneTime);
+
+	            if (imgObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (imgObj.animationStartTime < 0)
+                imgObj.animationStartTime = static_cast<float>(sceneStartTime) + imgObj.scheduledStartTime;
+
+            float elapsed = currentTime - imgObj.animationStartTime;
+            float progress = std::min(elapsed / imgObj.animationDuration, 1.0f);
+
+            // Apply the stored easing function
+            float easedProgress = applyEasing(imgObj.easingFunction, progress);
+
+            if (imgObj.animationType == AnimationType::FadeIn) {
+                imgObj.currentOpacity = easedProgress;
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(imgObj.animationDirection,
+                                           imgObj.animationShiftAmount,
+                                           offsetProgress,
+                                           imgObj.currentOffsetX,
+                                           imgObj.currentOffsetY);
+            } else if (imgObj.animationType == AnimationType::FadeOut) {
+                imgObj.currentOpacity = 1.0f - easedProgress;
+                calculateDirectionalOffset(imgObj.animationDirection,
+                                           imgObj.animationShiftAmount,
+                                           easedProgress,
+                                           imgObj.currentOffsetX,
+                                           imgObj.currentOffsetY);
+            } else if (imgObj.animationType == AnimationType::MoveTo) {
+                imgObj.currentOffsetX = imgObj.moveStartX +
+                    (imgObj.moveTargetX - imgObj.moveStartX) * easedProgress;
+                imgObj.currentOffsetY = imgObj.moveStartY +
+                    (imgObj.moveTargetY - imgObj.moveStartY) * easedProgress;
+            } else if (imgObj.animationType == AnimationType::Scale) {
+                imgObj.currentScale = imgObj.scaleStart +
+                    (imgObj.scaleTarget - imgObj.scaleStart) * easedProgress;
+            } else if (imgObj.animationType == AnimationType::Rotate) {
+                imgObj.currentRotation = imgObj.rotateStart +
+                    (imgObj.rotateTarget - imgObj.rotateStart) * easedProgress;
+            }
+
+            // Handle animation completion
+            if (progress >= 1.0f) {
+                // Check if animation should loop
+                if (imgObj.loopCount != 0) {
+                    // Reset animation for next loop iteration
+                    imgObj.animationStartTime = -1.0f;
+                    imgObj.scheduledStartTime = sceneTime;
+                    imgObj.currentLoopIteration++;
+
+                    // Decrement loop count if not infinite (-1)
+                    if (imgObj.loopCount > 0) {
+                        imgObj.loopCount--;
+                    }
+
+                    // Handle ping-pong: toggle direction
+                    if (imgObj.loopPingPong) {
+                        imgObj.loopReverse = !imgObj.loopReverse;
+                    }
+
+                    // Reset animation state for looping
+                    if (imgObj.animationType == AnimationType::FadeIn) {
+                        imgObj.currentOpacity = imgObj.loopReverse ? 1.0f : 0.0f;
+                    } else if (imgObj.animationType == AnimationType::FadeOut) {
+                        imgObj.currentOpacity = imgObj.loopReverse ? 0.0f : 1.0f;
+                    } else if (imgObj.animationType == AnimationType::Scale) {
+                        if (imgObj.loopReverse) {
+                            std::swap(imgObj.scaleStart, imgObj.scaleTarget);
+                        }
+                        imgObj.currentScale = imgObj.scaleStart;
+                    } else if (imgObj.animationType == AnimationType::Rotate) {
+                        if (imgObj.loopReverse) {
+                            std::swap(imgObj.rotateStart, imgObj.rotateTarget);
+                        }
+                        imgObj.currentRotation = imgObj.rotateStart;
+                    } else if (imgObj.animationType == AnimationType::MoveTo) {
+                        if (imgObj.loopReverse) {
+                            std::swap(imgObj.moveStartX, imgObj.moveTargetX);
+                            std::swap(imgObj.moveStartY, imgObj.moveTargetY);
+                        }
+                        imgObj.currentOffsetX = imgObj.moveStartX;
+                        imgObj.currentOffsetY = imgObj.moveStartY;
+                    }
+                    continue;  // Don't mark animation as complete
+                }
+
+                if (imgObj.animationType == AnimationType::MoveTo) {
+                    imgObj.currentOffsetX = imgObj.moveTargetX;
+                    imgObj.currentOffsetY = imgObj.moveTargetY;
+                } else if (imgObj.animationType == AnimationType::Scale) {
+                    imgObj.currentScale = imgObj.scaleTarget;
+                } else if (imgObj.animationType == AnimationType::Rotate) {
+                    imgObj.currentRotation = imgObj.rotateTarget;
+                } else {
+                    // FadeIn/FadeOut reset offset to 0
+                    imgObj.currentOffsetX = 0.0f;
+                    imgObj.currentOffsetY = 0.0f;
+                }
+
+                // Reset loop state when animation completes
+                imgObj.loopCount = 0;
+                imgObj.currentLoopIteration = 0;
+                imgObj.loopPingPong = false;
+                imgObj.loopReverse = false;
+                imgObj.animationType = AnimationType::None;
+            }
+        }
+
+        // Shape object animations
+	        for (size_t i = 0; i < shapeObjects.size(); i++) {
+	            auto& shapeObj = shapeObjects[i];
+	            // Skip cleared elements
+	            if (shapeObj.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+            if (sceneTime < shapeObj.scheduledStartTime) {
+                shapeObj.currentOpacity = 0.0f;  // Hidden until scheduled
+                continue;
+            }
+
+	            startQueuedShapeAnimation(i, sceneTime);
+
+	            if (shapeObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (shapeObj.animationStartTime < 0) {
+                shapeObj.animationStartTime = static_cast<float>(sceneStartTime) + shapeObj.scheduledStartTime;
+
+                // For morph animations, create the GPU buffer now (Vulkan is initialized)
+                if (shapeObj.animationType == AnimationType::Morph &&
+                    !shapeObj.morphState.vertices.empty() &&
+                    shapeObj.morphState.morphVertexBuffer == VK_NULL_HANDLE) {
+                    createMorphVertexBuffer(shapeObj);
+                }
+            }
+
+            float elapsed = currentTime - shapeObj.animationStartTime;
+            float progress = std::min(elapsed / shapeObj.animationDuration, 1.0f);
+
+            // Apply the stored easing function
+            float easedProgress = applyEasing(shapeObj.easingFunction, progress);
+
+            if (shapeObj.animationType == AnimationType::FadeIn) {
+                shapeObj.currentOpacity = easedProgress;
+                float offsetProgress = 1.0f - easedProgress;
+                calculateDirectionalOffset(shapeObj.animationDirection,
+                                           shapeObj.animationShiftAmount,
+                                           offsetProgress,
+                                           shapeObj.currentOffsetX,
+                                           shapeObj.currentOffsetY);
+            } else if (shapeObj.animationType == AnimationType::FadeOut) {
+                shapeObj.currentOpacity = 1.0f - easedProgress;
+                calculateDirectionalOffset(shapeObj.animationDirection,
+                                           shapeObj.animationShiftAmount,
+                                           easedProgress,
+                                           shapeObj.currentOffsetX,
+                                           shapeObj.currentOffsetY);
+            } else if (shapeObj.animationType == AnimationType::MoveTo) {
+                shapeObj.currentOffsetX = shapeObj.moveStartX +
+                    (shapeObj.moveTargetX - shapeObj.moveStartX) * easedProgress;
+                shapeObj.currentOffsetY = shapeObj.moveStartY +
+                    (shapeObj.moveTargetY - shapeObj.moveStartY) * easedProgress;
+            } else if (shapeObj.animationType == AnimationType::Scale) {
+                shapeObj.currentScale = shapeObj.scaleStart +
+                    (shapeObj.scaleTarget - shapeObj.scaleStart) * easedProgress;
+            } else if (shapeObj.animationType == AnimationType::Rotate) {
+                shapeObj.currentRotation = shapeObj.rotateStart +
+                    (shapeObj.rotateTarget - shapeObj.rotateStart) * easedProgress;
+            } else if (shapeObj.animationType == AnimationType::Morph) {
+                // Update morph progress
+                shapeObj.morphState.morphProgress = easedProgress;
+                shapeObj.currentOpacity = 1.0f;  // Keep source visible during morph
+
+                // Keep target hidden during morph (it will be shown at completion)
+                if (shapeObj.morphState.targetIndex < shapeObjects.size()) {
+                    shapeObjects[shapeObj.morphState.targetIndex].currentOpacity = 0.0f;
+                }
+            } else if (shapeObj.animationType == AnimationType::Pulse) {
+                // Pulse: scale up then back to original using ping-pong
+                float pp = easePingPongSmooth(progress);
+                shapeObj.currentScale = shapeObj.originalScale +
+                    (shapeObj.emphasisPeakScale - shapeObj.originalScale) * pp;
+            } else if (shapeObj.animationType == AnimationType::Wiggle) {
+                // Wiggle: oscillate rotation back and forth
+                float wiggle = easeSineWave(progress, shapeObj.emphasisWiggleCycles);
+                shapeObj.currentRotation = shapeObj.originalRotation + wiggle * shapeObj.emphasisWiggleAngle;
+            } else if (shapeObj.animationType == AnimationType::Flash) {
+                // Flash: quick brightness/color flash using ping-pong
+                float pp = easePingPong(progress);
+                float boost = 1.0f + pp * shapeObj.emphasisIntensity;
+                shapeObj.fillR = std::min(1.0f, shapeObj.originalFillR * boost);
+                shapeObj.fillG = std::min(1.0f, shapeObj.originalFillG * boost);
+                shapeObj.fillB = std::min(1.0f, shapeObj.originalFillB * boost);
+            } else if (shapeObj.animationType == AnimationType::Indicate) {
+                // Indicate: color flash + scale pulse combined
+                float pp = easePingPongSmooth(progress);
+                // Scale effect
+                shapeObj.currentScale = shapeObj.originalScale +
+                    (shapeObj.emphasisPeakScale - shapeObj.originalScale) * pp;
+                // Color flash effect
+                float colorIntensity = pp * shapeObj.emphasisIntensity;
+                shapeObj.fillR = shapeObj.originalFillR +
+                    (shapeObj.emphasisFlashColorR - shapeObj.originalFillR) * colorIntensity;
+                shapeObj.fillG = shapeObj.originalFillG +
+                    (shapeObj.emphasisFlashColorG - shapeObj.originalFillG) * colorIntensity;
+                shapeObj.fillB = shapeObj.originalFillB +
+                    (shapeObj.emphasisFlashColorB - shapeObj.originalFillB) * colorIntensity;
+            } else if (shapeObj.animationType == AnimationType::Circumscribe) {
+                // Circumscribe: animate a temporary shape around the element
+                if (shapeObj.hasCircumscribeShape && shapeObj.circumscribeShapeIndex < shapeObjects.size()) {
+                    auto& circumShape = shapeObjects[shapeObj.circumscribeShapeIndex];
+                    if (progress < 0.7f) {
+                        circumShape.currentOpacity = progress / 0.7f;
+                    } else {
+                        circumShape.currentOpacity = 1.0f - (progress - 0.7f) / 0.3f;
+                    }
+                }
+            } else if (shapeObj.animationType == AnimationType::FocusOn) {
+                // FocusOn: dim all other elements
+                float pp = easePingPongSmooth(progress);
+                float dimFactor = 1.0f - 0.7f * pp;
+                shapeObj.currentOpacity = shapeObj.originalOpacity;
+                for (auto& txt : textObjects) {
+                    if (!txt.cleared && !txt.isFocusTarget) {
+                        txt.currentOpacity = txt.originalOpacity * dimFactor;
+                    }
+                }
+                for (size_t i = 0; i < shapeObjects.size(); i++) {
+                    if (&shapeObjects[i] != &shapeObj && !shapeObjects[i].cleared && !shapeObjects[i].isFocusTarget) {
+                        shapeObjects[i].currentOpacity = shapeObjects[i].originalOpacity * dimFactor;
+                    }
+                }
+                for (auto& math : mathObjects) {
+                    if (!math.cleared && !math.isFocusTarget) {
+                        math.currentOpacity = math.originalOpacity * dimFactor;
+                    }
+                }
+            } else if (shapeObj.animationType == AnimationType::MoveAlongPath) {
+                // MoveAlongPath: follow a path defined by points
+                if (!shapeObj.pathPointsX.empty()) {
+                    float pathX, pathY;
+                    samplePath(shapeObj.pathPointsX, shapeObj.pathPointsY,
+                               easedProgress, shapeObj.pathSmooth, pathX, pathY);
+                    shapeObj.currentOffsetX = pathX - shapeObj.baseNdcX;
+                    shapeObj.currentOffsetY = pathY - shapeObj.baseNdcY;
+                }
+            } else if (shapeObj.animationType == AnimationType::SpiralIn ||
+                       shapeObj.animationType == AnimationType::SpiralOut) {
+                // Spiral: move in a spiral pattern
+                float spiralX, spiralY;
+                spiralPosition(shapeObj.spiralCenterX, shapeObj.spiralCenterY,
+                               shapeObj.spiralStartRadius, shapeObj.spiralEndRadius,
+                               shapeObj.spiralRotations, easedProgress,
+                               spiralX, spiralY);
+                shapeObj.currentOffsetX = spiralX;
+                shapeObj.currentOffsetY = spiralY;
+            } else if (shapeObj.animationType == AnimationType::Homotopy) {
+                // Homotopy: apply continuous transformation
+                float newX, newY;
+                applyHomotopy(shapeObj.homotopyType,
+                              shapeObj.homotopyBaseX, shapeObj.homotopyBaseY,
+                              progress,
+                              shapeObj.homotopyAmplitude, shapeObj.homotopyFrequency,
+                              newX, newY);
+                shapeObj.currentOffsetX = newX - shapeObj.baseNdcX;
+                shapeObj.currentOffsetY = newY - shapeObj.baseNdcY;
+            } else if (shapeObj.animationType == AnimationType::PhaseFlow) {
+                // PhaseFlow: integrate velocity field
+                float dt = easedProgress - shapeObj.lastProgress;
+                if (dt > 0.0f) {
+                    float vx, vy;
+                    getVelocityField(shapeObj.phaseFlowType,
+                                     shapeObj.baseNdcX + shapeObj.currentOffsetX,
+                                     shapeObj.baseNdcY + shapeObj.currentOffsetY,
+                                     vx, vy);
+                    shapeObj.currentOffsetX += vx * dt * shapeObj.phaseFlowStrength;
+                    shapeObj.currentOffsetY += vy * dt * shapeObj.phaseFlowStrength;
+                }
+                shapeObj.lastProgress = easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                // Check if animation should loop
+                if (shapeObj.loopCount != 0) {
+                    // Reset animation for next loop iteration
+                    shapeObj.animationStartTime = -1.0f;
+                    shapeObj.scheduledStartTime = sceneTime;
+                    shapeObj.currentLoopIteration++;
+
+                    // Decrement loop count if not infinite (-1)
+                    if (shapeObj.loopCount > 0) {
+                        shapeObj.loopCount--;
+                    }
+
+                    // Handle ping-pong: toggle direction
+                    if (shapeObj.loopPingPong) {
+                        shapeObj.loopReverse = !shapeObj.loopReverse;
+                    }
+
+                    // Reset animation state for looping
+                    if (shapeObj.animationType == AnimationType::FadeIn) {
+                        shapeObj.currentOpacity = shapeObj.loopReverse ? 1.0f : 0.0f;
+                    } else if (shapeObj.animationType == AnimationType::FadeOut) {
+                        shapeObj.currentOpacity = shapeObj.loopReverse ? 0.0f : 1.0f;
+                    } else if (shapeObj.animationType == AnimationType::Scale) {
+                        if (shapeObj.loopReverse) {
+                            std::swap(shapeObj.scaleStart, shapeObj.scaleTarget);
+                        }
+                        shapeObj.currentScale = shapeObj.scaleStart;
+                    } else if (shapeObj.animationType == AnimationType::Rotate) {
+                        if (shapeObj.loopReverse) {
+                            std::swap(shapeObj.rotateStart, shapeObj.rotateTarget);
+                        }
+                        shapeObj.currentRotation = shapeObj.rotateStart;
+                    } else if (shapeObj.animationType == AnimationType::MoveTo) {
+                        if (shapeObj.loopReverse) {
+                            std::swap(shapeObj.moveStartX, shapeObj.moveTargetX);
+                            std::swap(shapeObj.moveStartY, shapeObj.moveTargetY);
+                        }
+                        shapeObj.currentOffsetX = shapeObj.moveStartX;
+                        shapeObj.currentOffsetY = shapeObj.moveStartY;
+                    }
+                    continue;  // Don't mark animation as complete
+                }
+
+                if (shapeObj.animationType == AnimationType::MoveTo) {
+                    shapeObj.currentOffsetX = shapeObj.moveTargetX;
+                    shapeObj.currentOffsetY = shapeObj.moveTargetY;
+                } else if (shapeObj.animationType == AnimationType::Scale) {
+                    shapeObj.currentScale = shapeObj.scaleTarget;
+                } else if (shapeObj.animationType == AnimationType::Rotate) {
+                    shapeObj.currentRotation = shapeObj.rotateTarget;
+                } else if (shapeObj.animationType == AnimationType::Morph) {
+                    // Morph complete: hide source, show target
+                    shapeObj.currentOpacity = 0.0f;  // Hide source
+                    shapeObj.morphState.active = false;
+
+                    // Show and reveal target
+                    if (shapeObj.morphState.targetIndex < shapeObjects.size()) {
+                        auto& targetObj = shapeObjects[shapeObj.morphState.targetIndex];
+                        targetObj.currentOpacity = 1.0f;
+                        targetObj.isMorphTarget = false;
+                    }
+
+                    // Cleanup morph state (deferred to avoid buffer issues during render)
+                    // Note: buffer cleanup happens in cleanupMorphState
+                } else if (shapeObj.animationType == AnimationType::Pulse ||
+                           shapeObj.animationType == AnimationType::Indicate) {
+                    shapeObj.currentScale = shapeObj.originalScale;
+                    shapeObj.fillR = shapeObj.originalFillR;
+                    shapeObj.fillG = shapeObj.originalFillG;
+                    shapeObj.fillB = shapeObj.originalFillB;
+                } else if (shapeObj.animationType == AnimationType::Wiggle) {
+                    shapeObj.currentRotation = shapeObj.originalRotation;
+                } else if (shapeObj.animationType == AnimationType::Flash) {
+                    shapeObj.fillR = shapeObj.originalFillR;
+                    shapeObj.fillG = shapeObj.originalFillG;
+                    shapeObj.fillB = shapeObj.originalFillB;
+                } else if (shapeObj.animationType == AnimationType::Circumscribe) {
+                    if (shapeObj.hasCircumscribeShape && shapeObj.circumscribeShapeIndex < shapeObjects.size()) {
+                        shapeObjects[shapeObj.circumscribeShapeIndex].cleared = true;
+                    }
+                    shapeObj.hasCircumscribeShape = false;
+                    shapeObj.circumscribeShapeIndex = SIZE_MAX;
+                } else if (shapeObj.animationType == AnimationType::FocusOn) {
+                    for (auto& txt : textObjects) {
+                        if (!txt.cleared) txt.currentOpacity = txt.originalOpacity;
+                    }
+                    for (auto& shape : shapeObjects) {
+                        if (!shape.cleared) shape.currentOpacity = shape.originalOpacity;
+                    }
+                    for (auto& math : mathObjects) {
+                        if (!math.cleared) math.currentOpacity = math.originalOpacity;
+                    }
+                } else if (shapeObj.animationType == AnimationType::MoveAlongPath) {
+                    // Keep final path position
+                    if (!shapeObj.pathPointsX.empty()) {
+                        shapeObj.currentOffsetX = shapeObj.pathPointsX.back() - shapeObj.baseNdcX;
+                        shapeObj.currentOffsetY = shapeObj.pathPointsY.back() - shapeObj.baseNdcY;
+                    }
+                    shapeObj.pathPointsX.clear();
+                    shapeObj.pathPointsY.clear();
+                } else if (shapeObj.animationType == AnimationType::SpiralIn ||
+                           shapeObj.animationType == AnimationType::SpiralOut) {
+                    // Keep final spiral position (already set)
+                } else if (shapeObj.animationType == AnimationType::Homotopy) {
+                    // Homotopy returns to original position (ping-pong)
+                    shapeObj.currentOffsetX = 0.0f;
+                    shapeObj.currentOffsetY = 0.0f;
+                } else if (shapeObj.animationType == AnimationType::PhaseFlow) {
+                    // Keep final position (already set)
+                    shapeObj.lastProgress = 0.0f;
+                } else {
+                    // FadeIn/FadeOut reset offset to 0
+                    shapeObj.currentOffsetX = 0.0f;
+                    shapeObj.currentOffsetY = 0.0f;
+                }
+
+                // Reset loop state when animation completes
+                shapeObj.loopCount = 0;
+                shapeObj.currentLoopIteration = 0;
+                shapeObj.loopPingPong = false;
+                shapeObj.loopReverse = false;
+                shapeObj.animationType = AnimationType::None;
+            }
+        }
+
+        // Graph object animations
+	        for (size_t i = 0; i < graphObjects.size(); i++) {
+	            auto& graphObj = graphObjects[i];
+	            if (graphObj.cleared) continue;
+	            // Check if element is scheduled to appear yet
+	            if (sceneTime < graphObj.scheduledStartTime) {
+	                graphObj.currentOpacity = 0.0f;  // Hidden until scheduled
+	                continue;
+	            }
+
+	            startQueuedGraphAnimation(i, sceneTime);
+
+	            if (graphObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (graphObj.animationStartTime < 0)
+                graphObj.animationStartTime = static_cast<float>(sceneStartTime) + graphObj.scheduledStartTime;
+
+            float elapsed = currentTime - graphObj.animationStartTime;
+            float progress = std::min(elapsed / graphObj.animationDuration, 1.0f);
+
+            // Ease-out cubic for smooth animation
+            float easedProgress = 1.0f - std::pow(1.0f - progress, 3.0f);
+
+            if (graphObj.animationType == AnimationType::FadeIn) {
+                graphObj.currentOpacity = easedProgress;
+            } else if (graphObj.animationType == AnimationType::FadeOut) {
+                graphObj.currentOpacity = 1.0f - easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                graphObj.animationType = AnimationType::None;
+            }
+        }
+
+        // Vector object animations
+	        for (size_t i = 0; i < vectorObjects.size(); i++) {
+	            auto& vecObj = vectorObjects[i];
+	            if (vecObj.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+            if (sceneTime < vecObj.scheduledStartTime) {
+                vecObj.currentOpacity = 0.0f;  // Hidden until scheduled
+                continue;
+            }
+
+	            startQueuedVectorAnimation(i, sceneTime);
+
+	            if (vecObj.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (vecObj.animationStartTime < 0)
+                vecObj.animationStartTime = static_cast<float>(sceneStartTime) + vecObj.scheduledStartTime;
+
+            float elapsed = currentTime - vecObj.animationStartTime;
+            float progress = std::min(elapsed / vecObj.animationDuration, 1.0f);
+
+            // Ease-out cubic for smooth animation
+            float easedProgress = 1.0f - std::pow(1.0f - progress, 3.0f);
+
+            if (vecObj.animationType == AnimationType::FadeIn) {
+                vecObj.currentOpacity = easedProgress;
+            } else if (vecObj.animationType == AnimationType::FadeOut) {
+                vecObj.currentOpacity = 1.0f - easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                vecObj.animationType = AnimationType::None;
+            }
+	        }
+	
+	        // 3D Axes object animations
+	        for (size_t i = 0; i < axes3DObjects.size(); i++) {
+	            auto& axes = axes3DObjects[i];
+	            if (axes.cleared) continue;
+	            // Check if element is scheduled to appear yet
+	            if (sceneTime < axes.scheduledStartTime) {
+	                axes.currentOpacity = 0.0f;
+	                continue;
+	            }
+
+	            startQueuedAxes3DAnimation(i, sceneTime);
+
+	            if (axes.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (axes.animationStartTime < 0)
+                axes.animationStartTime = static_cast<float>(sceneStartTime) + axes.scheduledStartTime;
+
+            float elapsed = currentTime - axes.animationStartTime;
+            float progress = std::min(elapsed / axes.animationDuration, 1.0f);
+
+            // Ease-out cubic
+            float easedProgress = 1.0f - std::pow(1.0f - progress, 3.0f);
+
+            if (axes.animationType == AnimationType::FadeIn) {
+                axes.currentOpacity = easedProgress;
+            } else if (axes.animationType == AnimationType::FadeOut) {
+                axes.currentOpacity = 1.0f - easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                axes.animationType = AnimationType::None;
+            }
+	        }
+	
+	        // 3D Surface object animations
+	        for (size_t i = 0; i < surface3DObjects.size(); i++) {
+	            auto& surf = surface3DObjects[i];
+	            if (surf.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+	            if (sceneTime < surf.scheduledStartTime) {
+	                surf.currentOpacity = 0.0f;
+	                continue;
+	            }
+
+	            startQueuedSurface3DAnimation(i, sceneTime);
+
+	            if (surf.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (surf.animationStartTime < 0)
+                surf.animationStartTime = static_cast<float>(sceneStartTime) + surf.scheduledStartTime;
+
+            float elapsed = currentTime - surf.animationStartTime;
+            float progress = std::min(elapsed / surf.animationDuration, 1.0f);
+
+            // Ease-out cubic
+            float easedProgress = 1.0f - std::pow(1.0f - progress, 3.0f);
+
+            if (surf.animationType == AnimationType::FadeIn) {
+                surf.currentOpacity = easedProgress;
+            } else if (surf.animationType == AnimationType::FadeOut) {
+                surf.currentOpacity = 1.0f - easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                surf.animationType = AnimationType::None;
+            }
+	        }
+	
+	        // 3D Shape object animations
+	        for (size_t i = 0; i < shape3DObjects.size(); i++) {
+	            auto& shape = shape3DObjects[i];
+	            if (shape.cleared) continue;
+
+            // Check if element is scheduled to appear yet
+	            if (sceneTime < shape.scheduledStartTime) {
+	                shape.currentOpacity = 0.0f;
+	                continue;
+	            }
+
+	            startQueuedShape3DAnimation(i, sceneTime);
+
+	            // Process scheduled position animation
+	            if (shape.hasPositionAnimation && sceneTime >= shape.posAnimScheduledTime) {
+                if (!shape.positionAnimating) {
+                    // Start the position animation
+                    shape.startPosX = shape.posX;
+                    shape.startPosY = shape.posY;
+                    shape.startPosZ = shape.posZ;
+                    shape.posAnimStartRealTime = currentTime;
+                    shape.positionAnimating = true;
+                }
+
+                float elapsed = currentTime - shape.posAnimStartRealTime;
+                float progress = std::min(elapsed / shape.posAnimDuration, 1.0f);
+                float easedProgress = applyEasing(shape.easingFunction, progress);
+
+                shape.posX = shape.startPosX + (shape.targetPosX - shape.startPosX) * easedProgress;
+                shape.posY = shape.startPosY + (shape.targetPosY - shape.startPosY) * easedProgress;
+                shape.posZ = shape.startPosZ + (shape.targetPosZ - shape.startPosZ) * easedProgress;
+
+                if (progress >= 1.0f) {
+                    shape.hasPositionAnimation = false;
+                    shape.positionAnimating = false;
+                }
+            }
+
+            // Process scheduled rotation animation
+            if (shape.hasRotationAnimation && sceneTime >= shape.rotAnimScheduledTime) {
+                if (!shape.rotationAnimating) {
+                    // Start the rotation animation
+                    shape.startRotX = shape.rotX;
+                    shape.startRotY = shape.rotY;
+                    shape.startRotZ = shape.rotZ;
+                    shape.rotAnimStartRealTime = currentTime;
+                    shape.rotationAnimating = true;
+                }
+
+                float elapsed = currentTime - shape.rotAnimStartRealTime;
+                float progress = std::min(elapsed / shape.rotAnimDuration, 1.0f);
+                float easedProgress = applyEasing(shape.easingFunction, progress);
+
+                shape.rotX = shape.startRotX + (shape.targetRotX - shape.startRotX) * easedProgress;
+                shape.rotY = shape.startRotY + (shape.targetRotY - shape.startRotY) * easedProgress;
+                shape.rotZ = shape.startRotZ + (shape.targetRotZ - shape.startRotZ) * easedProgress;
+
+                if (progress >= 1.0f) {
+                    shape.hasRotationAnimation = false;
+                    shape.rotationAnimating = false;
+                }
+            }
+
+            // Process scheduled scale animation
+            if (shape.hasScaleAnimation && sceneTime >= shape.scaleAnimScheduledTime) {
+                if (!shape.scaleAnimating) {
+                    // Start the scale animation
+                    shape.startScaleX = shape.scaleX;
+                    shape.startScaleY = shape.scaleY;
+                    shape.startScaleZ = shape.scaleZ;
+                    shape.scaleAnimStartRealTime = currentTime;
+                    shape.scaleAnimating = true;
+                }
+
+                float elapsed = currentTime - shape.scaleAnimStartRealTime;
+                float progress = std::min(elapsed / shape.scaleAnimDuration, 1.0f);
+                float easedProgress = applyEasing(shape.easingFunction, progress);
+
+                shape.scaleX = shape.startScaleX + (shape.targetScaleX - shape.startScaleX) * easedProgress;
+                shape.scaleY = shape.startScaleY + (shape.targetScaleY - shape.startScaleY) * easedProgress;
+                shape.scaleZ = shape.startScaleZ + (shape.targetScaleZ - shape.startScaleZ) * easedProgress;
+
+                if (progress >= 1.0f) {
+                    shape.hasScaleAnimation = false;
+                    shape.scaleAnimating = false;
+                }
+            }
+
+            // Process main animation type (show/hide)
+            if (shape.animationType == AnimationType::None) continue;
+
+            // Initialize animation start time relative to scheduled time
+            if (shape.animationStartTime < 0)
+                shape.animationStartTime = static_cast<float>(sceneStartTime) + shape.scheduledStartTime;
+
+            float elapsed = currentTime - shape.animationStartTime;
+            float progress = std::min(elapsed / shape.animationDuration, 1.0f);
+
+            // Apply easing function
+            float easedProgress = applyEasing(shape.easingFunction, progress);
+
+            if (shape.animationType == AnimationType::FadeIn) {
+                shape.currentOpacity = easedProgress;
+            } else if (shape.animationType == AnimationType::FadeOut) {
+                shape.currentOpacity = 1.0f - easedProgress;
+            }
+
+            if (progress >= 1.0f) {
+                // Check if animation should loop
+                if (shape.loopCount != 0) {
+                    // Reset animation for next loop iteration
+                    shape.animationStartTime = -1.0f;
+                    shape.scheduledStartTime = sceneTime;
+                    shape.currentLoopIteration++;
+
+                    // Decrement loop count if not infinite (-1)
+                    if (shape.loopCount > 0) {
+                        shape.loopCount--;
+                    }
+
+                    // Handle ping-pong: toggle direction
+                    if (shape.loopPingPong) {
+                        shape.loopReverse = !shape.loopReverse;
+                    }
+
+                    // Reset animation state for looping
+                    if (shape.animationType == AnimationType::FadeIn) {
+                        shape.currentOpacity = shape.loopReverse ? 1.0f : 0.0f;
+                    } else if (shape.animationType == AnimationType::FadeOut) {
+                        shape.currentOpacity = shape.loopReverse ? 0.0f : 1.0f;
+                    }
+                    continue;  // Don't mark animation as complete
+                }
+
+                // Reset loop state when animation completes
+                shape.loopCount = 0;
+                shape.currentLoopIteration = 0;
+                shape.loopPingPong = false;
+                shape.loopReverse = false;
+                shape.animationType = AnimationType::None;
+            }
+        }
+    }
+
+    void drawFrame() {
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+        // Update GPU metrics from previous frame (after fence wait ensures data is ready)
+        updateGPUMetrics();
+
+        // Update camera UBO with current camera state
+        float currentTime = static_cast<float>(glfwGetTime() - sceneStartTime);
+        apply3DModeEvents(currentTime);
+        updateCameraUBO(currentTime);
+
+        // Rebuild vertex buffer if texts changed
+        if (vertexBufferDirty) {
+            rebuildVertexBuffer();
+        }
+
+        // Rebuild math vertex buffer if math objects changed
+        if (mathVertexBufferDirty) {
+            rebuildMathVertexBuffer();
+        }
+
+        // Rebuild shape vertex buffer if shapes changed
+        if (shapeVertexBufferDirty) {
+            rebuildShapeVertexBuffer();
+        }
+
+        // Rebuild graph vertex buffer if graphs changed
+        if (graphVertexBufferDirty) {
+            rebuildGraphVertexBuffer();
+        }
+
+        // Rebuild vector vertex buffer if vectors changed
+        if (vectorVertexBufferDirty) {
+            rebuildVectorVertexBuffer();
+        }
+
+        // Rebuild image vertex buffer if images changed
+        if (imageVertexBufferDirty) {
+            rebuildImageVertexBuffer();
+        }
+
+        // Rebuild 3D vertex buffer if 3D geometry changed
+        if (shape3DVertexBufferDirty) {
+            rebuild3DVertexBuffer();
+        }
+
+        // Update 3D camera UBO (pass absolute time and elapsed time for animations)
+        float absTime = static_cast<float>(glfwGetTime());
+        updateCamera3DUBO(absTime, currentTime);
+
+        // Update lighting UBO (camera position for specular calculations)
+        updateLightingUBO();
+
+        // Update animation state
+        updateAnimation();
+
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+        uint32_t imageIndex;
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+        vkResetCommandBuffer(commandBuffers[currentFrame], 0);
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
+        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = waitSemaphores;
+        submitInfo.pWaitDstStageMask = waitStages;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
+
+        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = signalSemaphores;
+
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to submit draw command buffer!");
+        }
+
+        VkPresentInfoKHR presentInfo{};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        presentInfo.waitSemaphoreCount = 1;
+        presentInfo.pWaitSemaphores = signalSemaphores;
+
+        VkSwapchainKHR swapChains[] = {swapChain};
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = swapChains;
+        presentInfo.pImageIndices = &imageIndex;
+
+        vkQueuePresentKHR(presentQueue, &presentInfo);
+
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
+        SwapChainSupportDetails details;
+
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+
+        uint32_t formatCount;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+        if (formatCount != 0) {
+            details.formats.resize(formatCount);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+        }
+
+        uint32_t presentModeCount;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+        if (presentModeCount != 0) {
+            details.presentModes.resize(presentModeCount);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+        }
+
+        return details;
+    }
+
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+        for (const auto& availableFormat : availableFormats) {
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB &&
+                availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                return availableFormat;
+            }
+        }
+        return availableFormats[0];
+    }
+
+    VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+        for (const auto& availablePresentMode : availablePresentModes) {
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                return availablePresentMode;
+            }
+        }
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
+        if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+            return capabilities.currentExtent;
+        } else {
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+
+            VkExtent2D actualExtent = {
+                static_cast<uint32_t>(width),
+                static_cast<uint32_t>(height)
+            };
+
+            actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+            actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+
+            return actualExtent;
+        }
+    }
+
+    bool isDeviceSuitable(VkPhysicalDevice device) {
+        QueueFamilyIndices indices = findQueueFamilies(device);
+
+        bool extensionsSupported = checkDeviceExtensionSupport(device);
+
+        bool swapChainAdequate = false;
+        if (extensionsSupported) {
+            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
+            swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
+        }
+
+        return indices.isComplete() && extensionsSupported && swapChainAdequate;
+    }
+
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
+        uint32_t extensionCount;
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+
+        std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+
+        std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
+
+        for (const auto& extension : availableExtensions) {
+            requiredExtensions.erase(extension.extensionName);
+        }
+
+        return requiredExtensions.empty();
+    }
+
+    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+        QueueFamilyIndices indices;
+
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+        int i = 0;
+        for (const auto& queueFamily : queueFamilies) {
+            // Graphics queue
+            if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                indices.graphicsFamily = i;
+            }
+
+            // Present support
+            VkBool32 presentSupport = false;
+            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+            if (presentSupport) {
+                indices.presentFamily = i;
+            }
+
+            // Dedicated transfer queue (transfer but NOT graphics for async transfers)
+            if ((queueFamily.queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+                !(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                indices.transferFamily = i;
+            }
+
+            // Dedicated compute queue (compute but NOT graphics for async compute)
+            if ((queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT) &&
+                !(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                indices.computeFamily = i;
+            }
+
+            i++;
+        }
+
+        // If no dedicated transfer queue, fall back to graphics queue (which has transfer capability)
+        if (!indices.transferFamily.has_value() && indices.graphicsFamily.has_value()) {
+            // Graphics queues implicitly support transfer operations
+            indices.transferFamily = indices.graphicsFamily;
+        }
+
+        // If no dedicated compute queue, fall back to graphics queue (which has compute capability)
+        if (!indices.computeFamily.has_value() && indices.graphicsFamily.has_value()) {
+            indices.computeFamily = indices.graphicsFamily;
+        }
+
+        return indices;
+    }
+
+    std::vector<const char*> getRequiredExtensions() {
+        uint32_t glfwExtensionCount = 0;
+        const char** glfwExtensions;
+        glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+        std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+
+        if (enableValidationLayers) {
+            extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
+
+        return extensions;
+    }
+
+    bool checkValidationLayerSupport() {
+        uint32_t layerCount;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+
+        std::vector<VkLayerProperties> availableLayers(layerCount);
+        vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+
+        for (const char* layerName : validationLayers) {
+            bool layerFound = false;
+
+            for (const auto& layerProperties : availableLayers) {
+                if (strcmp(layerName, layerProperties.layerName) == 0) {
+                    layerFound = true;
+                    break;
+                }
+            }
+
+            if (!layerFound) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+        VkDebugUtilsMessageTypeFlagsEXT messageType,
+        const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+        void* pUserData) {
+
+        if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+            std::cerr << "Validation layer: " << pCallbackData->pMessage << std::endl;
+        }
+
+        return VK_FALSE;
+    }
+};
+
+// TextElement implementation
+TextElement::TextElement(Catalyst* p, size_t idx) : parent(p), textIndex(idx) {}
+
+TextElement& TextElement::setEasing(Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    return *this;
+}
+
+TextElement& TextElement::delay(float seconds) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.elementDelay = seconds;
+    return *this;
+}
+
+TextElement& TextElement::then() {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.chainNextAnimation = true;
+    return *this;
+}
+
+TextElement& TextElement::repeat(int count) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.loopCount = count;
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+TextElement& TextElement::repeatForever() {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.loopCount = -1;  // -1 means infinite
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+TextElement& TextElement::pingPong() {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.loopPingPong = true;
+    obj.loopReverse = false;
+    return *this;
+}
+
+void TextElement::stopLoop() {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.loopCount = 0;
+    obj.currentLoopIteration = 0;
+    obj.loopPingPong = false;
+    obj.loopReverse = false;
+}
+
+void TextElement::show(float duration) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::show(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    show(duration);
+}
+
+void TextElement::hide(float duration) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::hide(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    hide(duration);
+}
+
+void TextElement::show(float duration, Direction direction) {
+    show(duration, direction, 0.1f);  // Default 10% screen shift
+}
+
+void TextElement::show(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::hide(float duration, Direction direction) {
+    hide(duration, direction, 0.1f);  // Default 10% screen shift
+}
+
+void TextElement::hide(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::show(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    show(duration, direction, shiftAmount);
+}
+
+void TextElement::hide(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    hide(duration, direction, shiftAmount);
+}
+
+// "Showing" animations - Manim-style character reveal effects
+
+void TextElement::Write(float duration) {
+    Write(duration, Direction::NONE, 0.0f);
+}
+
+void TextElement::Write(float duration, Direction direction) {
+    Write(duration, direction, 0.1f);
+}
+
+void TextElement::Write(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Write, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::AddLetterByLetter(float duration) {
+    AddLetterByLetter(duration, Direction::NONE, 0.0f);
+}
+
+void TextElement::AddLetterByLetter(float duration, Direction direction) {
+    AddLetterByLetter(duration, direction, 0.1f);
+}
+
+void TextElement::AddLetterByLetter(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::LetterByLetter, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::DrawBorderThenFill(float duration) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::DrawBorderThenFill, duration);
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::MoveTo(float duration, float x, float y) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::MoveTo, duration);
+    entry.targetX = x;
+    entry.targetY = y;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::MoveTo(float duration, float x, float y, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    MoveTo(duration, x, y);
+}
+
+void TextElement::Scale(float duration, float targetScale) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Scale, duration);
+    entry.targetScale = targetScale;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Scale(float duration, float targetScale, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    Scale(duration, targetScale);
+}
+
+void TextElement::Rotate(float duration, float degrees) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Rotate, duration);
+    entry.targetRotation = degrees;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Rotate(float duration, float degrees, Easing easing) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.easingFunction = easing;
+    Rotate(duration, degrees);
+}
+
+void TextElement::Transform(float duration, TextElement& target) {
+    auto& srcObj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(srcObj, AnimationType::Transform, duration);
+    entry.elementTarget = {ElementType::Text, target.textIndex, true};
+    parent->pImpl->enqueueAnimation(srcObj, std::move(entry));
+}
+
+void TextElement::Transform(float duration, MathElement& target) {
+    auto& srcObj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(srcObj, AnimationType::Transform, duration);
+    entry.elementTarget = {ElementType::Math, target.mathIndex, true};
+    parent->pImpl->enqueueAnimation(srcObj, std::move(entry));
+}
+
+void TextElement::morphTo(TextElement& target, float duration) {
+    Transform(duration, target);
+}
+
+// Emphasis animations for TextElement
+void TextElement::Indicate(float duration) {
+    Indicate(duration, "#FFFF00");  // Default yellow flash
+}
+
+void TextElement::Indicate(float duration, const std::string& flashColorHex) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Indicate, duration);
+    entry.emphasisPeakScale = 1.2f;
+    entry.emphasisIntensity = 1.0f;
+    // Parse flash color
+    std::string h = flashColorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.emphasisFlashR = r / 255.0f;
+        entry.emphasisFlashG = g / 255.0f;
+        entry.emphasisFlashB = b / 255.0f;
+    }
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Flash(float duration) {
+    Flash(duration, 1.0f);
+}
+
+void TextElement::Flash(float duration, float intensity) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Flash, duration);
+    entry.emphasisIntensity = intensity;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Circumscribe(float duration) {
+    Circumscribe(duration, "#FFFF00");  // Default yellow
+}
+
+void TextElement::Circumscribe(float duration, const std::string& colorHex) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Circumscribe, duration);
+
+    std::string h = colorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.circumscribeColorR = r / 255.0f;
+        entry.circumscribeColorG = g / 255.0f;
+        entry.circumscribeColorB = b / 255.0f;
+    }
+
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Wiggle(float duration) {
+    Wiggle(duration, 3);
+}
+
+void TextElement::Wiggle(float duration, int cycles) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Wiggle, duration);
+    entry.emphasisWiggleCycles = cycles;
+    entry.emphasisWiggleAngle = 0.1f;  // ~6 degrees
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Pulse(float duration) {
+    Pulse(duration, 1.2f);
+}
+
+void TextElement::Pulse(float duration, float peakScale) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Pulse, duration);
+    entry.emphasisPeakScale = peakScale;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::FocusOn(float duration) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FocusOn, duration);
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+// Movement animation methods for TextElement
+void TextElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY) {
+    MoveAlongPath(duration, pathX, pathY, true);
+}
+
+void TextElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY, bool smooth) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::MoveAlongPath, duration);
+    entry.pathPointsX = pathX;
+    entry.pathPointsY = pathY;
+    entry.pathSmooth = smooth;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::SpiralIn(float duration) {
+    SpiralIn(duration, 2.0f);
+}
+
+void TextElement::SpiralIn(float duration, float rotations) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::SpiralIn, duration);
+    entry.spiralRotations = rotations;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::SpiralOut(float duration) {
+    SpiralOut(duration, 2.0f);
+}
+
+void TextElement::SpiralOut(float duration, float rotations) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::SpiralOut, duration);
+    entry.spiralRotations = rotations;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::Homotopy(float duration, int type) {
+    Homotopy(duration, type, 0.1f, 2.0f);
+}
+
+void TextElement::Homotopy(float duration, int type, float amplitude, float frequency) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Homotopy, duration);
+    entry.homotopyType = type;
+    entry.homotopyAmplitude = amplitude;
+    entry.homotopyFrequency = frequency;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::PhaseFlow(float duration, int fieldType) {
+    PhaseFlow(duration, fieldType, 1.0f);
+}
+
+void TextElement::PhaseFlow(float duration, int fieldType, float strength) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::PhaseFlow, duration);
+    entry.phaseFlowType = fieldType;
+    entry.phaseFlowStrength = strength;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void TextElement::setSize(float points) {
+    parent->pImpl->getTextObject(textIndex).fontSize = points;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setPosition(float x, float y) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.posX = x;
+    obj.posY = y;
+    obj.usePixelPosition = true;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setPosition(Position anchor) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.anchor = anchor;
+    obj.usePixelPosition = false;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setColor(const std::string& hex) {
+    parent->pImpl->getTextObject(textIndex).setColorHex(hex);
+}
+
+void TextElement::setColor(int r, int g, int b) {
+    parent->pImpl->getTextObject(textIndex).setColorRGB(r, g, b);
+}
+
+void TextElement::setColor(float h, float s, float l) {
+    parent->pImpl->getTextObject(textIndex).setColorHSL(h, s, l);
+}
+
+void TextElement::setStroke(float width) {
+    parent->pImpl->getTextObject(textIndex).strokeWidth = width;
+}
+
+void TextElement::setStrokeColor(const std::string& hex) {
+    parent->pImpl->getTextObject(textIndex).setStrokeColorHex(hex);
+}
+
+void TextElement::setStrokeColor(int r, int g, int b) {
+    parent->pImpl->getTextObject(textIndex).setStrokeColorRGB(r, g, b);
+}
+
+void TextElement::setGradient(const std::string& startHex, const std::string& endHex) {
+    setGradient(startHex, endHex, 0.0f);  // Default horizontal
+}
+
+void TextElement::setGradient(const std::string& startHex, const std::string& endHex, float angleDegrees) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.useGradient = true;
+    obj.setColorHex(startHex);           // Start color uses existing color fields
+    obj.setGradientEndHex(endHex);       // End color in gradient fields
+    obj.gradientAngle = angleDegrees * 3.14159265f / 180.0f;  // Convert to radians
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::clearGradient() {
+    parent->pImpl->getTextObject(textIndex).useGradient = false;
+}
+
+void TextElement::setLineHeight(float multiplier) {
+    parent->pImpl->getTextObject(textIndex).lineHeight = multiplier;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setMaxWidth(float pixels) {
+    parent->pImpl->getTextObject(textIndex).maxWidth = pixels;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setAlignment(TextAlignment alignment) {
+    parent->pImpl->getTextObject(textIndex).alignment = alignment;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::under(TextElement& other, float padding) {
+    auto& otherObj = parent->pImpl->getTextObject(other.textIndex);
+    auto& thisObj = parent->pImpl->getTextObject(textIndex);
+
+    uint32_t h = parent->pImpl->height;
+    uint32_t w = parent->pImpl->width;
+    const float margin = 0.02f;  // MUST match generateTextVertices!
+
+    // Get Title's height
+    float otherHeight = otherObj.totalHeight > 0 ? otherObj.totalHeight : otherObj.fontSize * 1.2f;
+
+    // Scale factor to convert from pixels to NDC (same as generateTextVertices)
+    float scaleY = 2.0f / h;
+    float otherFontHeightNDC = otherObj.fontSize * scaleY;
+    float otherTotalHeightNDC = otherHeight * scaleY;
+
+    float thisOffset = thisObj.fontSize * scaleY / 2.0f;
+
+    float paddingNDC = padding / (h / 2.0f);
+
+    // Compute Title's blockStartY (same formulas as generateTextVertices)
+    float otherBlockStartY;
+    if (otherObj.usePixelPosition) {
+        float otherOffset = otherObj.fontSize * scaleY / 2.0f;
+        otherBlockStartY = 1.0f - (otherObj.posY / h) * 2.0f - otherOffset;
+    } else {
+        switch (otherObj.anchor) {
+            case Position::TOP:
+            case Position::TLEFT:
+            case Position::TRIGHT:
+                otherBlockStartY = -1.0f + margin + otherFontHeightNDC;
+                break;
+            case Position::CENTER:
+            case Position::LEFT:
+            case Position::RIGHT:
+                otherBlockStartY = otherTotalHeightNDC / 2.0f;
+                break;
+            case Position::BOTTOM:
+            case Position::BLEFT:
+            case Position::BRIGHT:
+                otherBlockStartY = 1.0f - margin - otherTotalHeightNDC + otherFontHeightNDC;
+                break;
+            default:
+                otherBlockStartY = 0.0f;
+                break;
+        }
+    }
+
+    // Title's visual bottom = blockStartY + totalHeightNDC (more positive Y = lower on screen)
+    float otherBottomNDC = otherBlockStartY + otherTotalHeightNDC;
+
+    // Description's top = Title's bottom + padding
+    float thisTopNDC = otherBottomNDC + paddingNDC;
+
+    // Convert to pixel posY
+    // Formula: blockStartY = 1.0 - (posY/h)*2 - thisOffset
+    // Solving: posY = h * (1.0 - thisTopNDC - thisOffset) / 2
+    thisObj.posY = h * (1.0f - thisTopNDC - thisOffset) / 2.0f;
+
+    // Copy parent's X position - child starts at same X as parent
+    // Calculate parent's actual width using charData (totalWidth may be 0 if not yet rendered)
+    float parentFontScale = otherObj.fontSize / 128.0f;
+    float parentWidth = 0.0f;
+    for (char c : otherObj.text) {
+        if (c >= 32 && c < 128) {
+            parentWidth += parent->pImpl->charData[c - 32].xadvance * parentFontScale;
+        }
+    }
+
+    if (!otherObj.usePixelPosition) {
+        // Parent uses anchor (centered) - calculate parent's left edge pixel X
+        thisObj.posX = (w - parentWidth) / 2.0f;
+    } else {
+        // Parent uses pixel position - copy directly
+        thisObj.posX = otherObj.posX;
+    }
+
+    thisObj.usePixelPosition = true;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::under(MathElement& other, float padding) {
+    auto& otherObj = parent->pImpl->getMathObject(other.mathIndex);
+    auto& thisObj = parent->pImpl->getTextObject(textIndex);
+
+    uint32_t h = parent->pImpl->height;
+    uint32_t w = parent->pImpl->width;
+    const float margin = 0.02f;
+
+    // Get MathElement's height
+    float otherHeight = otherObj.textureHeight > 0 ? otherObj.textureHeight : otherObj.fontSize * 1.2f;
+
+    // Scale factor to convert from pixels to NDC (same as generateTextVertices)
+    float scaleY = 2.0f / h;
+    float otherFontHeightNDC = otherObj.fontSize * scaleY;
+    float otherTotalHeightNDC = otherHeight * scaleY;
+
+    float thisOffset = thisObj.fontSize * scaleY / 2.0f;
+
+    float paddingNDC = padding / (h / 2.0f);
+
+    // Compute other's blockStartY
+    float otherBlockStartY;
+    if (otherObj.usePixelPosition) {
+        float otherOffset = otherObj.fontSize * scaleY / 2.0f;
+        otherBlockStartY = 1.0f - (otherObj.posY / h) * 2.0f - otherOffset;
+    } else {
+        switch (otherObj.anchor) {
+            case Position::TOP:
+            case Position::TLEFT:
+            case Position::TRIGHT:
+                otherBlockStartY = -1.0f + margin + otherFontHeightNDC;
+                break;
+            case Position::CENTER:
+            case Position::LEFT:
+            case Position::RIGHT:
+                otherBlockStartY = otherTotalHeightNDC / 2.0f;
+                break;
+            case Position::BOTTOM:
+            case Position::BLEFT:
+            case Position::BRIGHT:
+                otherBlockStartY = 1.0f - margin - otherTotalHeightNDC + otherFontHeightNDC;
+                break;
+            default:
+                otherBlockStartY = 0.0f;
+                break;
+        }
+    }
+
+    float otherBottomNDC = otherBlockStartY + otherTotalHeightNDC;
+    float thisTopNDC = otherBottomNDC + paddingNDC;
+    thisObj.posY = h * (1.0f - thisTopNDC - thisOffset) / 5.0f;
+
+    // Copy parent's X position - child starts at same X as parent
+    if (!otherObj.usePixelPosition) {
+        // Parent uses anchor (centered) - calculate parent's left edge pixel X
+        float parentWidth = otherObj.textureWidth > 0 ? otherObj.textureWidth : 0.0f;
+        thisObj.posX = (w - parentWidth) / 2.0f;
+    } else {
+        // Parent uses pixel position - copy directly
+        thisObj.posX = otherObj.posX;
+    }
+
+    thisObj.usePixelPosition = true;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TextElement::setZIndex(int zIndex) {
+    parent->pImpl->getTextObject(textIndex).zIndex = zIndex;
+}
+
+int TextElement::getZIndex() const {
+    return parent->pImpl->getTextObject(textIndex).zIndex;
+}
+
+// MathElement implementation
+MathElement::MathElement(Catalyst* p, size_t idx) : parent(p), mathIndex(idx) {}
+
+MathElement& MathElement::setEasing(Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    return *this;
+}
+
+MathElement& MathElement::delay(float seconds) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.elementDelay = seconds;
+    return *this;
+}
+
+MathElement& MathElement::then() {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.chainNextAnimation = true;
+    return *this;
+}
+
+MathElement& MathElement::repeat(int count) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.loopCount = count;
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+MathElement& MathElement::repeatForever() {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.loopCount = -1;  // -1 means infinite
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+MathElement& MathElement::pingPong() {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.loopPingPong = true;
+    obj.loopReverse = false;
+    return *this;
+}
+
+void MathElement::stopLoop() {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.loopCount = 0;
+    obj.currentLoopIteration = 0;
+    obj.loopPingPong = false;
+    obj.loopReverse = false;
+}
+
+void MathElement::show(float duration) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::show(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    show(duration);
+}
+
+void MathElement::hide(float duration) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::hide(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    hide(duration);
+}
+
+void MathElement::show(float duration, Direction direction) {
+    show(duration, direction, 0.1f);
+}
+
+void MathElement::show(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::hide(float duration, Direction direction) {
+    hide(duration, direction, 0.1f);
+}
+
+void MathElement::hide(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::show(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    show(duration, direction, shiftAmount);
+}
+
+void MathElement::hide(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    hide(duration, direction, shiftAmount);
+}
+
+void MathElement::MoveTo(float duration, float x, float y) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::MoveTo, duration);
+    entry.targetX = x;
+    entry.targetY = y;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::MoveTo(float duration, float x, float y, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    MoveTo(duration, x, y);
+}
+
+void MathElement::Scale(float duration, float targetScale) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Scale, duration);
+    entry.targetScale = targetScale;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::Scale(float duration, float targetScale, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    Scale(duration, targetScale);
+}
+
+void MathElement::Rotate(float duration, float degrees) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Rotate, duration);
+    entry.targetRotation = degrees;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::Rotate(float duration, float degrees, Easing easing) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.easingFunction = easing;
+    Rotate(duration, degrees);
+}
+
+void MathElement::Transform(float duration, TextElement& target) {
+    auto& srcObj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(srcObj, AnimationType::Transform, duration);
+    entry.elementTarget = {ElementType::Text, target.textIndex, true};
+    parent->pImpl->enqueueAnimation(srcObj, std::move(entry));
+}
+
+void MathElement::Transform(float duration, MathElement& target) {
+    auto& srcObj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(srcObj, AnimationType::Transform, duration);
+    entry.elementTarget = {ElementType::Math, target.mathIndex, true};
+    parent->pImpl->enqueueAnimation(srcObj, std::move(entry));
+}
+
+// Emphasis animations for MathElement
+void MathElement::Indicate(float duration) {
+    Indicate(duration, "#FFFF00");
+}
+
+void MathElement::Indicate(float duration, const std::string& flashColorHex) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Indicate, duration);
+
+    std::string h = flashColorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.emphasisFlashR = r / 255.0f;
+        entry.emphasisFlashG = g / 255.0f;
+        entry.emphasisFlashB = b / 255.0f;
+    }
+    entry.emphasisPeakScale = 1.2f;
+    entry.emphasisIntensity = 1.0f;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::Flash(float duration) {
+    Flash(duration, 1.0f);
+}
+
+void MathElement::Flash(float duration, float intensity) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Flash, duration);
+    entry.emphasisIntensity = intensity;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::Circumscribe(float duration) {
+    Circumscribe(duration, "#FFFF00");
+}
+
+void MathElement::Circumscribe(float duration, const std::string& colorHex) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Circumscribe, duration);
+
+    std::string h = colorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.circumscribeColorR = r / 255.0f;
+        entry.circumscribeColorG = g / 255.0f;
+        entry.circumscribeColorB = b / 255.0f;
+    }
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void MathElement::Wiggle(float duration) {
+    Wiggle(duration, 3);
+}
+
+void MathElement::Wiggle(float duration, int cycles) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.originalRotation = obj.currentRotation;
+    obj.emphasisWiggleCycles = cycles;
+    obj.emphasisWiggleAngle = 0.1f;
+    obj.animationType = AnimationType::Wiggle;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::Pulse(float duration) {
+    Pulse(duration, 1.2f);
+}
+
+void MathElement::Pulse(float duration, float peakScale) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.originalScale = obj.currentScale;
+    obj.emphasisPeakScale = peakScale;
+    obj.animationType = AnimationType::Pulse;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::FocusOn(float duration) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    for (auto& txt : parent->pImpl->textObjects) {
+        txt.originalOpacity = txt.currentOpacity;
+    }
+    for (auto& shape : parent->pImpl->shapeObjects) {
+        shape.originalOpacity = shape.currentOpacity;
+    }
+    for (auto& math : parent->pImpl->mathObjects) {
+        math.originalOpacity = math.currentOpacity;
+    }
+    obj.isFocusTarget = true;
+    obj.animationType = AnimationType::FocusOn;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+// Movement animation methods for MathElement
+void MathElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY) {
+    MoveAlongPath(duration, pathX, pathY, true);
+}
+
+void MathElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY, bool smooth) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.pathPointsX = pathX;
+    obj.pathPointsY = pathY;
+    obj.pathSmooth = smooth;
+    obj.animationType = AnimationType::MoveAlongPath;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::SpiralIn(float duration) {
+    SpiralIn(duration, 2.0f);
+}
+
+void MathElement::SpiralIn(float duration, float rotations) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    float startRadius = std::sqrt(obj.baseNdcX * obj.baseNdcX + obj.baseNdcY * obj.baseNdcY);
+    if (startRadius < 0.1f) startRadius = 0.5f;
+    obj.spiralStartRadius = startRadius;
+    obj.spiralEndRadius = 0.0f;
+    obj.spiralRotations = rotations;
+    obj.spiralCenterX = 0.0f;
+    obj.spiralCenterY = 0.0f;
+    obj.animationType = AnimationType::SpiralIn;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::SpiralOut(float duration) {
+    SpiralOut(duration, 2.0f);
+}
+
+void MathElement::SpiralOut(float duration, float rotations) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.spiralStartRadius = 0.0f;
+    obj.spiralEndRadius = 0.5f;
+    obj.spiralRotations = rotations;
+    obj.spiralCenterX = 0.0f;
+    obj.spiralCenterY = 0.0f;
+    obj.animationType = AnimationType::SpiralOut;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::Homotopy(float duration, int type) {
+    Homotopy(duration, type, 0.1f, 2.0f);
+}
+
+void MathElement::Homotopy(float duration, int type, float amplitude, float frequency) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.homotopyType = type;
+    obj.homotopyAmplitude = amplitude;
+    obj.homotopyFrequency = frequency;
+    obj.homotopyBaseX = obj.baseNdcX + obj.currentOffsetX;
+    obj.homotopyBaseY = obj.baseNdcY + obj.currentOffsetY;
+    obj.animationType = AnimationType::Homotopy;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::PhaseFlow(float duration, int fieldType) {
+    PhaseFlow(duration, fieldType, 1.0f);
+}
+
+void MathElement::PhaseFlow(float duration, int fieldType, float strength) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.phaseFlowType = fieldType;
+    obj.phaseFlowStrength = strength;
+    obj.lastProgress = 0.0f;
+    obj.animationType = AnimationType::PhaseFlow;
+    obj.animationDuration = duration;
+    obj.animationStartTime = -1.0f;
+    obj.scheduledStartTime = parent->pImpl->currentTimeCursor;
+}
+
+void MathElement::setSize(float points) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.fontSize = points;
+    obj.textureDirty = true;  // Need to re-render at new size
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setPosition(float x, float y) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.posX = x;
+    obj.posY = y;
+    obj.usePixelPosition = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setPosition(Position anchor) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.anchor = anchor;
+    obj.usePixelPosition = false;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setColor(const std::string& hex) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.setColorHex(hex);
+    obj.textureDirty = true;  // Color is baked into texture
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setColor(int r, int g, int b) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.setColorRGB(r, g, b);
+    obj.textureDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setColor(float h, float s, float l) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.setColorHSL(h, s, l);
+    obj.textureDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::under(TextElement& other, float padding) {
+    auto& otherObj = parent->pImpl->getTextObject(other.textIndex);
+    auto& thisObj = parent->pImpl->getMathObject(mathIndex);
+
+    uint32_t h = parent->pImpl->height;
+    uint32_t w = parent->pImpl->width;
+    const float margin = 0.02f;
+
+    float otherHeight = otherObj.totalHeight > 0 ? otherObj.totalHeight : otherObj.fontSize * 1.2f;
+
+    // Scale factor to convert from pixels to NDC (same as generateTextVertices)
+    float scaleY = 2.0f / h;
+    float otherFontHeightNDC = otherObj.fontSize * scaleY;
+    float otherTotalHeightNDC = otherHeight * scaleY;
+
+    float thisOffset = thisObj.fontSize * scaleY / 2.0f;
+
+    float paddingNDC = padding / (h / 2.0f);
+
+    // Compute other's blockStartY
+    float otherBlockStartY;
+    if (otherObj.usePixelPosition) {
+        float otherOffset = otherObj.fontSize * scaleY / 2.0f;
+        otherBlockStartY = 1.0f - (otherObj.posY / h) * 2.0f - otherOffset;
+    } else {
+        switch (otherObj.anchor) {
+            case Position::TOP:
+            case Position::TLEFT:
+            case Position::TRIGHT:
+                otherBlockStartY = -1.0f + margin + otherFontHeightNDC;
+                break;
+            case Position::CENTER:
+            case Position::LEFT:
+            case Position::RIGHT:
+                otherBlockStartY = otherTotalHeightNDC / 2.0f;
+                break;
+            case Position::BOTTOM:
+            case Position::BLEFT:
+            case Position::BRIGHT:
+                otherBlockStartY = 1.0f - margin - otherTotalHeightNDC + otherFontHeightNDC;
+                break;
+            default:
+                otherBlockStartY = 0.0f;
+                break;
+        }
+    }
+
+    float otherBottomNDC = otherBlockStartY + otherTotalHeightNDC;
+    float thisTopNDC = otherBottomNDC + paddingNDC;
+    thisObj.posY = h * (1.0f - thisTopNDC - thisOffset) / 2.0f;
+
+    // Copy parent's X position - child starts at same X as parent
+    // Calculate parent TextElement's actual width using charData (totalWidth may be 0 if not yet rendered)
+    float parentFontScale = otherObj.fontSize / 128.0f;
+    float parentWidth = 0.0f;
+    for (char c : otherObj.text) {
+        if (c >= 32 && c < 128) {
+            parentWidth += parent->pImpl->charData[c - 32].xadvance * parentFontScale;
+        }
+    }
+
+    if (!otherObj.usePixelPosition) {
+        // Parent uses anchor (centered) - calculate parent's left edge pixel X
+        thisObj.posX = (w - parentWidth) / 2.0f;
+    } else {
+        // Parent uses pixel position - copy directly
+        thisObj.posX = otherObj.posX;
+    }
+
+    thisObj.usePixelPosition = true;
+    thisObj.textureDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::under(MathElement& other, float padding) {
+    auto& otherObj = parent->pImpl->getMathObject(other.mathIndex);
+    auto& thisObj = parent->pImpl->getMathObject(mathIndex);
+
+    uint32_t h = parent->pImpl->height;
+    uint32_t w = parent->pImpl->width;
+    const float margin = 0.02f;
+
+    float otherHeight = otherObj.textureHeight > 0 ? otherObj.textureHeight : otherObj.fontSize * 1.2f;
+
+    // Scale factor to convert from pixels to NDC (same as generateTextVertices)
+    float scaleY = 2.0f / h;
+    float otherFontHeightNDC = otherObj.fontSize * scaleY;
+    float otherTotalHeightNDC = otherHeight * scaleY;
+
+    float thisOffset = thisObj.fontSize * scaleY / 2.0f;
+
+    float paddingNDC = padding / (h / 2.0f);
+
+    // Compute other's blockStartY
+    float otherBlockStartY;
+    if (otherObj.usePixelPosition) {
+        float otherOffset = otherObj.fontSize * scaleY / 2.0f;
+        otherBlockStartY = 1.0f - (otherObj.posY / h) * 2.0f - otherOffset;
+    } else {
+        switch (otherObj.anchor) {
+            case Position::TOP:
+            case Position::TLEFT:
+            case Position::TRIGHT:
+                otherBlockStartY = -1.0f + margin + otherFontHeightNDC;
+                break;
+            case Position::CENTER:
+            case Position::LEFT:
+            case Position::RIGHT:
+                otherBlockStartY = otherTotalHeightNDC / 2.0f;
+                break;
+            case Position::BOTTOM:
+            case Position::BLEFT:
+            case Position::BRIGHT:
+                otherBlockStartY = 1.0f - margin - otherTotalHeightNDC + otherFontHeightNDC;
+                break;
+            default:
+                otherBlockStartY = 0.0f;
+                break;
+        }
+    }
+
+    float otherBottomNDC = otherBlockStartY + otherTotalHeightNDC;
+    float thisTopNDC = otherBottomNDC + paddingNDC;
+    thisObj.posY = h * (1.0f - thisTopNDC - thisOffset) / 2.0f;
+
+    // Copy parent's X position - child starts at same X as parent
+    if (!otherObj.usePixelPosition) {
+        // Parent uses anchor (centered) - calculate parent's left edge pixel X
+        float parentWidth = otherObj.textureWidth > 0 ? otherObj.textureWidth : 0.0f;
+        thisObj.posX = (w - parentWidth) / 2.0f;
+    } else {
+        // Parent uses pixel position - copy directly
+        thisObj.posX = otherObj.posX;
+    }
+
+    thisObj.usePixelPosition = true;
+    thisObj.textureDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setZIndex(int zIndex) {
+    parent->pImpl->getMathObject(mathIndex).zIndex = zIndex;
+}
+
+int MathElement::getZIndex() const {
+    return parent->pImpl->getMathObject(mathIndex).zIndex;
+}
+
+// ShapeElement implementation
+ShapeElement::ShapeElement(Catalyst* p, size_t idx) : parent(p), shapeIndex(idx) {}
+
+ShapeElement& ShapeElement::setEasing(Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    return *this;
+}
+
+ShapeElement& ShapeElement::delay(float seconds) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.elementDelay = seconds;
+    return *this;
+}
+
+ShapeElement& ShapeElement::then() {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.chainNextAnimation = true;
+    return *this;
+}
+
+ShapeElement& ShapeElement::repeat(int count) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.loopCount = count;
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+ShapeElement& ShapeElement::repeatForever() {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.loopCount = -1;  // -1 means infinite
+    obj.currentLoopIteration = 0;
+    return *this;
+}
+
+ShapeElement& ShapeElement::pingPong() {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.loopPingPong = true;
+    obj.loopReverse = false;
+    return *this;
+}
+
+void ShapeElement::stopLoop() {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.loopCount = 0;
+    obj.currentLoopIteration = 0;
+    obj.loopPingPong = false;
+    obj.loopReverse = false;
+}
+
+void ShapeElement::show(float duration) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::show(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    show(duration);
+}
+
+void ShapeElement::hide(float duration) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = Direction::NONE;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::hide(float duration, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    hide(duration);
+}
+
+void ShapeElement::show(float duration, Direction direction) {
+    show(duration, direction, 0.1f);
+}
+
+void ShapeElement::show(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeIn, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::hide(float duration, Direction direction) {
+    hide(duration, direction, 0.1f);
+}
+
+void ShapeElement::hide(float duration, Direction direction, float shiftAmount) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FadeOut, duration);
+    entry.direction = direction;
+    entry.shiftAmount = shiftAmount;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::show(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    show(duration, direction, shiftAmount);
+}
+
+void ShapeElement::hide(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    hide(duration, direction, shiftAmount);
+}
+
+void ShapeElement::MoveTo(float duration, float x, float y) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::MoveTo, duration);
+    entry.targetX = x;
+    entry.targetY = y;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::MoveTo(float duration, float x, float y, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    MoveTo(duration, x, y);
+}
+
+void ShapeElement::Scale(float duration, float targetScale) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Scale, duration);
+    entry.targetScale = targetScale;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Scale(float duration, float targetScale, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    Scale(duration, targetScale);
+}
+
+void ShapeElement::Rotate(float duration, float degrees) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Rotate, duration);
+    entry.targetRotation = degrees;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Rotate(float duration, float degrees, Easing easing) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.easingFunction = easing;
+    Rotate(duration, degrees);
+}
+
+void ShapeElement::morphTo(ShapeElement& target, float duration) {
+    auto& srcObj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(srcObj, AnimationType::Morph, duration);
+    entry.morphTargetIndex = target.shapeIndex;
+    parent->pImpl->enqueueAnimation(srcObj, std::move(entry));
+}
+
+// Emphasis animations for ShapeElement
+void ShapeElement::Indicate(float duration) {
+    Indicate(duration, "#FFFF00");
+}
+
+void ShapeElement::Indicate(float duration, const std::string& flashColorHex) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Indicate, duration);
+    std::string h = flashColorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.emphasisFlashR = r / 255.0f;
+        entry.emphasisFlashG = g / 255.0f;
+        entry.emphasisFlashB = b / 255.0f;
+    }
+    entry.emphasisPeakScale = 1.2f;
+    entry.emphasisIntensity = 1.0f;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Flash(float duration) {
+    Flash(duration, 1.0f);
+}
+
+void ShapeElement::Flash(float duration, float intensity) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Flash, duration);
+    entry.emphasisIntensity = intensity;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Circumscribe(float duration) {
+    Circumscribe(duration, "#FFFF00");
+}
+
+void ShapeElement::Circumscribe(float duration, const std::string& colorHex) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Circumscribe, duration);
+    entry.circumscribeStrokeWidth = 3.0f;
+    entry.circumscribePadding = 15.0f;
+    std::string h = colorHex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        unsigned int r, g, b;
+        sscanf(h.c_str(), "%02x%02x%02x", &r, &g, &b);
+        entry.circumscribeColorR = r / 255.0f;
+        entry.circumscribeColorG = g / 255.0f;
+        entry.circumscribeColorB = b / 255.0f;
+    }
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Wiggle(float duration) {
+    Wiggle(duration, 3);
+}
+
+void ShapeElement::Wiggle(float duration, int cycles) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Wiggle, duration);
+    entry.emphasisWiggleCycles = cycles;
+    entry.emphasisWiggleAngle = 0.1f;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Pulse(float duration) {
+    Pulse(duration, 1.2f);
+}
+
+void ShapeElement::Pulse(float duration, float peakScale) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Pulse, duration);
+    entry.emphasisPeakScale = peakScale;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::FocusOn(float duration) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::FocusOn, duration);
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+// Movement animation methods for ShapeElement
+void ShapeElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY) {
+    MoveAlongPath(duration, pathX, pathY, true);
+}
+
+void ShapeElement::MoveAlongPath(float duration, const std::vector<float>& pathX, const std::vector<float>& pathY, bool smooth) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::MoveAlongPath, duration);
+    entry.pathPointsX = pathX;
+    entry.pathPointsY = pathY;
+    entry.pathSmooth = smooth;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::SpiralIn(float duration) {
+    SpiralIn(duration, 2.0f);
+}
+
+void ShapeElement::SpiralIn(float duration, float rotations) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::SpiralIn, duration);
+    entry.spiralRotations = rotations;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::SpiralOut(float duration) {
+    SpiralOut(duration, 2.0f);
+}
+
+void ShapeElement::SpiralOut(float duration, float rotations) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::SpiralOut, duration);
+    entry.spiralRotations = rotations;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::Homotopy(float duration, int type) {
+    Homotopy(duration, type, 0.1f, 2.0f);
+}
+
+void ShapeElement::Homotopy(float duration, int type, float amplitude, float frequency) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::Homotopy, duration);
+    entry.homotopyType = type;
+    entry.homotopyAmplitude = amplitude;
+    entry.homotopyFrequency = frequency;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::PhaseFlow(float duration, int fieldType) {
+    PhaseFlow(duration, fieldType, 1.0f);
+}
+
+void ShapeElement::PhaseFlow(float duration, int fieldType, float strength) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(obj, AnimationType::PhaseFlow, duration);
+    entry.phaseFlowType = fieldType;
+    entry.phaseFlowStrength = strength;
+    parent->pImpl->enqueueAnimation(obj, std::move(entry));
+}
+
+void ShapeElement::setPosition(float x, float y) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.posX = x;
+    obj.posY = y;
+    obj.usePixelPosition = true;
+    parent->pImpl->shapeVertexBufferDirty = true;
+}
+
+void ShapeElement::setPosition(Position anchor) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.anchor = anchor;
+    obj.usePixelPosition = false;
+    parent->pImpl->shapeVertexBufferDirty = true;
+}
+
+void ShapeElement::setFill(const std::string& hex) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.setFillHex(hex);
+}
+
+void ShapeElement::setFill(int r, int g, int b) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.setFillRGB(r, g, b);
+}
+
+void ShapeElement::setStroke(float width) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.strokeWidth = width;
+}
+
+void ShapeElement::setStrokeColor(const std::string& hex) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.setStrokeColorHex(hex);
+}
+
+void ShapeElement::setStrokeColor(int r, int g, int b) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.setStrokeColorRGB(r, g, b);
+}
+
+void ShapeElement::setZIndex(int zIndex) {
+    parent->pImpl->getShapeObject(shapeIndex).zIndex = zIndex;
+}
+
+int ShapeElement::getZIndex() const {
+    return parent->pImpl->getShapeObject(shapeIndex).zIndex;
+}
+
+// AxesElement implementation
+AxesElement::AxesElement(Catalyst* p, size_t idx) : parent(p), axesIndex(idx) {}
+
+void AxesElement::setRange(float xMin, float xMax, float yMin, float yMax) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    axes.xMin = xMin;
+    axes.xMax = xMax;
+    axes.yMin = yMin;
+    axes.yMax = yMax;
+    // TODO: Regenerate visual elements when range changes
+}
+
+void AxesElement::setTickSpacing(float xSpacing, float ySpacing) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    axes.xTickSpacing = xSpacing;
+    axes.yTickSpacing = ySpacing;
+    // TODO: Regenerate tick marks when spacing changes
+}
+
+void AxesElement::setColor(const std::string& hex) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    std::string h = hex;
+    if (h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        axes.axisColorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        axes.axisColorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        axes.axisColorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+    // Update all sub-shapes
+    for (size_t idx : axes.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.fillR = axes.axisColorR;
+        shape.fillG = axes.axisColorG;
+        shape.fillB = axes.axisColorB;
+    }
+}
+
+void AxesElement::showLabels(bool show) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    axes.showTickLabels = show;
+}
+
+void AxesElement::showArrows(bool show) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    axes.showArrows = show;
+}
+
+void AxesElement::show(float duration) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    // Animate all sub-elements (axes itself is rendered via its shapes/text)
+    for (size_t idx : axes.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        if (shape.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeIn, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(shape, std::move(entry));
+    }
+    for (size_t idx : axes.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        auto& text = parent->pImpl->getTextObject(idx);
+        if (text.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(text, AnimationType::FadeIn, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(text, std::move(entry));
+    }
+}
+
+void AxesElement::hide(float duration) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    for (size_t idx : axes.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        if (shape.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeOut, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(shape, std::move(entry));
+    }
+    for (size_t idx : axes.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        auto& text = parent->pImpl->getTextObject(idx);
+        if (text.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(text, AnimationType::FadeOut, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(text, std::move(entry));
+    }
+}
+
+float AxesElement::toPixelX(float dataX) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    return parent->pImpl->dataToPixelX(dataX, axes);
+}
+
+float AxesElement::toPixelY(float dataY) {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    return parent->pImpl->dataToPixelY(dataY, axes);
+}
+
+// ========== Axes3DElement implementation ==========
+Axes3DElement::Axes3DElement(Catalyst* p, size_t idx) : parent(p), axes3DIndex(idx) {}
+
+void Axes3DElement::setRange(float xMin, float xMax, float yMin, float yMax, float zMin, float zMax) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.xMin = xMin;
+    axes.xMax = xMax;
+    axes.yMin = yMin;
+    axes.yMax = yMax;
+    axes.zMin = zMin;
+    axes.zMax = zMax;
+}
+
+void Axes3DElement::setTickSpacing(float xSpacing, float ySpacing, float zSpacing) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.xTickSpacing = xSpacing;
+    axes.yTickSpacing = ySpacing;
+    axes.zTickSpacing = zSpacing;
+}
+
+void Axes3DElement::setColor(const std::string& hex) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    std::string h = hex;
+    if (h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        axes.colorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        axes.colorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        axes.colorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+}
+
+void Axes3DElement::setColor(int r, int g, int b) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.colorR = r / 255.0f;
+    axes.colorG = g / 255.0f;
+    axes.colorB = b / 255.0f;
+}
+
+void Axes3DElement::showLabels(bool show) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.showLabels = show;
+}
+
+void Axes3DElement::showArrows(bool show) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.showArrows = show;
+}
+
+void Axes3DElement::setOpacity(float opacity) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    axes.currentOpacity = opacity;
+}
+
+void Axes3DElement::show(float duration) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeIn;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(axes, std::move(entry));
+}
+
+void Axes3DElement::hide(float duration) {
+    auto& axes = parent->pImpl->getAxes3DObject(axes3DIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeOut;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(axes, std::move(entry));
+}
+
+// Surface3DElement implementation
+Surface3DElement::Surface3DElement(Catalyst* p, size_t idx) : parent(p), surface3DIndex(idx) {}
+
+void Surface3DElement::setColor(const std::string& hex) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    std::string h = hex;
+    if (h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        surf.colorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        surf.colorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        surf.colorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+}
+
+void Surface3DElement::setColor(int r, int g, int b) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    surf.colorR = r / 255.0f;
+    surf.colorG = g / 255.0f;
+    surf.colorB = b / 255.0f;
+}
+
+void Surface3DElement::setWireframe(bool wireframe) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    surf.wireframe = wireframe;
+    // Note: Wireframe mode would require polygon mode change in pipeline
+}
+
+void Surface3DElement::setResolution(int uSegments, int vSegments) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    surf.uSegments = uSegments;
+    surf.vSegments = vSegments;
+    // Regenerate vertices with new resolution
+    parent->pImpl->generateSurfaceVertices(surface3DIndex);
+    parent->pImpl->markShape3DBufferDirty();
+}
+
+void Surface3DElement::setOpacity(float opacity) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    surf.currentOpacity = opacity;
+}
+
+void Surface3DElement::show(float duration) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeIn;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(surf, std::move(entry));
+}
+
+void Surface3DElement::hide(float duration) {
+    auto& surf = parent->pImpl->getSurface3DObject(surface3DIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeOut;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(surf, std::move(entry));
+}
+
+void AxesElement::setZIndex(int zIndex) {
+    // Note: AxesElement doesn't render directly (it's composed of shapes), but we'll store it
+    // for API consistency. The underlying shapes inherit the z-index.
+}
+
+int AxesElement::getZIndex() const {
+    return 0;  // Default z-index for axes
+}
+
+// Shape3DElement implementation
+Shape3DElement::Shape3DElement(Catalyst* p, size_t idx) : parent(p), shape3DIndex(idx) {}
+
+void Shape3DElement::setPosition(float x, float y, float z) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.posX = x;
+    shape.posY = y;
+    shape.posZ = z;
+}
+
+void Shape3DElement::setRotation(float rx, float ry, float rz) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.rotX = rx;
+    shape.rotY = ry;
+    shape.rotZ = rz;
+}
+
+void Shape3DElement::setScale(float s) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.scaleX = s;
+    shape.scaleY = s;
+    shape.scaleZ = s;
+}
+
+void Shape3DElement::setScale(float sx, float sy, float sz) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.scaleX = sx;
+    shape.scaleY = sy;
+    shape.scaleZ = sz;
+}
+
+void Shape3DElement::setColor(const std::string& hex) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    std::string h = hex;
+    if (h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        shape.colorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        shape.colorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        shape.colorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+}
+
+void Shape3DElement::setColor(int r, int g, int b) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.colorR = r / 255.0f;
+    shape.colorG = g / 255.0f;
+    shape.colorB = b / 255.0f;
+}
+
+void Shape3DElement::setOpacity(float opacity) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.currentOpacity = opacity;
+}
+
+void Shape3DElement::show(float duration) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeIn, duration);
+    parent->pImpl->enqueueAnimation(shape, std::move(entry));
+}
+
+void Shape3DElement::hide(float duration) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeOut, duration);
+    parent->pImpl->enqueueAnimation(shape, std::move(entry));
+}
+
+void Shape3DElement::MoveTo(float duration, float x, float y, float z) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    // Use scheduled animation for timeline-based animation
+    shape.targetPosX = x;
+    shape.targetPosY = y;
+    shape.targetPosZ = z;
+    shape.posAnimScheduledTime = parent->pImpl->currentTimeCursor;
+    shape.posAnimDuration = duration;
+    shape.hasPositionAnimation = true;
+    shape.positionAnimating = false;  // Will start when timeline reaches scheduled time
+    // Advance timeline
+    parent->pImpl->currentTimeCursor += duration;
+}
+
+void Shape3DElement::ScaleTo(float duration, float scale) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    // Use scheduled animation for timeline-based animation
+    shape.targetScaleX = scale;
+    shape.targetScaleY = scale;
+    shape.targetScaleZ = scale;
+    shape.scaleAnimScheduledTime = parent->pImpl->currentTimeCursor;
+    shape.scaleAnimDuration = duration;
+    shape.hasScaleAnimation = true;
+    shape.scaleAnimating = false;  // Will start when timeline reaches scheduled time
+    // Advance timeline
+    parent->pImpl->currentTimeCursor += duration;
+}
+
+void Shape3DElement::RotateTo(float duration, float rx, float ry, float rz) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    // Use scheduled animation for timeline-based animation
+    shape.targetRotX = rx;
+    shape.targetRotY = ry;
+    shape.targetRotZ = rz;
+    shape.rotAnimScheduledTime = parent->pImpl->currentTimeCursor;
+    shape.rotAnimDuration = duration;
+    shape.hasRotationAnimation = true;
+    shape.rotationAnimating = false;  // Will start when timeline reaches scheduled time
+    // Advance timeline
+    parent->pImpl->currentTimeCursor += duration;
+}
+
+Shape3DElement& Shape3DElement::setEasing(Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::delay(float seconds) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.elementDelay = seconds;
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::then() {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.chainNextAnimation = true;
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::repeat(int count) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.loopCount = count;
+    shape.currentLoopIteration = 0;
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::repeatForever() {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.loopCount = -1;  // -1 means infinite
+    shape.currentLoopIteration = 0;
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::pingPong() {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.loopPingPong = true;
+    shape.loopReverse = false;
+    return *this;
+}
+
+void Shape3DElement::stopLoop() {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.loopCount = 0;
+    shape.currentLoopIteration = 0;
+    shape.loopPingPong = false;
+    shape.loopReverse = false;
+}
+
+void Shape3DElement::show(float duration, Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    show(duration);
+}
+
+void Shape3DElement::hide(float duration, Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    hide(duration);
+}
+
+void Shape3DElement::MoveTo(float duration, float x, float y, float z, Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    MoveTo(duration, x, y, z);
+}
+
+void Shape3DElement::ScaleTo(float duration, float scale, Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    ScaleTo(duration, scale);
+}
+
+void Shape3DElement::RotateTo(float duration, float rx, float ry, float rz, Easing easing) {
+    auto& shape = parent->pImpl->getShape3DObject(shape3DIndex);
+    shape.easingFunction = easing;
+    RotateTo(duration, rx, ry, rz);
+}
+
+void Shape3DElement::setZIndex(int zIndex) {
+    parent->pImpl->getShape3DObject(shape3DIndex).zIndex = zIndex;
+}
+
+int Shape3DElement::getZIndex() const {
+    return parent->pImpl->getShape3DObject(shape3DIndex).zIndex;
+}
+
+// GraphElement implementation
+GraphElement::GraphElement(Catalyst* p, size_t idx) : parent(p), graphIndex(idx) {}
+
+void GraphElement::setData(const std::vector<float>& x, const std::vector<float>& y) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    graph.xData = x;
+    graph.yData = y;
+    parent->pImpl->graphVertexBufferDirty = true;
+}
+
+void GraphElement::setColor(const std::string& hex) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    std::string h = hex;
+    if (h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        graph.lineColorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        graph.lineColorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        graph.lineColorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+}
+
+void GraphElement::setColor(int r, int g, int b) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    graph.lineColorR = r / 255.0f;
+    graph.lineColorG = g / 255.0f;
+    graph.lineColorB = b / 255.0f;
+}
+
+void GraphElement::setThickness(float pixels) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    graph.lineThickness = pixels;
+    parent->pImpl->graphVertexBufferDirty = true;
+}
+
+void GraphElement::show(float duration) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeIn;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(graph, std::move(entry));
+}
+
+void GraphElement::hide(float duration) {
+    auto& graph = parent->pImpl->getGraphObject(graphIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeOut;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(graph, std::move(entry));
+}
+
+void GraphElement::setZIndex(int zIndex) {
+    parent->pImpl->getGraphObject(graphIndex).zIndex = zIndex;
+}
+
+int GraphElement::getZIndex() const {
+    return parent->pImpl->getGraphObject(graphIndex).zIndex;
+}
+
+// VectorElement implementation
+VectorElement::VectorElement(Catalyst* p, size_t idx) : parent(p), vectorIndex(idx) {}
+
+void VectorElement::setColor(const std::string& hex) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    vec.setColorHex(hex);
+}
+
+void VectorElement::setColor(int r, int g, int b) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    vec.colorR = r / 255.0f;
+    vec.colorG = g / 255.0f;
+    vec.colorB = b / 255.0f;
+}
+
+void VectorElement::setThickness(float pixels) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    vec.lineThickness = pixels;
+    parent->pImpl->vectorVertexBufferDirty = true;
+}
+
+void VectorElement::setOrigin(float x, float y) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    vec.originX = x;
+    vec.originY = y;
+    parent->pImpl->vectorVertexBufferDirty = true;
+}
+
+void VectorElement::show(float duration) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeIn;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(vec, std::move(entry));
+}
+
+void VectorElement::hide(float duration) {
+    auto& vec = parent->pImpl->getVectorObject(vectorIndex);
+    AnimationQueueEntry entry;
+    entry.type = AnimationType::FadeOut;
+    entry.startTime = parent->pImpl->currentTimeCursor;
+    entry.duration = duration;
+    parent->pImpl->enqueueAnimation(vec, std::move(entry));
+}
+
+void VectorElement::setZIndex(int zIndex) {
+    parent->pImpl->getVectorObject(vectorIndex).zIndex = zIndex;
+}
+
+int VectorElement::getZIndex() const {
+    return parent->pImpl->getVectorObject(vectorIndex).zIndex;
+}
+
+// NumberLineElement implementation
+NumberLineElement::NumberLineElement(Catalyst* p, size_t idx) : parent(p), numberLineIndex(idx) {}
+
+void NumberLineElement::setRange(float min, float max) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.minValue = min;
+    numLine.maxValue = max;
+    // Recalculate tick spacing
+    float range = max - min;
+    numLine.tickSpacing = std::pow(10.0f, std::floor(std::log10(range / 5)));
+}
+
+void NumberLineElement::setTickSpacing(float spacing) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.tickSpacing = spacing;
+}
+
+void NumberLineElement::setColor(const std::string& hex) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.setColorHex(hex);
+    // Update sub-elements too
+    for (size_t idx : numLine.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.fillR = numLine.colorR;
+        shape.fillG = numLine.colorG;
+        shape.fillB = numLine.colorB;
+    }
+}
+
+void NumberLineElement::setColor(int r, int g, int b) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.colorR = r / 255.0f;
+    numLine.colorG = g / 255.0f;
+    numLine.colorB = b / 255.0f;
+    // Update sub-elements too
+    for (size_t idx : numLine.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.fillR = numLine.colorR;
+        shape.fillG = numLine.colorG;
+        shape.fillB = numLine.colorB;
+    }
+}
+
+void NumberLineElement::showLabels(bool show) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.showTickLabels = show;
+}
+
+void NumberLineElement::showArrows(bool show) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.showArrows = show;
+}
+
+void NumberLineElement::setPosition(float x, float y) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    numLine.posX = x;
+    numLine.posY = y;
+}
+
+void NumberLineElement::setPosition(Position anchor) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    float w = static_cast<float>(parent->pImpl->width);
+    float h = static_cast<float>(parent->pImpl->height);
+    float margin = 50.0f;
+
+    switch (anchor) {
+        case Position::CENTER: numLine.posX = w / 2; numLine.posY = h / 2; break;
+        case Position::TOP: numLine.posX = w / 2; numLine.posY = margin; break;
+        case Position::BOTTOM: numLine.posX = w / 2; numLine.posY = h - margin; break;
+        case Position::LEFT: numLine.posX = margin; numLine.posY = h / 2; break;
+        case Position::RIGHT: numLine.posX = w - margin; numLine.posY = h / 2; break;
+        case Position::TLEFT: numLine.posX = margin; numLine.posY = margin; break;
+        case Position::TRIGHT: numLine.posX = w - margin; numLine.posY = margin; break;
+        case Position::BLEFT: numLine.posX = margin; numLine.posY = h - margin; break;
+        case Position::BRIGHT: numLine.posX = w - margin; numLine.posY = h - margin; break;
+    }
+}
+
+void NumberLineElement::show(float duration) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    // Show all sub-elements
+    for (size_t idx : numLine.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeIn;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 0.0f;
+        shape.animationStartTime = -1.0f;
+    }
+    for (size_t idx : numLine.textIndices) {
+        auto& text = parent->pImpl->textObjects[idx];
+        text.animationType = AnimationType::FadeIn;
+        text.animationDuration = duration;
+        text.currentOpacity = 0.0f;
+        text.animationStartTime = -1.0f;
+    }
+}
+
+void NumberLineElement::hide(float duration) {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    // Hide all sub-elements
+    for (size_t idx : numLine.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeOut;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 1.0f;
+        shape.animationStartTime = -1.0f;
+    }
+    for (size_t idx : numLine.textIndices) {
+        auto& text = parent->pImpl->textObjects[idx];
+        text.animationType = AnimationType::FadeOut;
+        text.animationDuration = duration;
+        text.currentOpacity = 1.0f;
+        text.animationStartTime = -1.0f;
+    }
+}
+
+// BarChartElement implementation
+BarChartElement::BarChartElement(Catalyst* p, size_t idx) : parent(p), barChartIndex(idx) {}
+
+void BarChartElement::setData(const std::vector<float>& values) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.values = values;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setData(const std::vector<float>& values, const std::vector<std::string>& labels) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.values = values;
+    chart.labels = labels;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setColors(const std::vector<std::string>& hexColors) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.colors.clear();
+    for (const auto& hex : hexColors) {
+        std::string h = hex;
+        if (h[0] == '#') h = h.substr(1);
+        uint32_t color = std::stoul(h, nullptr, 16);
+        chart.colors.push_back(color);
+    }
+    // Update bar colors
+    for (size_t i = 0; i < chart.shapeIndices.size() && i < chart.colors.size(); i++) {
+        auto& shape = parent->pImpl->getShapeObject(chart.shapeIndices[i]);
+        uint32_t c = chart.colors[i];
+        shape.fillR = ((c >> 16) & 0xFF) / 255.0f;
+        shape.fillG = ((c >> 8) & 0xFF) / 255.0f;
+        shape.fillB = (c & 0xFF) / 255.0f;
+    }
+}
+
+void BarChartElement::setBarWidth(float width) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.barWidth = width;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setSpacing(float spacing) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.spacing = spacing;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setMaxHeight(float height) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.maxHeight = height;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setPosition(float x, float y) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    chart.posX = x;
+    chart.posY = y;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::setPosition(Position anchor) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    float totalWidth = chart.values.size() * chart.barWidth + (chart.values.size() - 1) * chart.spacing;
+    float x = parent->pImpl->width / 2.0f;
+    float y = parent->pImpl->height / 2.0f;
+
+    switch (anchor) {
+        case Position::CENTER: break;
+        case Position::TOP: y = chart.maxHeight / 2.0f + 50.0f; break;
+        case Position::BOTTOM: y = parent->pImpl->height - chart.maxHeight / 2.0f - 50.0f; break;
+        case Position::LEFT: x = totalWidth / 2.0f + 50.0f; break;
+        case Position::RIGHT: x = parent->pImpl->width - totalWidth / 2.0f - 50.0f; break;
+        case Position::TLEFT: x = totalWidth / 2.0f + 50.0f; y = chart.maxHeight / 2.0f + 50.0f; break;
+        case Position::TRIGHT: x = parent->pImpl->width - totalWidth / 2.0f - 50.0f; y = chart.maxHeight / 2.0f + 50.0f; break;
+        case Position::BLEFT: x = totalWidth / 2.0f + 50.0f; y = parent->pImpl->height - chart.maxHeight / 2.0f - 50.0f; break;
+        case Position::BRIGHT: x = parent->pImpl->width - totalWidth / 2.0f - 50.0f; y = parent->pImpl->height - chart.maxHeight / 2.0f - 50.0f; break;
+    }
+    chart.posX = x;
+    chart.posY = y;
+    parent->pImpl->generateBarChartElements(barChartIndex);
+}
+
+void BarChartElement::show(float duration) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    // Show all sub-elements
+    for (size_t idx : chart.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeIn;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 0.0f;
+        shape.animationStartTime = -1.0f;
+    }
+    for (size_t idx : chart.textIndices) {
+        auto& text = parent->pImpl->textObjects[idx];
+        text.animationType = AnimationType::FadeIn;
+        text.animationDuration = duration;
+        text.currentOpacity = 0.0f;
+        text.animationStartTime = -1.0f;
+    }
+}
+
+void BarChartElement::hide(float duration) {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    // Hide all sub-elements
+    for (size_t idx : chart.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeOut;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 1.0f;
+        shape.animationStartTime = -1.0f;
+    }
+    for (size_t idx : chart.textIndices) {
+        auto& text = parent->pImpl->textObjects[idx];
+        text.animationType = AnimationType::FadeOut;
+        text.animationDuration = duration;
+        text.currentOpacity = 1.0f;
+        text.animationStartTime = -1.0f;
+    }
+}
+
+// PieChartElement implementation
+PieChartElement::PieChartElement(Catalyst* p, size_t idx) : parent(p), pieChartIndex(idx) {}
+
+void PieChartElement::setData(const std::vector<float>& values) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    chart.values = values;
+    parent->pImpl->generatePieChartElements(pieChartIndex);
+}
+
+void PieChartElement::setColors(const std::vector<std::string>& hexColors) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    chart.colors.clear();
+    for (const auto& hex : hexColors) {
+        std::string h = hex;
+        if (h[0] == '#') h = h.substr(1);
+        uint32_t color = std::stoul(h, nullptr, 16);
+        chart.colors.push_back(color);
+    }
+    // Update slice colors
+    for (size_t i = 0; i < chart.shapeIndices.size() && i < chart.colors.size(); i++) {
+        auto& shape = parent->pImpl->getShapeObject(chart.shapeIndices[i]);
+        uint32_t c = chart.colors[i];
+        shape.fillR = ((c >> 16) & 0xFF) / 255.0f;
+        shape.fillG = ((c >> 8) & 0xFF) / 255.0f;
+        shape.fillB = (c & 0xFF) / 255.0f;
+    }
+}
+
+void PieChartElement::setRadius(float radius) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    chart.radius = radius;
+    parent->pImpl->generatePieChartElements(pieChartIndex);
+}
+
+void PieChartElement::setStartAngle(float degrees) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    chart.startAngle = degrees;
+    parent->pImpl->generatePieChartElements(pieChartIndex);
+}
+
+void PieChartElement::setPosition(float x, float y) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    chart.posX = x;
+    chart.posY = y;
+    parent->pImpl->generatePieChartElements(pieChartIndex);
+}
+
+void PieChartElement::setPosition(Position anchor) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    float x = parent->pImpl->width / 2.0f;
+    float y = parent->pImpl->height / 2.0f;
+    float margin = chart.radius + 50.0f;
+
+    switch (anchor) {
+        case Position::CENTER: break;
+        case Position::TOP: y = margin; break;
+        case Position::BOTTOM: y = parent->pImpl->height - margin; break;
+        case Position::LEFT: x = margin; break;
+        case Position::RIGHT: x = parent->pImpl->width - margin; break;
+        case Position::TLEFT: x = margin; y = margin; break;
+        case Position::TRIGHT: x = parent->pImpl->width - margin; y = margin; break;
+        case Position::BLEFT: x = margin; y = parent->pImpl->height - margin; break;
+        case Position::BRIGHT: x = parent->pImpl->width - margin; y = parent->pImpl->height - margin; break;
+    }
+    chart.posX = x;
+    chart.posY = y;
+    parent->pImpl->generatePieChartElements(pieChartIndex);
+}
+
+void PieChartElement::show(float duration) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    // Show all sub-elements
+    for (size_t idx : chart.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeIn;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 0.0f;
+        shape.animationStartTime = -1.0f;
+    }
+}
+
+void PieChartElement::hide(float duration) {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    // Hide all sub-elements
+    for (size_t idx : chart.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeOut;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 1.0f;
+        shape.animationStartTime = -1.0f;
+    }
+}
+
+// VectorFieldElement implementation
+VectorFieldElement::VectorFieldElement(Catalyst* p, size_t idx) : parent(p), vectorFieldIndex(idx) {}
+
+void VectorFieldElement::setGridSize(int gridX, int gridY) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    field.gridSizeX = gridX;
+    field.gridSizeY = gridY;
+    parent->pImpl->generateVectorFieldElements(vectorFieldIndex);
+}
+
+void VectorFieldElement::setArrowScale(float scale) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    field.arrowScale = scale;
+    parent->pImpl->generateVectorFieldElements(vectorFieldIndex);
+}
+
+void VectorFieldElement::setColor(const std::string& hex) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    field.setColorHex(hex);
+    // Update existing arrow colors
+    for (size_t idx : field.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.fillR = field.colorR;
+        shape.fillG = field.colorG;
+        shape.fillB = field.colorB;
+    }
+}
+
+void VectorFieldElement::setColor(int r, int g, int b) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    field.colorR = r / 255.0f;
+    field.colorG = g / 255.0f;
+    field.colorB = b / 255.0f;
+    // Update existing arrow colors
+    for (size_t idx : field.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.fillR = field.colorR;
+        shape.fillG = field.colorG;
+        shape.fillB = field.colorB;
+    }
+}
+
+void VectorFieldElement::show(float duration) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    // Show all sub-elements
+    for (size_t idx : field.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeIn;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 0.0f;
+        shape.animationStartTime = -1.0f;
+    }
+}
+
+void VectorFieldElement::hide(float duration) {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    // Hide all sub-elements
+    for (size_t idx : field.shapeIndices) {
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        shape.animationType = AnimationType::FadeOut;
+        shape.animationDuration = duration;
+        shape.currentOpacity = 1.0f;
+        shape.animationStartTime = -1.0f;
+    }
+}
+
+// TableElement implementation
+TableElement::TableElement(Catalyst* p, size_t idx) : parent(p), tableIndex(idx) {}
+
+void TableElement::setData(const std::vector<std::vector<std::string>>& data) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.cells = data;
+    table.numRows = static_cast<int>(data.size());
+    table.numCols = data.empty() ? 0 : static_cast<int>(data[0].size());
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setCellSize(float width, float height) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.cellWidth = width;
+    table.cellHeight = height;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setColumnWidth(int col, float width) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    if (table.columnWidths.size() <= static_cast<size_t>(col)) {
+        table.columnWidths.resize(col + 1, table.cellWidth);
+    }
+    table.columnWidths[col] = width;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setRowHeight(int row, float height) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    if (table.rowHeights.size() <= static_cast<size_t>(row)) {
+        table.rowHeights.resize(row + 1, table.cellHeight);
+    }
+    table.rowHeights[row] = height;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setFontSize(float size) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.fontSize = size;
+    // Update existing text elements
+    for (size_t idx : table.textIndices) {
+        auto& text = parent->pImpl->getTextObject(idx);
+        text.fontSize = size;
+    }
+    parent->pImpl->vertexBufferDirty = true;
+}
+
+void TableElement::setTextColor(const std::string& hex) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    // Parse hex color
+    std::string h = hex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        table.textColorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        table.textColorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        table.textColorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+    // Update existing text elements
+    for (size_t idx : table.textIndices) {
+        auto& text = parent->pImpl->getTextObject(idx);
+        text.colorR = table.textColorR;
+        text.colorG = table.textColorG;
+        text.colorB = table.textColorB;
+    }
+}
+
+void TableElement::setTextColor(int r, int g, int b) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.textColorR = r / 255.0f;
+    table.textColorG = g / 255.0f;
+    table.textColorB = b / 255.0f;
+    // Update existing text elements
+    for (size_t idx : table.textIndices) {
+        auto& text = parent->pImpl->getTextObject(idx);
+        text.colorR = table.textColorR;
+        text.colorG = table.textColorG;
+        text.colorB = table.textColorB;
+    }
+}
+
+void TableElement::setGridColor(const std::string& hex) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    // Parse hex color
+    std::string h = hex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        table.gridColorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        table.gridColorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        table.gridColorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+    // Update existing grid lines (shapes that are lines)
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setGridColor(int r, int g, int b) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.gridColorR = r / 255.0f;
+    table.gridColorG = g / 255.0f;
+    table.gridColorB = b / 255.0f;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setHeaderColor(const std::string& hex) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    // Parse hex color
+    std::string h = hex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() == 6) {
+        table.headerColorR = std::stoi(h.substr(0, 2), nullptr, 16) / 255.0f;
+        table.headerColorG = std::stoi(h.substr(2, 2), nullptr, 16) / 255.0f;
+        table.headerColorB = std::stoi(h.substr(4, 2), nullptr, 16) / 255.0f;
+    }
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setHeaderColor(int r, int g, int b) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.headerColorR = r / 255.0f;
+    table.headerColorG = g / 255.0f;
+    table.headerColorB = b / 255.0f;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::showGrid(bool show) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.showGrid = show;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::showHeader(bool show) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.hasHeader = show;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setPosition(float x, float y) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    table.posX = x;
+    table.posY = y;
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::setPosition(Position anchor) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+
+    // Calculate table dimensions
+    float totalWidth = 0.0f;
+    float totalHeight = 0.0f;
+
+    for (int col = 0; col < table.numCols; col++) {
+        if (col < static_cast<int>(table.columnWidths.size())) {
+            totalWidth += table.columnWidths[col];
+        } else {
+            totalWidth += table.cellWidth;
+        }
+    }
+    for (int row = 0; row < table.numRows; row++) {
+        if (row < static_cast<int>(table.rowHeights.size())) {
+            totalHeight += table.rowHeights[row];
+        } else {
+            totalHeight += table.cellHeight;
+        }
+    }
+
+    float w = static_cast<float>(parent->pImpl->width);
+    float h = static_cast<float>(parent->pImpl->height);
+    float margin = 50.0f;
+
+    switch (anchor) {
+        case Position::CENTER:
+            table.posX = (w - totalWidth) / 2.0f;
+            table.posY = (h - totalHeight) / 2.0f;
+            break;
+        case Position::TOP:
+            table.posX = (w - totalWidth) / 2.0f;
+            table.posY = margin;
+            break;
+        case Position::BOTTOM:
+            table.posX = (w - totalWidth) / 2.0f;
+            table.posY = h - totalHeight - margin;
+            break;
+        case Position::LEFT:
+            table.posX = margin;
+            table.posY = (h - totalHeight) / 2.0f;
+            break;
+        case Position::RIGHT:
+            table.posX = w - totalWidth - margin;
+            table.posY = (h - totalHeight) / 2.0f;
+            break;
+        case Position::TLEFT:
+            table.posX = margin;
+            table.posY = margin;
+            break;
+        case Position::TRIGHT:
+            table.posX = w - totalWidth - margin;
+            table.posY = margin;
+            break;
+        case Position::BLEFT:
+            table.posX = margin;
+            table.posY = h - totalHeight - margin;
+            break;
+        case Position::BRIGHT:
+            table.posX = w - totalWidth - margin;
+            table.posY = h - totalHeight - margin;
+            break;
+    }
+
+    parent->pImpl->generateTableElements(tableIndex);
+}
+
+void TableElement::show(float duration) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+
+    // Show all shape elements (grid lines, header backgrounds)
+    for (size_t idx : table.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        if (shape.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeIn, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(shape, std::move(entry));
+    }
+
+    // Show all text elements
+    for (size_t idx : table.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        auto& text = parent->pImpl->getTextObject(idx);
+        if (text.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(text, AnimationType::FadeIn, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(text, std::move(entry));
+    }
+}
+
+void TableElement::hide(float duration) {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+
+    // Hide all shape elements
+    for (size_t idx : table.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        auto& shape = parent->pImpl->getShapeObject(idx);
+        if (shape.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(shape, AnimationType::FadeOut, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(shape, std::move(entry));
+    }
+
+    // Hide all text elements
+    for (size_t idx : table.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        auto& text = parent->pImpl->getTextObject(idx);
+        if (text.cleared) continue;
+        auto entry = parent->pImpl->makeQueuedAnimation(text, AnimationType::FadeOut, duration);
+        entry.direction = Direction::NONE;
+        parent->pImpl->enqueueAnimation(text, std::move(entry));
+    }
+}
+
+// ImageElement implementation
+ImageElement::ImageElement(Catalyst* p, size_t idx) : parent(p), imageIndex(idx) {}
+
+void ImageElement::setSize(float width, float height) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.displayWidth = width;
+    img.displayHeight = height;
+    parent->pImpl->imageVertexBufferDirty = true;
+}
+
+void ImageElement::setPosition(float x, float y) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.posX = x;
+    img.posY = y;
+    img.usePixelPosition = true;
+    parent->pImpl->imageVertexBufferDirty = true;
+}
+
+void ImageElement::setPosition(Position anchor) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.anchor = anchor;
+    img.usePixelPosition = false;
+
+    float w = static_cast<float>(parent->pImpl->width);
+    float h = static_cast<float>(parent->pImpl->height);
+    float margin = 50.0f;
+    float imgW = img.displayWidth;
+    float imgH = img.displayHeight;
+
+    switch (anchor) {
+        case Position::CENTER:
+            img.posX = (w - imgW) / 2.0f;
+            img.posY = (h - imgH) / 2.0f;
+            break;
+        case Position::TOP:
+            img.posX = (w - imgW) / 2.0f;
+            img.posY = margin;
+            break;
+        case Position::BOTTOM:
+            img.posX = (w - imgW) / 2.0f;
+            img.posY = h - imgH - margin;
+            break;
+        case Position::LEFT:
+            img.posX = margin;
+            img.posY = (h - imgH) / 2.0f;
+            break;
+        case Position::RIGHT:
+            img.posX = w - imgW - margin;
+            img.posY = (h - imgH) / 2.0f;
+            break;
+        case Position::TLEFT:
+            img.posX = margin;
+            img.posY = margin;
+            break;
+        case Position::TRIGHT:
+            img.posX = w - imgW - margin;
+            img.posY = margin;
+            break;
+        case Position::BLEFT:
+            img.posX = margin;
+            img.posY = h - imgH - margin;
+            break;
+        case Position::BRIGHT:
+            img.posX = w - imgW - margin;
+            img.posY = h - imgH - margin;
+            break;
+    }
+
+    parent->pImpl->imageVertexBufferDirty = true;
+}
+
+ImageElement& ImageElement::setEasing(Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    return *this;
+}
+
+ImageElement& ImageElement::delay(float seconds) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.elementDelay = seconds;
+    return *this;
+}
+
+ImageElement& ImageElement::then() {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.chainNextAnimation = true;
+    return *this;
+}
+
+ImageElement& ImageElement::repeat(int count) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.loopCount = count;
+    img.currentLoopIteration = 0;
+    return *this;
+}
+
+ImageElement& ImageElement::repeatForever() {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.loopCount = -1;  // -1 means infinite
+    img.currentLoopIteration = 0;
+    return *this;
+}
+
+ImageElement& ImageElement::pingPong() {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.loopPingPong = true;
+    img.loopReverse = false;
+    return *this;
+}
+
+void ImageElement::stopLoop() {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.loopCount = 0;
+    img.currentLoopIteration = 0;
+    img.loopPingPong = false;
+    img.loopReverse = false;
+}
+
+void ImageElement::show(float duration) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.animationType = AnimationType::FadeIn;
+    img.animationDuration = duration;
+    img.currentOpacity = 0.0f;
+    img.animationStartTime = -1.0f;
+    img.animationDirection = Direction::NONE;
+    // Apply element delay and chaining
+    float startTime = img.chainNextAnimation ? img.chainedStartTime : parent->pImpl->currentTimeCursor;
+    img.scheduledStartTime = startTime + img.elementDelay;
+    img.chainedStartTime = img.scheduledStartTime + duration;  // Store end time for next chained animation
+    img.elementDelay = 0.0f;  // Reset delay after use
+    img.chainNextAnimation = false;  // Reset chain flag
+}
+
+void ImageElement::show(float duration, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    show(duration);
+}
+
+void ImageElement::show(float duration, Direction direction) {
+    show(duration, direction, 0.1f);
+}
+
+void ImageElement::show(float duration, Direction direction, float shiftAmount) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.animationType = AnimationType::FadeIn;
+    img.animationDuration = duration;
+    img.currentOpacity = 0.0f;
+    img.animationStartTime = -1.0f;
+    img.animationDirection = direction;
+    img.animationShiftAmount = shiftAmount;
+}
+
+void ImageElement::show(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    show(duration, direction, shiftAmount);
+}
+
+void ImageElement::hide(float duration) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.animationType = AnimationType::FadeOut;
+    img.animationDuration = duration;
+    img.currentOpacity = 1.0f;
+    img.animationStartTime = -1.0f;
+    img.animationDirection = Direction::NONE;
+    // Apply element delay and chaining
+    float startTime = img.chainNextAnimation ? img.chainedStartTime : parent->pImpl->currentTimeCursor;
+    img.scheduledStartTime = startTime + img.elementDelay;
+    img.chainedStartTime = img.scheduledStartTime + duration;  // Store end time for next chained animation
+    img.elementDelay = 0.0f;  // Reset delay after use
+    img.chainNextAnimation = false;  // Reset chain flag
+}
+
+void ImageElement::hide(float duration, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    hide(duration);
+}
+
+void ImageElement::hide(float duration, Direction direction) {
+    hide(duration, direction, 0.1f);
+}
+
+void ImageElement::hide(float duration, Direction direction, float shiftAmount) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.animationType = AnimationType::FadeOut;
+    img.animationDuration = duration;
+    img.currentOpacity = 1.0f;
+    img.animationStartTime = -1.0f;
+    img.animationDirection = direction;
+    img.animationShiftAmount = shiftAmount;
+}
+
+void ImageElement::hide(float duration, Direction direction, float shiftAmount, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    hide(duration, direction, shiftAmount);
+}
+
+void ImageElement::MoveTo(float duration, float x, float y) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    float w = static_cast<float>(parent->pImpl->width);
+    float h = static_cast<float>(parent->pImpl->height);
+    float targetNdcX = (x / w) * 2.0f - 1.0f;
+    float targetNdcY = (y / h) * 2.0f - 1.0f;
+    img.moveStartX = img.currentOffsetX;
+    img.moveStartY = img.currentOffsetY;
+    img.moveTargetX = targetNdcX - img.baseNdcX;
+    img.moveTargetY = targetNdcY - img.baseNdcY;
+    img.animationType = AnimationType::MoveTo;
+    img.animationDuration = duration;
+    img.animationStartTime = -1.0f;
+}
+
+void ImageElement::MoveTo(float duration, float x, float y, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    MoveTo(duration, x, y);
+}
+
+void ImageElement::Scale(float duration, float targetScale) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.scaleStart = img.currentScale;
+    img.scaleTarget = targetScale;
+    img.animationType = AnimationType::Scale;
+    img.animationDuration = duration;
+    img.animationStartTime = -1.0f;
+}
+
+void ImageElement::Scale(float duration, float targetScale, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    Scale(duration, targetScale);
+}
+
+void ImageElement::Rotate(float duration, float degrees) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.rotateStart = img.currentRotation;
+    img.rotateTarget = img.currentRotation + degrees * (3.14159265359f / 180.0f);
+    img.animationType = AnimationType::Rotate;
+    img.animationDuration = duration;
+    img.animationStartTime = -1.0f;
+}
+
+void ImageElement::Rotate(float duration, float degrees, Easing easing) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.easingFunction = easing;
+    Rotate(duration, degrees);
+}
+
+void ImageElement::setZIndex(int zIndex) {
+    parent->pImpl->getImageObject(imageIndex).zIndex = zIndex;
+}
+
+int ImageElement::getZIndex() const {
+    return parent->pImpl->getImageObject(imageIndex).zIndex;
+}
+
+// PathBuilder implementation
+PathBuilder::PathBuilder(Catalyst* p, size_t idx) : parent(p), shapeIndex(idx) {}
+
+PathBuilder& PathBuilder::moveTo(float x, float y) {
+    auto& shape = parent->pImpl->getShapeObject(shapeIndex);
+    PathCommand cmd;
+    cmd.type = PathCommandType::MoveTo;
+    cmd.x = x;
+    cmd.y = y;
+    shape.pathCommands.push_back(cmd);
+    return *this;
+}
+
+PathBuilder& PathBuilder::lineTo(float x, float y) {
+    auto& shape = parent->pImpl->getShapeObject(shapeIndex);
+    PathCommand cmd;
+    cmd.type = PathCommandType::LineTo;
+    cmd.x = x;
+    cmd.y = y;
+    shape.pathCommands.push_back(cmd);
+    return *this;
+}
+
+PathBuilder& PathBuilder::curveTo(float cx1, float cy1, float cx2, float cy2, float x, float y) {
+    auto& shape = parent->pImpl->getShapeObject(shapeIndex);
+    PathCommand cmd;
+    cmd.type = PathCommandType::CurveTo;
+    cmd.cx1 = cx1;
+    cmd.cy1 = cy1;
+    cmd.cx2 = cx2;
+    cmd.cy2 = cy2;
+    cmd.x = x;
+    cmd.y = y;
+    shape.pathCommands.push_back(cmd);
+    return *this;
+}
+
+PathBuilder& PathBuilder::close() {
+    auto& shape = parent->pImpl->getShapeObject(shapeIndex);
+    PathCommand cmd;
+    cmd.type = PathCommandType::Close;
+    shape.pathCommands.push_back(cmd);
+    return *this;
+}
+
+ShapeElement PathBuilder::build() {
+    parent->pImpl->shapeVertexBufferDirty = true;
+    return ShapeElement(parent, shapeIndex);
+}
+
+// Catalyst wrapper class implementation
+Catalyst::Catalyst(uint32_t width, uint32_t height) {
+    pImpl = new Impl(width, height);
+}
+
+Catalyst::~Catalyst() {
+    delete pImpl;
+}
+
+TextElement Catalyst::setText(const std::string& text) {
+    size_t idx = pImpl->addText(text);
+    return TextElement(this, idx);
+}
+
+MathElement Catalyst::setMath(const std::string& latex) {
+    size_t idx = pImpl->addMath(latex);
+    return MathElement(this, idx);
+}
+
+ShapeElement Catalyst::setCircle(float radius) {
+    size_t idx = pImpl->addCircle(radius);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setRectangle(float width, float height) {
+    size_t idx = pImpl->addRectangle(width, height);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setLine(float x1, float y1, float x2, float y2) {
+    size_t idx = pImpl->addLine(x1, y1, x2, y2);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setTriangle(float size) {
+    size_t idx = pImpl->addTriangle(size);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setArrow(float x1, float y1, float x2, float y2) {
+    size_t idx = pImpl->addArrow(x1, y1, x2, y2);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setArc(float radius, float startAngle, float endAngle) {
+    size_t idx = pImpl->addArc(radius, startAngle, endAngle);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setEllipse(float radiusX, float radiusY) {
+    size_t idx = pImpl->addEllipse(radiusX, radiusY);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setDot() {
+    size_t idx = pImpl->addDot(5.0f);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setDot(float radius) {
+    size_t idx = pImpl->addDot(radius);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setPolygon(const std::vector<float>& x, const std::vector<float>& y) {
+    size_t idx = pImpl->addPolygon(x, y);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setRegularPolygon(int sides, float radius) {
+    size_t idx = pImpl->addRegularPolygon(sides, radius);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setStar(int points, float outerRadius) {
+    size_t idx = pImpl->addStar(points, outerRadius, outerRadius * 0.4f);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setStar(int points, float outerRadius, float innerRadius) {
+    size_t idx = pImpl->addStar(points, outerRadius, innerRadius);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setDoubleArrow(float x1, float y1, float x2, float y2) {
+    size_t idx = pImpl->addDoubleArrow(x1, y1, x2, y2);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setBrace(float height) {
+    size_t idx = pImpl->addBrace(height, height * 0.15f, false);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setBrace(float height, float width) {
+    size_t idx = pImpl->addBrace(height, width, false);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setBrace(float height, float width, bool flipped) {
+    size_t idx = pImpl->addBrace(height, width, flipped);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setRoundedRectangle(float width, float height, float cornerRadius) {
+    size_t idx = pImpl->addRoundedRectangle(width, height, cornerRadius);
+    return ShapeElement(this, idx);
+}
+
+ShapeElement Catalyst::setCubicBezier(float p0x, float p0y, float p1x, float p1y,
+                                       float p2x, float p2y, float p3x, float p3y) {
+    size_t idx = pImpl->addCubicBezier(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y);
+    return ShapeElement(this, idx);
+}
+
+AxesElement Catalyst::setAxes(float xMin, float xMax, float yMin, float yMax) {
+    size_t idx = pImpl->addAxes(xMin, xMax, yMin, yMax);
+    return AxesElement(this, idx);
+}
+
+GraphElement Catalyst::setGraph(AxesElement& axes, const std::vector<float>& x, const std::vector<float>& y) {
+    size_t idx = pImpl->addGraph(axes.axesIndex, x, y);
+    return GraphElement(this, idx);
+}
+
+GraphElement Catalyst::setGraph(AxesElement& axes, std::function<float(float)> func, int numPoints) {
+    size_t idx = pImpl->addGraphFromFunction(axes.axesIndex, func, numPoints);
+    return GraphElement(this, idx);
+}
+
+VectorElement Catalyst::setVector(AxesElement& axes, const std::vector<float>& components) {
+    float vx = components.size() > 0 ? components[0] : 0.0f;
+    float vy = components.size() > 1 ? components[1] : 0.0f;
+    size_t idx = pImpl->addVector(axes.axesIndex, vx, vy);
+    return VectorElement(this, idx);
+}
+
+NumberLineElement Catalyst::setNumberLine(float min, float max) {
+    size_t idx = pImpl->addNumberLine(min, max, false);
+    return NumberLineElement(this, idx);
+}
+
+NumberLineElement Catalyst::setNumberLine(float min, float max, bool vertical) {
+    size_t idx = pImpl->addNumberLine(min, max, vertical);
+    return NumberLineElement(this, idx);
+}
+
+BarChartElement Catalyst::setBarChart(const std::vector<float>& values) {
+    size_t idx = pImpl->addBarChart(values);
+    return BarChartElement(this, idx);
+}
+
+BarChartElement Catalyst::setBarChart(const std::vector<float>& values, const std::vector<std::string>& labels) {
+    size_t idx = pImpl->addBarChart(values, labels);
+    return BarChartElement(this, idx);
+}
+
+PieChartElement Catalyst::setPieChart(const std::vector<float>& values, float radius) {
+    size_t idx = pImpl->addPieChart(values, radius);
+    return PieChartElement(this, idx);
+}
+
+VectorFieldElement Catalyst::setVectorField(AxesElement& axes,
+    std::function<std::pair<float, float>(float, float)> func,
+    int gridX, int gridY) {
+    size_t idx = pImpl->addVectorField(axes.axesIndex, func, gridX, gridY);
+    return VectorFieldElement(this, idx);
+}
+
+PathBuilder Catalyst::beginPath() {
+    size_t idx = pImpl->addCustomPath();
+    return PathBuilder(this, idx);
+}
+
+TableElement Catalyst::setTable(const std::vector<std::vector<std::string>>& data) {
+    size_t idx = pImpl->addTable(data);
+    return TableElement(this, idx);
+}
+
+ImageElement Catalyst::setImage(const std::string& path) {
+    size_t idx = pImpl->addImage(path);
+    return ImageElement(this, idx);
+}
+
+ImageElement Catalyst::setImage(const std::string& path, float width, float height) {
+    size_t idx = pImpl->addImage(path, width, height);
+    return ImageElement(this, idx);
+}
+
+// ========== 3D Element Factory Methods ==========
+
+void Catalyst::set3DMode(bool enable) {
+    pImpl->set3DMode(enable);
+}
+
+Axes3DElement Catalyst::setAxes3D(float xMin, float xMax, float yMin, float yMax, float zMin, float zMax) {
+    size_t idx = pImpl->addAxes3D(xMin, xMax, yMin, yMax, zMin, zMax);
+    return Axes3DElement(this, idx);
+}
+
+Surface3DElement Catalyst::setSurface(std::function<float(float, float)> heightFunc,
+                                       float xMin, float xMax, float yMin, float yMax) {
+    size_t idx = pImpl->addSurface3D(heightFunc, xMin, xMax, yMin, yMax);
+    return Surface3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setSphere(float radius) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Sphere, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setSphere(float radius, int segments) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Sphere, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    shape.latSegments = segments;
+    shape.lonSegments = segments;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCube3D(float size) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cube, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.width = size;
+    shape.height = size;
+    shape.depth = size;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCube3D(float width, float height, float depth) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cube, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.width = width;
+    shape.height = height;
+    shape.depth = depth;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCylinder(float radius, float height) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cylinder, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    shape.height = height;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCylinder(float radius, float height, int segments) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cylinder, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    shape.height = height;
+    shape.radialSegments = segments;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCone(float radius, float height) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cone, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    shape.height = height;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setCone(float radius, float height, int segments) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Cone, 0, 0, 0);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.radius = radius;
+    shape.height = height;
+    shape.radialSegments = segments;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+Shape3DElement Catalyst::setArrow3D(float x1, float y1, float z1, float x2, float y2, float z2) {
+    size_t idx = pImpl->addShape3D(Shape3DType::Arrow3D, x1, y1, z1);
+    auto& shape = pImpl->getShape3DObject(idx);
+    shape.arrowEndX = x2;
+    shape.arrowEndY = y2;
+    shape.arrowEndZ = z2;
+    pImpl->generateShape3DVertices(idx);
+    pImpl->markShape3DBufferDirty();
+    return Shape3DElement(this, idx);
+}
+
+void Catalyst::setCamera3D(float eyeX, float eyeY, float eyeZ,
+                           float targetX, float targetY, float targetZ) {
+    pImpl->setCamera3D(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f);
+}
+
+void Catalyst::setCamera3D(float eyeX, float eyeY, float eyeZ,
+                           float targetX, float targetY, float targetZ, float duration) {
+    pImpl->setCamera3D(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, duration);
+}
+
+void Catalyst::setCameraFOV(float fov) {
+    pImpl->setCameraFOV3D(fov, 0.0f);
+}
+
+void Catalyst::setCameraFOV(float fov, float duration) {
+    pImpl->setCameraFOV3D(fov, duration);
+}
+
+void Catalyst::orbitCamera(float theta, float phi, float distance) {
+    pImpl->orbitCamera3D(theta, phi, distance, 0.0f);
+}
+
+void Catalyst::orbitCamera(float theta, float phi, float distance, float duration) {
+    pImpl->orbitCamera3D(theta, phi, distance, duration);
+}
+
+void Catalyst::resetCamera3D() {
+    pImpl->resetCamera3D(0.0f);
+}
+
+void Catalyst::resetCamera3D(float duration) {
+    pImpl->resetCamera3D(duration);
+}
+
+void Catalyst::wait(float seconds) {
+    pImpl->wait(seconds);
+}
+
+void Catalyst::clear() {
+    pImpl->clearAll();
+}
+
+void Catalyst::setBackground(const std::string& hex) {
+    pImpl->setBackgroundHex(hex);
+}
+
+void Catalyst::setBackground(int r, int g, int b) {
+    pImpl->setBackgroundRGB(r, g, b);
+}
+
+void Catalyst::setBackground(float r, float g, float b) {
+    pImpl->setBackgroundFloat(r, g, b);
+}
+
+// Camera controls
+void Catalyst::setCameraZoom(float zoom) {
+    pImpl->setCameraZoom(zoom, 0.0f);
+}
+
+void Catalyst::setCameraZoom(float zoom, float duration) {
+    pImpl->setCameraZoom(zoom, duration);
+}
+
+void Catalyst::setCameraPan(float x, float y) {
+    pImpl->setCameraPan(x, y, 0.0f);
+}
+
+void Catalyst::setCameraPan(float x, float y, float duration) {
+    pImpl->setCameraPan(x, y, duration);
+}
+
+void Catalyst::setCameraRotate(float degrees) {
+    pImpl->setCameraRotate(degrees, 0.0f);
+}
+
+void Catalyst::setCameraRotate(float degrees, float duration) {
+    pImpl->setCameraRotate(degrees, duration);
+}
+
+void Catalyst::resetCamera() {
+    pImpl->resetCamera(0.0f);
+}
+
+void Catalyst::resetCamera(float duration) {
+    pImpl->resetCamera(duration);
+}
+
+// Scene management
+Scene Catalyst::createScene() {
+    size_t idx = pImpl->createScene();
+    return Scene(this, idx);
+}
+
+void Catalyst::setActiveScene(size_t index) {
+    pImpl->setActiveScene(index);
+}
+
+void Catalyst::setActiveScene(Scene& scene) {
+    pImpl->setActiveScene(scene.sceneIndex);
+}
+
+Scene& Catalyst::getScene(size_t index) {
+    // Store scenes to return references
+    static std::vector<Scene> sceneCache;
+    while (sceneCache.size() <= index) {
+        sceneCache.push_back(Scene(this, sceneCache.size()));
+    }
+    sceneCache[index] = Scene(this, index);
+    return sceneCache[index];
+}
+
+size_t Catalyst::getActiveSceneIndex() const {
+    return pImpl->getActiveSceneIndex();
+}
+
+AnimationGroup Catalyst::createAnimationGroup() {
+    return AnimationGroup(this);
+}
+
+AnimationGroup Catalyst::createSequence() {
+    AnimationGroup group(this);
+    group.setLagRatio(1.0f);
+    return group;
+}
+
+Group Catalyst::createGroup() {
+    pImpl->groupObjects.push_back(GroupObject{});
+    return Group(this, pImpl->groupObjects.size() - 1);
+}
+
+// ============== Group class implementation ==============
+
+// Helper: check for circular reference in nested groups
+static bool wouldCreateCycle(const std::vector<GroupObject>& groups, size_t groupIndex, size_t candidateIndex) {
+    if (groupIndex == candidateIndex) return true;
+
+    const auto& candidate = groups[candidateIndex];
+    for (const auto& ref : candidate.members) {
+        if (ref.type == ElementType::Group) {
+            if (wouldCreateCycle(groups, groupIndex, ref.index)) return true;
+        }
+    }
+    return false;
+}
+
+// Helper functions for Group - defined using lambdas within each method to access pImpl
+// The actual getElementSize, getElementPosition, setElementPosition logic is inlined below
+
+// Add methods
+Group& Group::add(TextElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    ElementRef ref;
+    ref.type = ElementType::Text;
+    ref.index = element.textIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::add(MathElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    ElementRef ref;
+    ref.type = ElementType::Math;
+    ref.index = element.mathIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::add(ShapeElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    ElementRef ref;
+    ref.type = ElementType::Shape;
+    ref.index = element.shapeIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::add(ImageElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    ElementRef ref;
+    ref.type = ElementType::Image;
+    ref.index = element.imageIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::add(GraphElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    ElementRef ref;
+    ref.type = ElementType::Graph;
+    ref.index = element.graphIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::add(Group& subgroup) {
+    // Check for circular reference
+    if (wouldCreateCycle(parent->pImpl->groupObjects, groupIndex, subgroup.groupIndex)) {
+        return *this; // Silently reject to prevent infinite loops
+    }
+
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    auto& child = parent->pImpl->groupObjects[subgroup.groupIndex];
+
+    ElementRef ref;
+    ref.type = ElementType::Group;
+    ref.index = subgroup.groupIndex;
+    ref.valid = true;
+    group.members.push_back(ref);
+
+    // Track parent-child relationship
+    child.parentGroupIndex = groupIndex;
+    group.childGroupIndices.push_back(subgroup.groupIndex);
+    group.boundsDirty = true;
+
+    return *this;
+}
+
+// Remove methods
+Group& Group::remove(TextElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Text && ref.index == element.textIndex;
+            }),
+        group.members.end());
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::remove(MathElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Math && ref.index == element.mathIndex;
+            }),
+        group.members.end());
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::remove(ShapeElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Shape && ref.index == element.shapeIndex;
+            }),
+        group.members.end());
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::remove(ImageElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Image && ref.index == element.imageIndex;
+            }),
+        group.members.end());
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::remove(GraphElement& element) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Graph && ref.index == element.graphIndex;
+            }),
+        group.members.end());
+    group.boundsDirty = true;
+    return *this;
+}
+
+Group& Group::remove(Group& subgroup) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    auto& child = parent->pImpl->groupObjects[subgroup.groupIndex];
+
+    group.members.erase(
+        std::remove_if(group.members.begin(), group.members.end(),
+            [&](const ElementRef& ref) {
+                return ref.type == ElementType::Group && ref.index == subgroup.groupIndex;
+            }),
+        group.members.end());
+
+    // Remove from child tracking
+    group.childGroupIndices.erase(
+        std::remove(group.childGroupIndices.begin(), group.childGroupIndices.end(), subgroup.groupIndex),
+        group.childGroupIndices.end());
+    child.parentGroupIndex = SIZE_MAX;
+    group.boundsDirty = true;
+
+    return *this;
+}
+
+void Group::clear() {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+
+    // Clear parent references from child groups
+    for (size_t childIdx : group.childGroupIndices) {
+        parent->pImpl->groupObjects[childIdx].parentGroupIndex = SIZE_MAX;
+    }
+
+    group.members.clear();
+    group.childGroupIndices.clear();
+    group.boundsDirty = true;
+}
+
+size_t Group::size() const {
+    return parent->pImpl->groupObjects[groupIndex].members.size();
+}
+
+bool Group::empty() const {
+    return parent->pImpl->groupObjects[groupIndex].members.empty();
+}
+
+// Positioning
+void Group::setPosition(float x, float y) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+
+    // Calculate current center
+    float currentCenterX = (group.boundsMinX + group.boundsMaxX) / 2.0f;
+    float currentCenterY = (group.boundsMinY + group.boundsMaxY) / 2.0f;
+
+    // Move all members by delta
+    float dx = x - currentCenterX;
+    float dy = y - currentCenterY;
+
+    for (auto& ref : group.members) {
+        float mx, my;
+        parent->pImpl->getElementPosition(ref, mx, my);
+        parent->pImpl->setElementPosition(ref, mx + dx, my + dy);
+    }
+
+    group.posX = x;
+    group.posY = y;
+    group.usePixelPosition = true;
+    group.boundsDirty = true;
+}
+
+void Group::setPosition(Position anchor) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+
+    float groupWidth = group.boundsMaxX - group.boundsMinX;
+    float groupHeight = group.boundsMaxY - group.boundsMinY;
+    float w = static_cast<float>(parent->pImpl->width);
+    float h = static_cast<float>(parent->pImpl->height);
+    float margin = 50.0f;
+
+    float targetX, targetY;
+
+    switch (anchor) {
+        case Position::CENTER:
+            targetX = w / 2.0f;
+            targetY = h / 2.0f;
+            break;
+        case Position::TOP:
+            targetX = w / 2.0f;
+            targetY = margin + groupHeight / 2.0f;
+            break;
+        case Position::BOTTOM:
+            targetX = w / 2.0f;
+            targetY = h - margin - groupHeight / 2.0f;
+            break;
+        case Position::LEFT:
+            targetX = margin + groupWidth / 2.0f;
+            targetY = h / 2.0f;
+            break;
+        case Position::RIGHT:
+            targetX = w - margin - groupWidth / 2.0f;
+            targetY = h / 2.0f;
+            break;
+        case Position::TLEFT:
+            targetX = margin + groupWidth / 2.0f;
+            targetY = margin + groupHeight / 2.0f;
+            break;
+        case Position::TRIGHT:
+            targetX = w - margin - groupWidth / 2.0f;
+            targetY = margin + groupHeight / 2.0f;
+            break;
+        case Position::BLEFT:
+            targetX = margin + groupWidth / 2.0f;
+            targetY = h - margin - groupHeight / 2.0f;
+            break;
+        case Position::BRIGHT:
+            targetX = w - margin - groupWidth / 2.0f;
+            targetY = h - margin - groupHeight / 2.0f;
+            break;
+        default:
+            targetX = w / 2.0f;
+            targetY = h / 2.0f;
+            break;
+    }
+
+    setPosition(targetX, targetY);
+    group.anchor = anchor;
+    group.usePixelPosition = false;
+}
+
+// Layout: arrange in row (RIGHT) or column (DOWN)
+void Group::arrange(Direction direction, float spacing) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    if (group.members.empty()) return;
+
+    // Calculate sizes of all members
+    std::vector<float> widths, heights;
+    for (auto& ref : group.members) {
+        float w, h;
+        parent->pImpl->getElementSize(ref, w, h);
+        widths.push_back(w);
+        heights.push_back(h);
+    }
+
+    // Calculate current center to maintain group position
+    parent->pImpl->calculateGroupBounds(group);
+    float centerX = (group.boundsMinX + group.boundsMaxX) / 2.0f;
+    float centerY = (group.boundsMinY + group.boundsMaxY) / 2.0f;
+
+    if (direction == Direction::RIGHT || direction == Direction::LEFT) {
+        // Horizontal row arrangement
+        float totalWidth = 0.0f;
+        for (size_t i = 0; i < widths.size(); i++) {
+            totalWidth += widths[i];
+            if (i > 0) totalWidth += spacing;
+        }
+
+        float currentX = centerX - totalWidth / 2.0f;
+        for (size_t i = 0; i < group.members.size(); i++) {
+            float elemX = currentX + widths[i] / 2.0f;
+            parent->pImpl->setElementPosition(group.members[i], elemX, centerY);
+            currentX += widths[i] + spacing;
+        }
+    }
+    else if (direction == Direction::DOWN || direction == Direction::UP) {
+        // Vertical column arrangement
+        float totalHeight = 0.0f;
+        for (size_t i = 0; i < heights.size(); i++) {
+            totalHeight += heights[i];
+            if (i > 0) totalHeight += spacing;
+        }
+
+        float currentY = centerY - totalHeight / 2.0f;
+        for (size_t i = 0; i < group.members.size(); i++) {
+            float elemY = currentY + heights[i] / 2.0f;
+            parent->pImpl->setElementPosition(group.members[i], centerX, elemY);
+            currentY += heights[i] + spacing;
+        }
+    }
+
+    group.boundsDirty = true;
+}
+
+// Layout: arrange in grid
+void Group::arrangeInGrid(int cols, float hSpacing, float vSpacing) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    if (cols <= 0 || group.members.empty()) return;
+
+    int rows = static_cast<int>((group.members.size() + cols - 1) / cols);
+
+    // Calculate column widths and row heights
+    std::vector<float> colWidths(cols, 0.0f);
+    std::vector<float> rowHeights(rows, 0.0f);
+
+    for (size_t i = 0; i < group.members.size(); i++) {
+        float w, h;
+        parent->pImpl->getElementSize(group.members[i], w, h);
+        int col = static_cast<int>(i % cols);
+        int row = static_cast<int>(i / cols);
+        colWidths[col] = std::max(colWidths[col], w);
+        rowHeights[row] = std::max(rowHeights[row], h);
+    }
+
+    // Calculate total grid size
+    float totalWidth = 0.0f, totalHeight = 0.0f;
+    for (int c = 0; c < cols; c++) {
+        totalWidth += colWidths[c];
+        if (c > 0) totalWidth += hSpacing;
+    }
+    for (int r = 0; r < rows; r++) {
+        totalHeight += rowHeights[r];
+        if (r > 0) totalHeight += vSpacing;
+    }
+
+    // Calculate current center
+    parent->pImpl->calculateGroupBounds(group);
+    float centerX = (group.boundsMinX + group.boundsMaxX) / 2.0f;
+    float centerY = (group.boundsMinY + group.boundsMaxY) / 2.0f;
+
+    // Place elements
+    float startX = centerX - totalWidth / 2.0f;
+    float startY = centerY - totalHeight / 2.0f;
+
+    float currentY = startY;
+    for (int row = 0; row < rows; row++) {
+        float currentX = startX;
+        for (int col = 0; col < cols; col++) {
+            size_t idx = static_cast<size_t>(row * cols + col);
+            if (idx >= group.members.size()) break;
+
+            float cellCenterX = currentX + colWidths[col] / 2.0f;
+            float cellCenterY = currentY + rowHeights[row] / 2.0f;
+            parent->pImpl->setElementPosition(group.members[idx], cellCenterX, cellCenterY);
+
+            currentX += colWidths[col] + hSpacing;
+        }
+        currentY += rowHeights[row] + vSpacing;
+    }
+
+    group.boundsDirty = true;
+}
+
+// Z-ordering
+void Group::setZIndex(int zIndex) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.zIndex = zIndex;
+
+    // Also set z-index for all members recursively
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                parent->pImpl->textObjects[ref.index].zIndex = zIndex;
+                break;
+            case ElementType::Math:
+                parent->pImpl->mathObjects[ref.index].zIndex = zIndex;
+                break;
+            case ElementType::Shape:
+                parent->pImpl->shapeObjects[ref.index].zIndex = zIndex;
+                break;
+            case ElementType::Image:
+                parent->pImpl->imageObjects[ref.index].zIndex = zIndex;
+                break;
+            case ElementType::Graph:
+                parent->pImpl->graphObjects[ref.index].zIndex = zIndex;
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setZIndex(zIndex);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+int Group::getZIndex() const {
+    return parent->pImpl->groupObjects[groupIndex].zIndex;
+}
+
+// Bounds query
+void Group::getBounds(float& minX, float& minY, float& maxX, float& maxY) const {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+    minX = group.boundsMinX;
+    minY = group.boundsMinY;
+    maxX = group.boundsMaxX;
+    maxY = group.boundsMaxY;
+}
+
+float Group::getWidth() const {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+    return group.boundsMaxX - group.boundsMinX;
+}
+
+float Group::getHeight() const {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+    return group.boundsMaxY - group.boundsMinY;
+}
+
+// Timing control
+Group& Group::setEasing(Easing easing) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.easingFunction = easing;
+    return *this;
+}
+
+Group& Group::delay(float seconds) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.elementDelay = seconds;
+    return *this;
+}
+
+Group& Group::then() {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.chainNextAnimation = true;
+    return *this;
+}
+
+// Recursive animations - show
+void Group::show(float duration) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                TextElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Math: {
+                MathElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Image: {
+                ImageElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Graph: {
+                // GraphElement doesn't support delay/easing, just show it
+                GraphElement elem(parent, ref.index);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.show(duration);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+void Group::show(float duration, Direction direction) {
+    show(duration, direction, 0.1f);
+}
+
+void Group::show(float duration, Direction direction, float shiftAmount) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                TextElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Math: {
+                MathElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Image: {
+                ImageElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.show(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Graph: {
+                // GraphElement doesn't support direction, just show it
+                GraphElement elem(parent, ref.index);
+                elem.show(duration);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.show(duration, direction, shiftAmount);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+// Recursive animations - hide
+void Group::hide(float duration) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                TextElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Math: {
+                MathElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Image: {
+                ImageElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Graph: {
+                // GraphElement doesn't support delay/easing, just hide it
+                GraphElement elem(parent, ref.index);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.hide(duration);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+void Group::hide(float duration, Direction direction) {
+    hide(duration, direction, 0.1f);
+}
+
+void Group::hide(float duration, Direction direction, float shiftAmount) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text: {
+                TextElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Math: {
+                MathElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Image: {
+                ImageElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.hide(duration, direction, shiftAmount);
+                break;
+            }
+            case ElementType::Graph: {
+                // GraphElement doesn't support direction, just hide it
+                GraphElement elem(parent, ref.index);
+                elem.hide(duration);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.hide(duration, direction, shiftAmount);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+// Transform animations
+void Group::MoveTo(float duration, float x, float y) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    parent->pImpl->calculateGroupBounds(group);
+
+    float currentCenterX = (group.boundsMinX + group.boundsMaxX) / 2.0f;
+    float currentCenterY = (group.boundsMinY + group.boundsMaxY) / 2.0f;
+    float dx = x - currentCenterX;
+    float dy = y - currentCenterY;
+
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        float mx, my;
+        parent->pImpl->getElementPosition(ref, mx, my);
+        float targetX = mx + dx;
+        float targetY = my + dy;
+
+        switch (ref.type) {
+            case ElementType::Text: {
+                TextElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.MoveTo(duration, targetX, targetY);
+                break;
+            }
+            case ElementType::Math: {
+                MathElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.MoveTo(duration, targetX, targetY);
+                break;
+            }
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.MoveTo(duration, targetX, targetY);
+                break;
+            }
+            case ElementType::Image: {
+                ImageElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.MoveTo(duration, targetX, targetY);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                // Calculate subgroup's target position
+                float subCenterX, subCenterY;
+                parent->pImpl->getElementPosition(ref, subCenterX, subCenterY);
+                subgroup.MoveTo(duration, subCenterX + dx, subCenterY + dy);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    group.posX = x;
+    group.posY = y;
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+    group.boundsDirty = true;
+}
+
+void Group::Scale(float duration, float targetScale) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.Scale(duration, targetScale);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.Scale(duration, targetScale);
+                break;
+            }
+            // Note: Text, Math, Image don't have Scale animation yet
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+void Group::Rotate(float duration, float degrees) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    float baseDelay = group.elementDelay;
+
+    for (const auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape: {
+                ShapeElement elem(parent, ref.index);
+                elem.delay(baseDelay);
+                elem.setEasing(group.easingFunction);
+                elem.Rotate(duration, degrees);
+                break;
+            }
+            case ElementType::Group: {
+                Group subgroup(parent, ref.index);
+                subgroup.delay(baseDelay);
+                subgroup.setEasing(group.easingFunction);
+                subgroup.Rotate(duration, degrees);
+                break;
+            }
+            // Note: Text, Math, Image don't have Rotate animation yet
+            default:
+                break;
+        }
+    }
+
+    group.elementDelay = 0.0f;
+    group.chainNextAnimation = false;
+}
+
+// ============== End Group class implementation ==============
+
+void Catalyst::run() {
+    pImpl->run();
+}
+
+// Scene class implementation
+TextElement Scene::setText(const std::string& text) {
+    auto element = parent->setText(text);
+    parent->pImpl->addElementToScene(element.textIndex, "text");
+    return element;
+}
+
+MathElement Scene::setMath(const std::string& latex) {
+    auto element = parent->setMath(latex);
+    parent->pImpl->addElementToScene(element.mathIndex, "math");
+    return element;
+}
+
+ShapeElement Scene::setCircle(float radius) {
+    auto element = parent->setCircle(radius);
+    parent->pImpl->addElementToScene(element.shapeIndex, "shape");
+    return element;
+}
+
+ShapeElement Scene::setRectangle(float width, float height) {
+    auto element = parent->setRectangle(width, height);
+    parent->pImpl->addElementToScene(element.shapeIndex, "shape");
+    return element;
+}
+
+ShapeElement Scene::setLine(float x1, float y1, float x2, float y2) {
+    auto element = parent->setLine(x1, y1, x2, y2);
+    parent->pImpl->addElementToScene(element.shapeIndex, "shape");
+    return element;
+}
+
+ShapeElement Scene::setTriangle(float size) {
+    auto element = parent->setTriangle(size);
+    parent->pImpl->addElementToScene(element.shapeIndex, "shape");
+    return element;
+}
+
+ShapeElement Scene::setArrow(float x1, float y1, float x2, float y2) {
+    auto element = parent->setArrow(x1, y1, x2, y2);
+    parent->pImpl->addElementToScene(element.shapeIndex, "shape");
+    return element;
+}
+
+void Scene::setBackground(const std::string& hex) {
+    // Parse hex and set scene background
+    std::string h = hex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() >= 6) {
+        int r = std::stoi(h.substr(0, 2), nullptr, 16);
+        int g = std::stoi(h.substr(2, 2), nullptr, 16);
+        int b = std::stoi(h.substr(4, 2), nullptr, 16);
+        parent->pImpl->setSceneBackground(sceneIndex, r / 255.0f, g / 255.0f, b / 255.0f);
+    }
+}
+
+void Scene::setBackground(int r, int g, int b) {
+    parent->pImpl->setSceneBackground(sceneIndex, r / 255.0f, g / 255.0f, b / 255.0f);
+}
+
+void Scene::setBackground(float r, float g, float b) {
+    parent->pImpl->setSceneBackground(sceneIndex, r, g, b);
+}
+
+void Scene::setCameraZoom(float zoom) {
+    parent->pImpl->setSceneCameraZoom(sceneIndex, zoom, 0.0f);
+}
+
+void Scene::setCameraZoom(float zoom, float duration) {
+    parent->pImpl->setSceneCameraZoom(sceneIndex, zoom, duration);
+}
+
+void Scene::setCameraPan(float x, float y) {
+    parent->pImpl->setSceneCameraPan(sceneIndex, x, y, 0.0f);
+}
+
+void Scene::setCameraPan(float x, float y, float duration) {
+    parent->pImpl->setSceneCameraPan(sceneIndex, x, y, duration);
+}
+
+void Scene::setCameraRotate(float degrees) {
+    parent->pImpl->setSceneCameraRotate(sceneIndex, degrees, 0.0f);
+}
+
+void Scene::setCameraRotate(float degrees, float duration) {
+    parent->pImpl->setSceneCameraRotate(sceneIndex, degrees, duration);
+}
+
+void Scene::resetCamera() {
+    parent->pImpl->resetSceneCamera(sceneIndex, 0.0f);
+}
+
+void Scene::resetCamera(float duration) {
+    parent->pImpl->resetSceneCamera(sceneIndex, duration);
+}
+
+void Scene::wait(float seconds) {
+    parent->wait(seconds);
+}
+
+// AnimationGroup class implementation
+AnimationGroup& AnimationGroup::addShow(TextElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Text;
+    entry.index = el.textIndex;
+    entry.animType = GroupAnimationType::Show;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addShow(MathElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Math;
+    entry.index = el.mathIndex;
+    entry.animType = GroupAnimationType::Show;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addShow(ShapeElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Shape;
+    entry.index = el.shapeIndex;
+    entry.animType = GroupAnimationType::Show;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addShow(ImageElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Image;
+    entry.index = el.imageIndex;
+    entry.animType = GroupAnimationType::Show;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addShow(Shape3DElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Shape3D;
+    entry.index = el.shape3DIndex;
+    entry.animType = GroupAnimationType::Show;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addHide(TextElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Text;
+    entry.index = el.textIndex;
+    entry.animType = GroupAnimationType::Hide;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addHide(MathElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Math;
+    entry.index = el.mathIndex;
+    entry.animType = GroupAnimationType::Hide;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addHide(ShapeElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Shape;
+    entry.index = el.shapeIndex;
+    entry.animType = GroupAnimationType::Hide;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addHide(ImageElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Image;
+    entry.index = el.imageIndex;
+    entry.animType = GroupAnimationType::Hide;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::addHide(Shape3DElement& el, float duration) {
+    Entry entry;
+    entry.type = ElementType::Shape3D;
+    entry.index = el.shape3DIndex;
+    entry.animType = GroupAnimationType::Hide;
+    entry.duration = duration;
+    entry.easing = groupEasing;
+    entries.push_back(entry);
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::setLagRatio(float ratio) {
+    lagRatio = std::max(0.0f, std::min(1.0f, ratio));  // Clamp to [0, 1]
+    return *this;
+}
+
+AnimationGroup& AnimationGroup::setEasing(Easing easing) {
+    groupEasing = easing;
+    // Update all existing entries
+    for (auto& entry : entries) {
+        entry.easing = easing;
+    }
+    return *this;
+}
+
+void AnimationGroup::play() {
+    if (entries.empty()) return;
+
+    float currentOffset = 0.0f;
+    float maxEndTime = 0.0f;
+
+    for (auto& entry : entries) {
+        // Calculate start time for this entry
+        float startTime = parent->pImpl->currentTimeCursor + currentOffset;
+
+        // Apply the animation based on type and element
+        switch (entry.type) {
+            case ElementType::Text: {
+                auto& obj = parent->pImpl->getTextObject(entry.index);
+                obj.easingFunction = entry.easing;
+                if (entry.animType == GroupAnimationType::Show) {
+                    obj.animationType = AnimationType::FadeIn;
+                    obj.currentOpacity = 0.0f;
+                } else {
+                    obj.animationType = AnimationType::FadeOut;
+                    obj.currentOpacity = 1.0f;
+                }
+                obj.animationDuration = entry.duration;
+                obj.animationStartTime = -1.0f;
+                obj.scheduledStartTime = startTime;
+                obj.animationDirection = Direction::NONE;
+                obj.currentOffsetX = 0.0f;
+                obj.currentOffsetY = 0.0f;
+                break;
+            }
+            case ElementType::Math: {
+                auto& obj = parent->pImpl->getMathObject(entry.index);
+                obj.easingFunction = entry.easing;
+                if (entry.animType == GroupAnimationType::Show) {
+                    obj.animationType = AnimationType::FadeIn;
+                    obj.currentOpacity = 0.0f;
+                } else {
+                    obj.animationType = AnimationType::FadeOut;
+                    obj.currentOpacity = 1.0f;
+                }
+                obj.animationDuration = entry.duration;
+                obj.animationStartTime = -1.0f;
+                obj.scheduledStartTime = startTime;
+                obj.animationDirection = Direction::NONE;
+                obj.currentOffsetX = 0.0f;
+                obj.currentOffsetY = 0.0f;
+                break;
+            }
+            case ElementType::Shape: {
+                auto& obj = parent->pImpl->getShapeObject(entry.index);
+                obj.easingFunction = entry.easing;
+                if (entry.animType == GroupAnimationType::Show) {
+                    obj.animationType = AnimationType::FadeIn;
+                    obj.currentOpacity = 0.0f;
+                } else {
+                    obj.animationType = AnimationType::FadeOut;
+                    obj.currentOpacity = 1.0f;
+                }
+                obj.animationDuration = entry.duration;
+                obj.animationStartTime = -1.0f;
+                obj.scheduledStartTime = startTime;
+                obj.animationDirection = Direction::NONE;
+                obj.currentOffsetX = 0.0f;
+                obj.currentOffsetY = 0.0f;
+                break;
+            }
+            case ElementType::Image: {
+                auto& obj = parent->pImpl->getImageObject(entry.index);
+                obj.easingFunction = entry.easing;
+                if (entry.animType == GroupAnimationType::Show) {
+                    obj.animationType = AnimationType::FadeIn;
+                    obj.currentOpacity = 0.0f;
+                } else {
+                    obj.animationType = AnimationType::FadeOut;
+                    obj.currentOpacity = 1.0f;
+                }
+                obj.animationDuration = entry.duration;
+                obj.animationStartTime = -1.0f;
+                obj.scheduledStartTime = startTime;
+                obj.animationDirection = Direction::NONE;
+                break;
+            }
+            case ElementType::Shape3D: {
+                auto& obj = parent->pImpl->getShape3DObject(entry.index);
+                obj.easingFunction = entry.easing;
+                if (entry.animType == GroupAnimationType::Show) {
+                    obj.animationType = AnimationType::FadeIn;
+                    obj.currentOpacity = 0.0f;
+                } else {
+                    obj.animationType = AnimationType::FadeOut;
+                    obj.currentOpacity = 1.0f;
+                }
+                obj.animationDuration = entry.duration;
+                obj.animationStartTime = -1.0f;
+                obj.scheduledStartTime = startTime;
+                break;
+            }
+        }
+
+        // Track end time for advancing timeline
+        float endTime = startTime + entry.duration;
+        if (endTime > maxEndTime) {
+            maxEndTime = endTime;
+        }
+
+        // Calculate offset for next entry based on lag ratio
+        // lag_ratio=0: all start together (parallel)
+        // lag_ratio=1: each starts after previous ends (sequential)
+        currentOffset += entry.duration * lagRatio;
+    }
+
+    // Advance the timeline to after all animations complete
+    parent->pImpl->currentTimeCursor = maxEndTime;
+}
+
+// Only compile demo main() when not building as library for animations
+#ifndef CATALYST_LIBRARY_BUILD
+int main() {
+    Catalyst window(1920, 1080);
+    window.setBackground("#1a1a2e");
+
+    // ============================================================================
+    // SECTION 1: TEXT & TYPOGRAPHY
+    // ============================================================================
+
+    auto sectionTitle = window.setText("Section 1: Text & Typography");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 1.1 Basic text rendering
+    window.wait(1.0f);
+    auto cmdLabel = window.setText("setText(\"Hello Catalyst\")");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto demo = window.setText("Hello Catalyst");
+    demo.setSize(72);
+    demo.setPosition(Position::CENTER);
+    demo.setColor("#FFFFFF");
+    demo.show(1.0f);
+
+    window.wait(5.0f);
+    demo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.2 Font size control
+    window.wait(0.5f);
+    cmdLabel = window.setText("setSize(24) -> setSize(48) -> setSize(72)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto sizeDemo = window.setText("Font Size");
+    sizeDemo.setSize(24);
+    sizeDemo.setPosition(Position::CENTER);
+    sizeDemo.setColor("#FFFFFF");
+    sizeDemo.show(0.5f);
+
+    window.wait(1.5f);
+    sizeDemo.hide(0.3f);
+    window.wait(0.3f);
+    sizeDemo = window.setText("Font Size");
+    sizeDemo.setSize(48);
+    sizeDemo.setPosition(Position::CENTER);
+    sizeDemo.setColor("#FFFFFF");
+    sizeDemo.show(0.3f);
+
+    window.wait(1.5f);
+    sizeDemo.hide(0.3f);
+    window.wait(0.3f);
+    sizeDemo = window.setText("Font Size");
+    sizeDemo.setSize(72);
+    sizeDemo.setPosition(Position::CENTER);
+    sizeDemo.setColor("#FFFFFF");
+    sizeDemo.show(0.3f);
+
+    window.wait(2.0f);
+    sizeDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.3 Text positioning (pixel)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setPosition(100, 200)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto posDemo = window.setText("Pixel Position (100, 200)");
+    posDemo.setSize(36);
+    posDemo.setPosition(100, 200);
+    posDemo.setColor("#FF5733");
+    posDemo.show(0.5f);
+
+    window.wait(5.0f);
+    posDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.4 Anchor positions
+    window.wait(0.5f);
+    cmdLabel = window.setText("setPosition(Position::ANCHOR)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto anchorTL = window.setText("TLEFT");
+    anchorTL.setSize(24);
+    anchorTL.setPosition(Position::TLEFT);
+    anchorTL.setColor("#FF5733");
+    anchorTL.show(0.3f);
+
+    auto anchorT = window.setText("TOP");
+    anchorT.setSize(24);
+    anchorT.setPosition(Position::TOP);
+    anchorT.setColor("#33FF57");
+    anchorT.show(0.3f);
+
+    auto anchorTR = window.setText("TRIGHT");
+    anchorTR.setSize(24);
+    anchorTR.setPosition(Position::TRIGHT);
+    anchorTR.setColor("#5733FF");
+    anchorTR.show(0.3f);
+
+    auto anchorL = window.setText("LEFT");
+    anchorL.setSize(24);
+    anchorL.setPosition(Position::LEFT);
+    anchorL.setColor("#FFFF00");
+    anchorL.show(0.3f);
+
+    auto anchorC = window.setText("CENTER");
+    anchorC.setSize(24);
+    anchorC.setPosition(Position::CENTER);
+    anchorC.setColor("#00FFFF");
+    anchorC.show(0.3f);
+
+    auto anchorR = window.setText("RIGHT");
+    anchorR.setSize(24);
+    anchorR.setPosition(Position::RIGHT);
+    anchorR.setColor("#FF00FF");
+    anchorR.show(0.3f);
+
+    auto anchorBL = window.setText("BLEFT");
+    anchorBL.setSize(24);
+    anchorBL.setPosition(Position::BLEFT);
+    anchorBL.setColor("#FF8800");
+    anchorBL.show(0.3f);
+
+    auto anchorB = window.setText("BOTTOM");
+    anchorB.setSize(24);
+    anchorB.setPosition(Position::BOTTOM);
+    anchorB.setColor("#88FF00");
+    anchorB.show(0.3f);
+
+    auto anchorBR = window.setText("BRIGHT");
+    anchorBR.setSize(24);
+    anchorBR.setPosition(Position::BRIGHT);
+    anchorBR.setColor("#0088FF");
+    anchorBR.show(0.3f);
+
+    window.wait(5.0f);
+    anchorTL.hide(0.3f);
+    anchorT.hide(0.3f);
+    anchorTR.hide(0.3f);
+    anchorL.hide(0.3f);
+    anchorC.hide(0.3f);
+    anchorR.hide(0.3f);
+    anchorBL.hide(0.3f);
+    anchorB.hide(0.3f);
+    anchorBR.hide(0.3f);
+    cmdLabel.hide(0.3f);
+
+    // 1.5 Text color (hex)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setColor(\"#FF5733\")");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto colorHex = window.setText("Hex Color #FF5733");
+    colorHex.setSize(48);
+    colorHex.setPosition(Position::CENTER);
+    colorHex.setColor("#FF5733");
+    colorHex.show(0.5f);
+
+    window.wait(5.0f);
+    colorHex.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.6 Text color (RGB)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setColor(100, 200, 255)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto colorRGB = window.setText("RGB Color (100, 200, 255)");
+    colorRGB.setSize(48);
+    colorRGB.setPosition(Position::CENTER);
+    colorRGB.setColor(100, 200, 255);
+    colorRGB.show(0.5f);
+
+    window.wait(5.0f);
+    colorRGB.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.7 Text color (HSL)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setColor(280.0f, 0.8f, 0.6f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto colorHSL = window.setText("HSL Color (280, 0.8, 0.6)");
+    colorHSL.setSize(48);
+    colorHSL.setPosition(Position::CENTER);
+    colorHSL.setColor(280.0f, 0.8f, 0.6f);
+    colorHSL.show(0.5f);
+
+    window.wait(5.0f);
+    colorHSL.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.8 LaTeX/Math
+    window.wait(0.5f);
+    cmdLabel = window.setText("setMath(\"E = mc^2\")");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto mathDemo = window.setMath("E = mc^2");
+    mathDemo.setSize(72);
+    mathDemo.setPosition(Position::CENTER);
+    mathDemo.setColor("#FFFFFF");
+    mathDemo.show(0.5f);
+
+    window.wait(3.0f);
+    mathDemo.hide(0.3f);
+    cmdLabel.hide(0.3f);
+
+    window.wait(0.5f);
+    cmdLabel = window.setText("setMath(\"\\\\int_0^\\\\infty e^{-x^2} dx\")");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto mathDemo2 = window.setMath("\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}");
+    mathDemo2.setSize(56);
+    mathDemo2.setPosition(Position::CENTER);
+    mathDemo2.setColor("#FFFFFF");
+    mathDemo2.show(0.5f);
+
+    window.wait(5.0f);
+    mathDemo2.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.9 Text stroke
+    window.wait(0.5f);
+    cmdLabel = window.setText("setStroke(4.0f) + setStrokeColor(\"#000000\")");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto strokeDemo = window.setText("Outlined Text");
+    strokeDemo.setSize(72);
+    strokeDemo.setPosition(Position::CENTER);
+    strokeDemo.setColor("#FFFFFF");
+    strokeDemo.setStroke(4.0f);
+    strokeDemo.setStrokeColor("#000000");
+    strokeDemo.show(0.5f);
+
+    window.wait(5.0f);
+    strokeDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.10 Text gradient
+    window.wait(0.5f);
+    cmdLabel = window.setText("setGradient(\"#FF0000\", \"#0000FF\", 45.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto gradDemo = window.setText("Gradient Text");
+    gradDemo.setSize(72);
+    gradDemo.setPosition(Position::CENTER);
+    gradDemo.setGradient("#FF0000", "#0000FF", 45.0f);
+    gradDemo.show(0.5f);
+
+    window.wait(5.0f);
+    gradDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 1.11 Multiline/paragraph
+    window.wait(0.5f);
+    cmdLabel = window.setText("setLineHeight(1.5f) + setMaxWidth(600)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto paraDemo = window.setText("This is a multi-line paragraph that demonstrates word wrapping. When the text exceeds the maximum width, it automatically wraps to the next line with proper line height spacing.");
+    paraDemo.setSize(32);
+    paraDemo.setPosition(Position::CENTER);
+    paraDemo.setColor("#FFFFFF");
+    paraDemo.setLineHeight(1.5f);
+    paraDemo.setMaxWidth(600);
+    paraDemo.show(0.5f);
+
+    window.wait(5.0f);
+    paraDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 2: ANIMATIONS - FADE
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 2: Animations - Fade");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 2.1 Fade in
+    window.wait(1.0f);
+    cmdLabel = window.setText("show(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto fadeIn = window.setText("Fading In...");
+    fadeIn.setSize(56);
+    fadeIn.setPosition(Position::CENTER);
+    fadeIn.setColor("#FF5733");
+    fadeIn.show(1.0f);
+
+    window.wait(5.0f);
+    fadeIn.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 2.2 Fade out
+    window.wait(0.5f);
+    cmdLabel = window.setText("hide(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto fadeOut = window.setText("Fading Out...");
+    fadeOut.setSize(56);
+    fadeOut.setPosition(Position::CENTER);
+    fadeOut.setColor("#33FF57");
+    fadeOut.show(0.3f);
+
+    window.wait(2.0f);
+    fadeOut.hide(1.0f);
+
+    window.wait(3.0f);
+    cmdLabel.hide(0.3f);
+
+    // 2.3 Fade in from direction
+    window.wait(0.5f);
+    cmdLabel = window.setText("show(1.0f, Direction::UP)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto fadeInDir = window.setText("Sliding Up!");
+    fadeInDir.setSize(56);
+    fadeInDir.setPosition(Position::CENTER);
+    fadeInDir.setColor("#5733FF");
+    fadeInDir.show(1.0f, Direction::UP);
+
+    window.wait(5.0f);
+    fadeInDir.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 2.4 Fade out to direction
+    window.wait(0.5f);
+    cmdLabel = window.setText("hide(1.0f, Direction::RIGHT)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto fadeOutDir = window.setText("Sliding Right!");
+    fadeOutDir.setSize(56);
+    fadeOutDir.setPosition(Position::CENTER);
+    fadeOutDir.setColor("#FFFF00");
+    fadeOutDir.show(0.3f);
+
+    window.wait(2.0f);
+    fadeOutDir.hide(1.0f, Direction::RIGHT);
+
+    window.wait(3.0f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 3: ANIMATIONS - TRANSFORM
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 3: Animations - Transform");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 3.1 MoveTo
+    window.wait(1.0f);
+    cmdLabel = window.setText("MoveTo(1.5f, 1200, 600)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto moveShape = window.setCircle(60);
+    moveShape.setPosition(300, 400);
+    moveShape.setFill("#FF5733");
+    moveShape.show(0.5f);
+
+    window.wait(1.0f);
+    moveShape.MoveTo(1.5f, 1200, 600);
+
+    window.wait(4.0f);
+    moveShape.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 3.2 Scale
+    window.wait(0.5f);
+    cmdLabel = window.setText("Scale(1.0f, 2.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto scaleShape = window.setRectangle(100, 100);
+    scaleShape.setPosition(Position::CENTER);
+    scaleShape.setFill("#33FF57");
+    scaleShape.show(0.5f);
+
+    window.wait(1.0f);
+    scaleShape.Scale(1.0f, 2.5f);
+
+    window.wait(4.0f);
+    scaleShape.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 3.3 Rotate
+    window.wait(0.5f);
+    cmdLabel = window.setText("Rotate(1.5f, 360.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto rotateShape = window.setTriangle(120);
+    rotateShape.setPosition(Position::CENTER);
+    rotateShape.setFill("#5733FF");
+    rotateShape.show(0.5f);
+
+    window.wait(1.0f);
+    rotateShape.Rotate(1.5f, 360.0f);
+
+    window.wait(4.0f);
+    rotateShape.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 3.4 Morph (Shape)
+    window.wait(0.5f);
+    cmdLabel = window.setText("morphTo(targetShape, 2.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto morphSrc = window.setCircle(80);
+    morphSrc.setPosition(Position::CENTER);
+    morphSrc.setFill("#FF5733");
+    morphSrc.show(0.5f);
+
+    auto morphTgt = window.setRectangle(200, 120);
+    morphTgt.setPosition(Position::CENTER);
+    morphTgt.setFill("#33FF57");
+
+    window.wait(1.5f);
+    morphSrc.morphTo(morphTgt, 2.0f);
+
+    window.wait(4.0f);
+    morphTgt.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 4: ANIMATIONS - SHOWING
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 4: Animations - Showing");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 4.1 Write (typewriter)
+    window.wait(1.0f);
+    cmdLabel = window.setText("Write(2.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto writeDemo = window.setText("Typewriter Effect!");
+    writeDemo.setSize(56);
+    writeDemo.setPosition(Position::CENTER);
+    writeDemo.setColor("#FF5733");
+    writeDemo.Write(2.0f);
+
+    window.wait(5.0f);
+    writeDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 4.2 AddLetterByLetter
+    window.wait(0.5f);
+    cmdLabel = window.setText("AddLetterByLetter(3.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto letterDemo = window.setText("Letter by Letter");
+    letterDemo.setSize(56);
+    letterDemo.setPosition(Position::CENTER);
+    letterDemo.setColor("#33FF57");
+    letterDemo.AddLetterByLetter(3.0f);
+
+    window.wait(5.0f);
+    letterDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 4.3 DrawBorderThenFill
+    window.wait(0.5f);
+    cmdLabel = window.setText("DrawBorderThenFill(2.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto borderFillDemo = window.setText("Border Then Fill");
+    borderFillDemo.setSize(56);
+    borderFillDemo.setPosition(Position::CENTER);
+    borderFillDemo.setColor("#5733FF");
+    borderFillDemo.setStroke(3.0f);
+    borderFillDemo.setStrokeColor("#FFFFFF");
+    borderFillDemo.DrawBorderThenFill(2.0f);
+
+    window.wait(5.0f);
+    borderFillDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 5: ANIMATIONS - EMPHASIS
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 5: Animations - Emphasis");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 5.1 Indicate
+    window.wait(1.0f);
+    cmdLabel = window.setText("Indicate(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto indicateDemo = window.setText("Indicate Me!");
+    indicateDemo.setSize(56);
+    indicateDemo.setPosition(Position::CENTER);
+    indicateDemo.setColor("#FF5733");
+    indicateDemo.show(0.3f);
+
+    window.wait(1.0f);
+    indicateDemo.Indicate(1.0f);
+
+    window.wait(4.0f);
+    indicateDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 5.2 Flash
+    window.wait(0.5f);
+    cmdLabel = window.setText("Flash(0.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto flashDemo = window.setText("Flash!");
+    flashDemo.setSize(56);
+    flashDemo.setPosition(Position::CENTER);
+    flashDemo.setColor("#33FF57");
+    flashDemo.show(0.3f);
+
+    window.wait(1.0f);
+    flashDemo.Flash(0.5f);
+
+    window.wait(4.0f);
+    flashDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 5.3 Circumscribe
+    window.wait(0.5f);
+    cmdLabel = window.setText("Circumscribe(1.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto circumDemo = window.setText("Circumscribe");
+    circumDemo.setSize(56);
+    circumDemo.setPosition(Position::CENTER);
+    circumDemo.setColor("#5733FF");
+    circumDemo.show(0.3f);
+
+    window.wait(1.0f);
+    circumDemo.Circumscribe(1.5f);
+
+    window.wait(4.0f);
+    circumDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 5.4 Wiggle
+    window.wait(0.5f);
+    cmdLabel = window.setText("Wiggle(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto wiggleDemo = window.setText("Wiggle!");
+    wiggleDemo.setSize(56);
+    wiggleDemo.setPosition(Position::CENTER);
+    wiggleDemo.setColor("#FFFF00");
+    wiggleDemo.show(0.3f);
+
+    window.wait(1.0f);
+    wiggleDemo.Wiggle(1.0f);
+
+    window.wait(4.0f);
+    wiggleDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 5.5 Pulse
+    window.wait(0.5f);
+    cmdLabel = window.setText("Pulse(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto pulseDemo = window.setText("Pulse!");
+    pulseDemo.setSize(56);
+    pulseDemo.setPosition(Position::CENTER);
+    pulseDemo.setColor("#00FFFF");
+    pulseDemo.show(0.3f);
+
+    window.wait(1.0f);
+    pulseDemo.Pulse(1.0f);
+
+    window.wait(4.0f);
+    pulseDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 5.6 FocusOn
+    window.wait(0.5f);
+    cmdLabel = window.setText("FocusOn(1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto focusDemo = window.setText("Focus On Me!");
+    focusDemo.setSize(56);
+    focusDemo.setPosition(Position::CENTER);
+    focusDemo.setColor("#FF00FF");
+    focusDemo.show(0.3f);
+
+    window.wait(1.0f);
+    focusDemo.FocusOn(1.0f);
+
+    window.wait(4.0f);
+    focusDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 6: ANIMATIONS - MOVEMENT
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 6: Animations - Movement");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 6.1 SpiralIn
+    window.wait(1.0f);
+    cmdLabel = window.setText("SpiralIn(2.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto spiralInDemo = window.setCircle(40);
+    spiralInDemo.setPosition(Position::CENTER);
+    spiralInDemo.setFill("#FF5733");
+    spiralInDemo.SpiralIn(2.0f);
+
+    window.wait(5.0f);
+    spiralInDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 6.2 SpiralOut
+    window.wait(0.5f);
+    cmdLabel = window.setText("SpiralOut(2.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto spiralOutDemo = window.setCircle(40);
+    spiralOutDemo.setPosition(Position::CENTER);
+    spiralOutDemo.setFill("#33FF57");
+    spiralOutDemo.show(0.3f);
+
+    window.wait(1.0f);
+    spiralOutDemo.SpiralOut(2.0f);
+
+    window.wait(4.0f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 7: SHAPES - BASIC
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 7: Shapes - Basic");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 7.1 Circle
+    window.wait(1.0f);
+    cmdLabel = window.setText("setCircle(80)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto circleDemo = window.setCircle(80);
+    circleDemo.setPosition(Position::CENTER);
+    circleDemo.setFill("#FF5733");
+    circleDemo.show(0.5f);
+
+    window.wait(5.0f);
+    circleDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.2 Rectangle
+    window.wait(0.5f);
+    cmdLabel = window.setText("setRectangle(200, 100)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto rectDemo = window.setRectangle(200, 100);
+    rectDemo.setPosition(Position::CENTER);
+    rectDemo.setFill("#33FF57");
+    rectDemo.show(0.5f);
+
+    window.wait(5.0f);
+    rectDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.3 Triangle
+    window.wait(0.5f);
+    cmdLabel = window.setText("setTriangle(120)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto triDemo = window.setTriangle(120);
+    triDemo.setPosition(Position::CENTER);
+    triDemo.setFill("#5733FF");
+    triDemo.show(0.5f);
+
+    window.wait(5.0f);
+    triDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.4 Line
+    window.wait(0.5f);
+    cmdLabel = window.setText("setLine(400, 400, 1500, 700)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto lineDemo = window.setLine(400, 400, 1500, 700);
+    lineDemo.setFill("#FFFF00");
+    lineDemo.show(0.5f);
+
+    window.wait(5.0f);
+    lineDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.5 Arrow
+    window.wait(0.5f);
+    cmdLabel = window.setText("setArrow(400, 540, 1500, 540)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto arrowDemo = window.setArrow(400, 540, 1500, 540);
+    arrowDemo.setFill("#00FFFF");
+    arrowDemo.show(0.5f);
+
+    window.wait(5.0f);
+    arrowDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.6 Double Arrow
+    window.wait(0.5f);
+    cmdLabel = window.setText("setDoubleArrow(400, 540, 1500, 540)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto dblArrowDemo = window.setDoubleArrow(400, 540, 1500, 540);
+    dblArrowDemo.setFill("#FF00FF");
+    dblArrowDemo.show(0.5f);
+
+    window.wait(5.0f);
+    dblArrowDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.7 Regular Polygon (Hexagon)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setRegularPolygon(6, 80)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto hexDemo = window.setRegularPolygon(6, 80);
+    hexDemo.setPosition(Position::CENTER);
+    hexDemo.setFill("#FF8800");
+    hexDemo.show(0.5f);
+
+    window.wait(5.0f);
+    hexDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.8 Ellipse
+    window.wait(0.5f);
+    cmdLabel = window.setText("setEllipse(120, 60)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto ellipseDemo = window.setEllipse(120, 60);
+    ellipseDemo.setPosition(Position::CENTER);
+    ellipseDemo.setFill("#88FF00");
+    ellipseDemo.show(0.5f);
+
+    window.wait(5.0f);
+    ellipseDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.9 Arc
+    window.wait(0.5f);
+    cmdLabel = window.setText("setArc(80, 0, 270)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto arcDemo = window.setArc(80, 0, 270);
+    arcDemo.setPosition(Position::CENTER);
+    arcDemo.setFill("#0088FF");
+    arcDemo.show(0.5f);
+
+    window.wait(5.0f);
+    arcDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.10 Dot
+    window.wait(0.5f);
+    cmdLabel = window.setText("setDot(20)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto dotDemo = window.setDot(20);
+    dotDemo.setPosition(Position::CENTER);
+    dotDemo.setFill("#FF0088");
+    dotDemo.show(0.5f);
+
+    window.wait(5.0f);
+    dotDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.11 Star
+    window.wait(0.5f);
+    cmdLabel = window.setText("setStar(5, 80, 40)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto starDemo = window.setStar(5, 80, 40);
+    starDemo.setPosition(Position::CENTER);
+    starDemo.setFill("#FFFF00");
+    starDemo.show(0.5f);
+
+    window.wait(5.0f);
+    starDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 7.12 Rounded Rectangle
+    window.wait(0.5f);
+    cmdLabel = window.setText("setRoundedRectangle(200, 100, 20)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto roundRectDemo = window.setRoundedRectangle(200, 100, 20);
+    roundRectDemo.setPosition(Position::CENTER);
+    roundRectDemo.setFill("#00FF88");
+    roundRectDemo.show(0.5f);
+
+    window.wait(5.0f);
+    roundRectDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 8: SHAPES - ADVANCED
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 8: Shapes - Advanced");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 8.1 Axes
+    window.wait(1.0f);
+    cmdLabel = window.setText("setAxes(-5, 5, -3, 3)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto axesDemo = window.setAxes(-5.0f, 5.0f, -3.0f, 3.0f);
+    axesDemo.setTickSpacing(1.0f, 1.0f);
+    axesDemo.setColor("#FFFFFF");
+    axesDemo.show(1.0f);
+
+    window.wait(5.0f);
+    axesDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 8.2 Graph (function)
+    window.wait(0.5f);
+    cmdLabel = window.setText("setGraph(axes, sin, 200)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto axesGraph = window.setAxes(-5.0f, 5.0f, -2.0f, 2.0f);
+    axesGraph.setColor("#666666");
+    axesGraph.show(0.5f);
+
+    auto graphFunc = window.setGraph(axesGraph, [](float x) { return std::sin(x); }, 200);
+    graphFunc.setColor("#FF5733");
+    graphFunc.setThickness(3.0f);
+    graphFunc.show(1.5f);
+
+    window.wait(5.0f);
+    axesGraph.hide(0.5f);
+    graphFunc.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 8.3 Table
+    window.wait(0.5f);
+    cmdLabel = window.setText("setTable(data)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    std::vector<std::vector<std::string>> tableData = {
+        {"Name", "Score", "Grade"},
+        {"Alice", "95", "A"},
+        {"Bob", "87", "B"},
+        {"Carol", "92", "A"}
+    };
+
+    auto tableDemo = window.setTable(tableData);
+    tableDemo.setPosition(Position::CENTER);
+    tableDemo.setCellSize(120, 45);
+    tableDemo.setFontSize(20);
+    tableDemo.setTextColor("#FFFFFF");
+    tableDemo.setGridColor("#555555");
+    tableDemo.setHeaderColor("#2266AA");
+    tableDemo.show(1.0f);
+
+    window.wait(5.0f);
+    tableDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 9: SCENE & CAMERA
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 9: Scene & Camera");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // Create reference objects for camera demos
+    auto camCircle = window.setCircle(60);
+    camCircle.setPosition(Position::CENTER);
+    camCircle.setFill("#FF5733");
+    camCircle.show(0.3f);
+
+    auto camC1 = window.setCircle(40);
+    camC1.setPosition(Position::TLEFT);
+    camC1.setFill("#33FF57");
+    camC1.show(0.3f);
+
+    auto camC2 = window.setCircle(40);
+    camC2.setPosition(Position::TRIGHT);
+    camC2.setFill("#5733FF");
+    camC2.show(0.3f);
+
+    auto camC3 = window.setCircle(40);
+    camC3.setPosition(Position::BLEFT);
+    camC3.setFill("#FFFF00");
+    camC3.show(0.3f);
+
+    auto camC4 = window.setCircle(40);
+    camC4.setPosition(Position::BRIGHT);
+    camC4.setFill("#00FFFF");
+    camC4.show(0.3f);
+
+    // 9.1 Camera zoom
+    window.wait(1.0f);
+    cmdLabel = window.setText("setCameraZoom(1.8f, 1.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    window.setCameraZoom(1.8f, 1.5f);
+
+    window.wait(5.0f);
+    cmdLabel.hide(0.3f);
+
+    // 9.2 Camera pan
+    window.wait(0.5f);
+    cmdLabel = window.setText("setCameraPan(0.3f, 0.0f, 1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    window.setCameraPan(0.3f, 0.0f, 1.0f);
+
+    window.wait(5.0f);
+    cmdLabel.hide(0.3f);
+
+    // 9.3 Camera rotate
+    window.wait(0.5f);
+    cmdLabel = window.setText("setCameraRotate(25.0f, 1.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    window.setCameraRotate(25.0f, 1.5f);
+
+    window.wait(5.0f);
+    cmdLabel.hide(0.3f);
+
+    // 9.4 Camera reset
+    window.wait(0.5f);
+    cmdLabel = window.setText("resetCamera(1.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    window.resetCamera(1.5f);
+
+    window.wait(5.0f);
+    cmdLabel.hide(0.3f);
+
+    camCircle.hide(0.3f);
+    camC1.hide(0.3f);
+    camC2.hide(0.3f);
+    camC3.hide(0.3f);
+    camC4.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 10: 3D FEATURES
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 10: 3D Features");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 10.1 Enable 3D mode
+    window.wait(1.0f);
+    cmdLabel = window.setText("set3DMode(true)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    window.set3DMode(true);
+    window.setCamera3D(5.0f, 3.0f, 5.0f, 0.0f, 0.0f, 0.0f);
+    // Orbit the camera 360° around the scene for the full 3D demo section.
+    {
+        constexpr float kTwoPi = 6.283185307179586f;
+        constexpr float kOrbitDuration = 41.5f;
+        float dx = 5.0f, dy = 3.0f, dz = 5.0f;
+        float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        float phi = std::acos(dy / distance);
+        float theta = std::atan2(dz, dx);
+        window.orbitCamera(theta + kTwoPi, phi, distance, kOrbitDuration);
+    }
+
+    window.wait(3.0f);
+    cmdLabel.hide(0.3f);
+
+    // 10.2 3D Axes
+    window.wait(0.5f);
+    cmdLabel = window.setText("setAxes3D(-2, 2, -2, 2, -2, 2)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto axes3DDemo = window.setAxes3D(-2.0f, 2.0f, -2.0f, 2.0f, -2.0f, 2.0f);
+    axes3DDemo.setColor("#FFFFFF");
+    axes3DDemo.show(1.0f);
+
+    window.wait(5.0f);
+    cmdLabel.hide(0.3f);
+
+    // 10.3 Sphere
+    window.wait(0.5f);
+    cmdLabel = window.setText("setSphere(0.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto sphereDemo = window.setSphere(0.5f);
+    sphereDemo.setPosition(0.0f, 1.0f, 0.0f);
+    sphereDemo.setColor("#FF5733");
+    sphereDemo.show(0.5f);
+
+    window.wait(5.0f);
+    sphereDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 10.4 Cube
+    window.wait(0.5f);
+    cmdLabel = window.setText("setCube3D(0.8f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto cubeDemo = window.setCube3D(0.8f);
+    cubeDemo.setPosition(-1.0f, 0.4f, 0.0f);
+    cubeDemo.setColor("#33FF57");
+    cubeDemo.show(0.5f);
+
+    window.wait(5.0f);
+    cubeDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 10.5 Cylinder
+    window.wait(0.5f);
+    cmdLabel = window.setText("setCylinder(0.3f, 1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto cylinderDemo = window.setCylinder(0.3f, 1.0f);
+    cylinderDemo.setPosition(1.0f, 0.5f, 0.0f);
+    cylinderDemo.setColor("#5733FF");
+    cylinderDemo.show(0.5f);
+
+    window.wait(5.0f);
+    cylinderDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 10.6 Cone
+    window.wait(0.5f);
+    cmdLabel = window.setText("setCone(0.4f, 1.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto coneDemo = window.setCone(0.4f, 1.0f);
+    coneDemo.setPosition(0.0f, 0.5f, 1.0f);
+    coneDemo.setColor("#FFFF00");
+    coneDemo.show(0.5f);
+
+    window.wait(5.0f);
+    coneDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 10.7 Surface
+    window.wait(0.5f);
+    cmdLabel = window.setText("setSurface(sin(x)*cos(y), -2, 2, -2, 2)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto surfaceDemo = window.setSurface(
+        [](float x, float y) { return std::sin(x) * std::cos(y) * 0.5f; },
+        -2.0f, 2.0f, -2.0f, 2.0f
+    );
+    surfaceDemo.setColor("#00FFFF");
+    surfaceDemo.show(1.0f);
+
+    window.wait(5.0f);
+    surfaceDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 10.8 Orbit camera
+    window.wait(0.5f);
+    cmdLabel = window.setText("Camera orbit: 360°");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    // Show some objects for camera demo
+    auto orbitSphere = window.setSphere(0.6f);
+    orbitSphere.setPosition(0.0f, 0.0f, 0.0f);
+    orbitSphere.setColor("#FF5733");
+    orbitSphere.show(0.3f);
+
+    window.wait(5.0f);
+    orbitSphere.hide(0.5f);
+    axes3DDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.set3DMode(false);
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 11: TIMING & CONTROL
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 11: Timing & Control");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 11.1 Easing functions
+    window.wait(1.0f);
+    cmdLabel = window.setText("setEasing(Easing::EaseOutBounce)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto easeDemo = window.setCircle(50);
+    easeDemo.setPosition(200, 540);
+    easeDemo.setFill("#FF5733");
+    easeDemo.setEasing(Easing::EaseOutBounce);
+    easeDemo.show(0.3f);
+
+    window.wait(0.5f);
+    easeDemo.MoveTo(2.0f, 1700, 540);
+
+    window.wait(5.0f);
+    easeDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 11.2 Delay
+    window.wait(0.5f);
+    cmdLabel = window.setText("delay(1.5f).show(0.5f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto delayDemo = window.setText("Delayed by 1.5 seconds!");
+    delayDemo.setSize(48);
+    delayDemo.setPosition(Position::CENTER);
+    delayDemo.setColor("#33FF57");
+    delayDemo.delay(1.5f);
+    delayDemo.show(0.5f);
+
+    window.wait(5.0f);
+    delayDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 11.3 Chaining with then()
+    window.wait(0.5f);
+    cmdLabel = window.setText("show().then().MoveTo().then().Scale()");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto chainDemo = window.setCircle(40);
+    chainDemo.setPosition(300, 540);
+    chainDemo.setFill("#5733FF");
+    chainDemo.show(0.5f);
+    chainDemo.then();
+    chainDemo.MoveTo(1.0f, 960, 540);
+    chainDemo.then();
+    chainDemo.Scale(0.5f, 2.0f);
+
+    window.wait(5.0f);
+    chainDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 11.4 Looping with repeat
+    window.wait(0.5f);
+    cmdLabel = window.setText("repeat(3).Rotate(0.5f, 360)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto loopDemo = window.setTriangle(80);
+    loopDemo.setPosition(Position::CENTER);
+    loopDemo.setFill("#FFFF00");
+    loopDemo.show(0.3f);
+
+    window.wait(0.5f);
+    loopDemo.repeat(3);
+    loopDemo.Rotate(0.5f, 360.0f);
+
+    window.wait(5.0f);
+    loopDemo.stopLoop();
+    loopDemo.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 11.5 AnimationGroup (parallel)
+    window.wait(0.5f);
+    cmdLabel = window.setText("createAnimationGroup().addShow().play()");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto groupCircle1 = window.setCircle(40);
+    groupCircle1.setPosition(400, 400);
+    groupCircle1.setFill("#FF5733");
+
+    auto groupCircle2 = window.setCircle(40);
+    groupCircle2.setPosition(960, 400);
+    groupCircle2.setFill("#33FF57");
+
+    auto groupCircle3 = window.setCircle(40);
+    groupCircle3.setPosition(1520, 400);
+    groupCircle3.setFill("#5733FF");
+
+    auto animGroup = window.createAnimationGroup();
+    animGroup.addShow(groupCircle1, 1.0f);
+    animGroup.addShow(groupCircle2, 1.0f);
+    animGroup.addShow(groupCircle3, 1.0f);
+    animGroup.play();
+
+    window.wait(5.0f);
+    groupCircle1.hide(0.5f);
+    groupCircle2.hide(0.5f);
+    groupCircle3.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // SECTION 12: GROUPING & HIERARCHY
+    // ============================================================================
+
+    sectionTitle = window.setText("Section 12: Grouping & Hierarchy");
+    sectionTitle.setPosition(Position::TLEFT);
+    sectionTitle.setSize(36);
+    sectionTitle.setColor("#FFFFFF");
+    sectionTitle.show(0.5f);
+
+    // 12.1 Group objects
+    window.wait(1.0f);
+    cmdLabel = window.setText("createGroup().add(elem1).add(elem2)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto grpCircle = window.setCircle(40);
+    grpCircle.setFill("#FF5733");
+
+    auto grpLabel = window.setText("Grouped!");
+    grpLabel.setSize(24);
+    grpLabel.setColor("#FFFFFF");
+
+    auto grp = window.createGroup();
+    grp.add(grpCircle).add(grpLabel);
+    grp.setPosition(Position::CENTER);
+    grp.show(0.5f);
+
+    window.wait(5.0f);
+    grp.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 12.2 Arrange row
+    window.wait(0.5f);
+    cmdLabel = window.setText("arrange(Direction::RIGHT, 30.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto rowGrp = window.createGroup();
+    for (int i = 0; i < 5; i++) {
+        auto c = window.setCircle(35);
+        c.setFill(i % 2 == 0 ? "#FF5733" : "#33FF57");
+        rowGrp.add(c);
+    }
+    rowGrp.arrange(Direction::RIGHT, 30.0f);
+    rowGrp.setPosition(Position::CENTER);
+    rowGrp.show(0.5f);
+
+    window.wait(5.0f);
+    rowGrp.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 12.3 Arrange column
+    window.wait(0.5f);
+    cmdLabel = window.setText("arrange(Direction::DOWN, 20.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto colGrp = window.createGroup();
+    for (int i = 0; i < 4; i++) {
+        auto r = window.setRectangle(120, 40);
+        r.setFill(i % 2 == 0 ? "#5733FF" : "#FFFF00");
+        colGrp.add(r);
+    }
+    colGrp.arrange(Direction::DOWN, 20.0f);
+    colGrp.setPosition(Position::CENTER);
+    colGrp.show(0.5f);
+
+    window.wait(5.0f);
+    colGrp.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 12.4 Arrange grid
+    window.wait(0.5f);
+    cmdLabel = window.setText("arrangeInGrid(3, 15.0f, 15.0f)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto gridGrp = window.createGroup();
+    for (int i = 0; i < 9; i++) {
+        auto cell = window.setRectangle(80, 80);
+        cell.setFill(i % 3 == 0 ? "#FF5733" : (i % 3 == 1 ? "#33FF57" : "#5733FF"));
+        gridGrp.add(cell);
+    }
+    gridGrp.arrangeInGrid(3, 15.0f, 15.0f);
+    gridGrp.setPosition(Position::CENTER);
+    gridGrp.show(0.5f);
+
+    window.wait(5.0f);
+    gridGrp.hide(0.5f);
+    cmdLabel.hide(0.3f);
+
+    // 12.5 Z-ordering
+    window.wait(0.5f);
+    cmdLabel = window.setText("setZIndex(0) vs setZIndex(1)");
+    cmdLabel.setPosition(Position::TRIGHT);
+    cmdLabel.setSize(24);
+    cmdLabel.setColor("#00FF00");
+    cmdLabel.show(0.3f);
+
+    auto backRect = window.setRectangle(300, 200);
+    backRect.setPosition(Position::CENTER);
+    backRect.setFill("#333333");
+    backRect.setZIndex(0);
+    backRect.show(0.3f);
+
+    auto frontText = window.setText("Z-Index: On Top!");
+    frontText.setSize(32);
+    frontText.setPosition(Position::CENTER);
+    frontText.setColor("#FFFFFF");
+    frontText.setZIndex(1);
+    frontText.show(0.3f);
+
+    window.wait(5.0f);
+    backRect.hide(0.5f);
+    frontText.hide(0.5f);
+    cmdLabel.hide(0.3f);
+    sectionTitle.hide(0.3f);
+
+    window.wait(1.0f);
+    window.clear();
+
+    // ============================================================================
+    // DEMO COMPLETE
+    // ============================================================================
+
+    window.wait(1.0f);
+    auto finalText = window.setText("Feature Demo Complete!");
+    finalText.setSize(72);
+    finalText.setPosition(Position::CENTER);
+    finalText.setColor("#00FFAA");
+    finalText.show(0.5f);
+
+    auto subText = window.setText("All 83 features demonstrated across 12 sections");
+    subText.setSize(32);
+    subText.setPosition(960, 620);
+    subText.setColor("#AAAAAA");
+    subText.show(0.5f, Direction::UP);
+
+    try {
+        window.run();
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+#endif // CATALYST_LIBRARY_BUILD
