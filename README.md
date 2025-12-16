@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="lib/logo_rounded.png" alt="Catalyst logo" width="200" />
+</p>
 # Catalyst
 
 **GPU-First Vulkan Renderer with Manim-Style Animation API**
