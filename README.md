@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="lib/logo_rounded.png" alt="Catalyst logo" width="200" />
+  <img src="lib/logo_rounded.png" alt="Catalyst logo" width="600" />
 </p>
 # Catalyst
 
