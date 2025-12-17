@@ -2,7 +2,13 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <initializer_list>
 #include <functional>
+#include <limits>
+#include <type_traits>
+#include <utility>
+
+#include "vid_utils.h"
 
 class Catalyst;
 class MathElement;   // Forward declaration for Transform
@@ -23,6 +29,8 @@ class Axes3DElement;      // Forward declaration for 3D axes
 class Surface3DElement;   // Forward declaration for 3D surfaces
 class Shape3DElement;     // Forward declaration for 3D shapes
 class Group;              // Forward declaration for groups
+class ValueTracker;       // Forward declaration for per-frame value tracking
+class Submobject;         // Forward declaration for group indexing
 
 enum class Position {
     CENTER,   // Center of screen (default)
@@ -152,16 +160,35 @@ public:
     void PhaseFlow(float duration, int fieldType, float strength);
 
     void setSize(float points);
+    void setText(const std::string& text);  // Update text content (marks geometry dirty)
     void setPosition(float x, float y);   // Precise pixel positioning
     void setPosition(Position anchor);    // Preset anchor positioning
+
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    TextElement& fix_in_frame();
+    TextElement& unfix_from_frame();
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
     void setColor(const std::string& hex);      // Hex: "#FF5733" or "FF5733"
     void setColor(int r, int g, int b);         // RGB: 0-255
     void setColor(float h, float s, float l);   // HSL: h(0-360), s(0-1), l(0-1)
+    void setOpacity(float opacity);             // 0.0-1.0 (applies to both fill and stroke)
 
     // Stroke/outline methods
     void setStroke(float width);                      // Stroke width in pixels
     void setStrokeColor(const std::string& hex);      // Hex: "#FF5733" or "FF5733"
     void setStrokeColor(int r, int g, int b);         // RGB: 0-255
+    void setStrokeOpacity(float opacity);             // 0.0-1.0
+
+    // Fill opacity
+    void setFillOpacity(float opacity);               // 0.0-1.0
 
     // Gradient methods
     void setGradient(const std::string& startHex, const std::string& endHex);  // Horizontal gradient
@@ -181,12 +208,18 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    TextElement& add_updater(std::function<void(TextElement&)> updater);
+    TextElement& add_updater(std::function<void(TextElement&, float)> updater);
+    TextElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class MathElement;  // For cross-type Transform access
     friend class Scene;        // For scene-based element creation
     friend class AnimationGroup;  // For animation group access
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t textIndex;  // Index into parent's textObjects vector
     TextElement(Catalyst* p, size_t idx);
@@ -255,11 +288,31 @@ public:
     void PhaseFlow(float duration, int fieldType, float strength);
 
     void setSize(float points);
+    void setMath(const std::string& latex);  // Update LaTeX content (marks texture dirty)
+
+    // Per-substring coloring (Manim-style): colors occurrences of `tex` within the LaTeX source.
+    MathElement& set_color_by_tex(const std::string& tex, const std::string& color);
+    MathElement& set_color_by_tex(const std::string& tex, int r, int g, int b);
+
     void setPosition(float x, float y);   // Precise pixel positioning
     void setPosition(Position anchor);    // Preset anchor positioning
+
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    MathElement& fix_in_frame();
+    MathElement& unfix_from_frame();
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
     void setColor(const std::string& hex);      // Hex: "#FF5733" or "FF5733"
     void setColor(int r, int g, int b);         // RGB: 0-255
     void setColor(float h, float s, float l);   // HSL: h(0-360), s(0-1), l(0-1)
+    void setOpacity(float opacity);             // 0.0-1.0
 
     // Relative positioning
     void under(TextElement& other, float padding = 20.0f);  // Position below a TextElement
@@ -269,12 +322,18 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    MathElement& add_updater(std::function<void(MathElement&)> updater);
+    MathElement& add_updater(std::function<void(MathElement&, float)> updater);
+    MathElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class TextElement;  // For cross-type Transform access
     friend class Scene;        // For scene-based element creation
     friend class AnimationGroup;  // For animation group access
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t mathIndex;  // Index into parent's mathObjects vector
     MathElement(Catalyst* p, size_t idx);
@@ -345,18 +404,48 @@ public:
     void setPosition(float x, float y);   // Precise pixel positioning
     void setPosition(Position anchor);    // Preset anchor positioning
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    ShapeElement& fix_in_frame();
+    ShapeElement& unfix_from_frame();
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
+
     // Fill color
     void setFill(const std::string& hex);      // Hex: "#FF5733" or "FF5733"
     void setFill(int r, int g, int b);         // RGB: 0-255
+    void setFillOpacity(float opacity);        // 0.0-1.0
 
     // Stroke/outline
     void setStroke(float width);                      // Stroke width in pixels
     void setStrokeColor(const std::string& hex);      // Hex color
     void setStrokeColor(int r, int g, int b);         // RGB: 0-255
+    void setStrokeOpacity(float opacity);             // 0.0-1.0
+    void setOpacity(float opacity);                   // 0.0-1.0 (applies to both fill and stroke)
 
     // Z-ordering
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
+
+    // Updaters (Manim-style per-frame callbacks)
+    ShapeElement& add_updater(std::function<void(ShapeElement&)> updater);
+    ShapeElement& add_updater(std::function<void(ShapeElement&, float)> updater);
+    ShapeElement& clear_updaters();
+
+    // VMobject-style path API (bezier editing / partial curves)
+    ShapeElement& set_points_as_corners(const std::vector<std::pair<float, float>>& points);
+    ShapeElement& set_points_smoothly(const std::vector<std::pair<float, float>>& points);
+    std::pair<float, float> get_start() const;
+    std::pair<float, float> get_end() const;
+    std::pair<float, float> point_from_proportion(float alpha) const;
+    ShapeElement get_subcurve(float startAlpha, float endAlpha) const;
+    ShapeElement& put_start_and_end_on(float startX, float startY, float endX, float endY);
 
 private:
     friend class Catalyst;
@@ -364,6 +453,7 @@ private:
     friend class Scene;        // For scene-based element creation
     friend class AnimationGroup;  // For animation group access
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t shapeIndex;  // Index into parent's shapeObjects vector
     ShapeElement(Catalyst* p, size_t idx);
@@ -382,6 +472,10 @@ public:
     void show(float duration);
     void hide(float duration);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    AxesElement& fix_in_frame();
+    AxesElement& unfix_from_frame();
+
     // Coordinate conversion for users (data coords to pixels)
     float toPixelX(float dataX);
     float toPixelY(float dataY);
@@ -394,6 +488,7 @@ private:
     friend class Catalyst;
     friend class GraphElement;
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t axesIndex;
     AxesElement(Catalyst* p, size_t idx);
@@ -415,9 +510,15 @@ public:
     void show(float duration);
     void hide(float duration);
 
+    // Updaters (Manim-style per-frame callbacks)
+    Axes3DElement& add_updater(std::function<void(Axes3DElement&)> updater);
+    Axes3DElement& add_updater(std::function<void(Axes3DElement&, float)> updater);
+    Axes3DElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Scene;
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t axes3DIndex;
     Axes3DElement(Catalyst* p, size_t idx);
@@ -437,9 +538,15 @@ public:
     void show(float duration);
     void hide(float duration);
 
+    // Updaters (Manim-style per-frame callbacks)
+    Surface3DElement& add_updater(std::function<void(Surface3DElement&)> updater);
+    Surface3DElement& add_updater(std::function<void(Surface3DElement&, float)> updater);
+    Surface3DElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Scene;
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t surface3DIndex;
     Surface3DElement(Catalyst* p, size_t idx);
@@ -488,11 +595,17 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    Shape3DElement& add_updater(std::function<void(Shape3DElement&)> updater);
+    Shape3DElement& add_updater(std::function<void(Shape3DElement&, float)> updater);
+    Shape3DElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Scene;
     friend class AnimationGroup;  // For animation group access
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t shape3DIndex;
     Shape3DElement(Catalyst* p, size_t idx);
@@ -508,6 +621,10 @@ public:
     void setColor(int r, int g, int b);
     void setThickness(float pixels);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    GraphElement& fix_in_frame();
+    GraphElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
@@ -516,9 +633,15 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    GraphElement& add_updater(std::function<void(GraphElement&)> updater);
+    GraphElement& add_updater(std::function<void(GraphElement&, float)> updater);
+    GraphElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t graphIndex;
     GraphElement(Catalyst* p, size_t idx);
@@ -532,6 +655,10 @@ public:
     void setThickness(float pixels);
     void setOrigin(float x, float y);  // Change origin from default (0,0)
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    VectorElement& fix_in_frame();
+    VectorElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
@@ -540,9 +667,15 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    VectorElement& add_updater(std::function<void(VectorElement&)> updater);
+    VectorElement& add_updater(std::function<void(VectorElement&, float)> updater);
+    VectorElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t vectorIndex;
     VectorElement(Catalyst* p, size_t idx);
@@ -562,12 +695,18 @@ public:
     void setPosition(float x, float y);
     void setPosition(Position anchor);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    NumberLineElement& fix_in_frame();
+    NumberLineElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
 
 private:
     friend class Catalyst;
+    friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t numberLineIndex;
     NumberLineElement(Catalyst* p, size_t idx);
@@ -589,12 +728,18 @@ public:
     void setPosition(float x, float y);
     void setPosition(Position anchor);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    BarChartElement& fix_in_frame();
+    BarChartElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
 
 private:
     friend class Catalyst;
+    friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t barChartIndex;
     BarChartElement(Catalyst* p, size_t idx);
@@ -614,12 +759,18 @@ public:
     void setPosition(float x, float y);
     void setPosition(Position anchor);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    PieChartElement& fix_in_frame();
+    PieChartElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
 
 private:
     friend class Catalyst;
+    friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t pieChartIndex;
     PieChartElement(Catalyst* p, size_t idx);
@@ -635,12 +786,18 @@ public:
     void setColor(const std::string& hex);
     void setColor(int r, int g, int b);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    VectorFieldElement& fix_in_frame();
+    VectorFieldElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
 
 private:
     friend class Catalyst;
+    friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t vectorFieldIndex;
     VectorFieldElement(Catalyst* p, size_t idx);
@@ -689,12 +846,18 @@ public:
     void setPosition(float x, float y);
     void setPosition(Position anchor);
 
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    TableElement& fix_in_frame();
+    TableElement& unfix_from_frame();
+
     // Animations
     void show(float duration);
     void hide(float duration);
 
 private:
     friend class Catalyst;
+    friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t tableIndex;
     TableElement(Catalyst* p, size_t idx);
@@ -717,10 +880,24 @@ public:
 
     // Size control
     void setSize(float width, float height);
+    void setOpacity(float opacity);  // 0.0-1.0
 
     // Positioning
     void setPosition(float x, float y);
     void setPosition(Position anchor);
+
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    ImageElement& fix_in_frame();
+    ImageElement& unfix_from_frame();
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
 
     // Animations
     void show(float duration);
@@ -746,13 +923,49 @@ public:
     void setZIndex(int zIndex);    // Set rendering order (higher = on top)
     int getZIndex() const;         // Get current z-index
 
+    // Updaters (Manim-style per-frame callbacks)
+    ImageElement& add_updater(std::function<void(ImageElement&)> updater);
+    ImageElement& add_updater(std::function<void(ImageElement&, float)> updater);
+    ImageElement& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class AnimationGroup;  // For animation group access
     friend class Group;        // For group operations
+    friend class Submobject;   // For group indexing
     Catalyst* parent;
     size_t imageIndex;
     ImageElement(Catalyst* p, size_t idx);
+};
+
+// Manim-style numeric tracker used for per-frame callbacks and reactive redraw.
+class ValueTracker {
+public:
+    // Easing / timing (applies to subsequent `animate_to` calls)
+    ValueTracker& setEasing(Easing easing);
+    ValueTracker& delay(float seconds);
+    ValueTracker& then();
+
+    // Value access
+    float get_value() const;
+    void set_value(float value);
+    void increment_value(float delta);
+
+    // Schedule value animation on the scene timeline
+    void animate_to(float value, float duration);
+    void animate_to(float value, float duration, Easing easing);
+
+    // Updaters (Manim-style per-frame callbacks)
+    ValueTracker& add_updater(std::function<void(ValueTracker&)> updater);
+    ValueTracker& add_updater(std::function<void(ValueTracker&, float)> updater);
+    ValueTracker& clear_updaters();
+
+private:
+    friend class Catalyst;
+    friend class Scene;
+    Catalyst* parent;
+    size_t trackerIndex;
+    ValueTracker(Catalyst* p, size_t idx) : parent(p), trackerIndex(idx) {}
 };
 
 class Catalyst {
@@ -762,6 +975,7 @@ public:
 
     TextElement setText(const std::string& text);
     MathElement setMath(const std::string& latex);  // LaTeX formula
+    MathElement setMath(const std::string& latex, std::initializer_list<std::pair<std::string, std::string>> t2c);
 
     // Shape factory methods
     ShapeElement setCircle(float radius);
@@ -792,6 +1006,97 @@ public:
 
     // Vector factory method (mathematical vector arrow)
     VectorElement setVector(AxesElement& axes, const std::vector<float>& components);
+    VectorElement setVector(AxesElement& axes, float vx, float vy);
+    VectorElement setVector(GraphElement& graph, const std::vector<float>& components);
+    VectorElement setVector(GraphElement& graph, float vx, float vy);
+
+    template <typename Derived>
+    VectorElement setVector(AxesElement& axes, const Eigen::MatrixBase<Derived>& components) {
+        const Eigen::Index n = components.size();
+        const float vx = (n > 0) ? static_cast<float>(components.derived().coeff(0)) : 0.0f;
+        const float vy = (n > 1) ? static_cast<float>(components.derived().coeff(1)) : 0.0f;
+        return setVector(axes, vx, vy);
+    }
+
+    template <typename Derived>
+    VectorElement setVector(GraphElement& graph, const Eigen::MatrixBase<Derived>& components) {
+        const Eigen::Index n = components.size();
+        const float vx = (n > 0) ? static_cast<float>(components.derived().coeff(0)) : 0.0f;
+        const float vy = (n > 1) ? static_cast<float>(components.derived().coeff(1)) : 0.0f;
+        return setVector(graph, vx, vy);
+    }
+
+    template <typename VecLike>
+    VectorElement setVector(AxesElement& axes, const VecLike& components)
+        requires(!std::is_base_of_v<Eigen::EigenBase<VecLike>, VecLike>) && requires(const VecLike& v) { v.size(); } &&
+                (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); } ||
+                 requires(const VecLike& v) { static_cast<float>(v[std::size_t{0}]); }) {
+        const std::size_t n = static_cast<std::size_t>(components.size());
+        float vx = 0.0f;
+        float vy = 0.0f;
+        if (n > 0) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vx = static_cast<float>(components(std::size_t{0}));
+            } else {
+                vx = static_cast<float>(components[std::size_t{0}]);
+            }
+        }
+        if (n > 1) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vy = static_cast<float>(components(std::size_t{1}));
+            } else {
+                vy = static_cast<float>(components[std::size_t{1}]);
+            }
+        }
+        return setVector(axes, vx, vy);
+    }
+
+    template <typename VecLike>
+    VectorElement setVector(GraphElement& graph, const VecLike& components)
+        requires(!std::is_base_of_v<Eigen::EigenBase<VecLike>, VecLike>) && requires(const VecLike& v) { v.size(); } &&
+                (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); } ||
+                 requires(const VecLike& v) { static_cast<float>(v[std::size_t{0}]); }) {
+        const std::size_t n = static_cast<std::size_t>(components.size());
+        float vx = 0.0f;
+        float vy = 0.0f;
+        if (n > 0) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vx = static_cast<float>(components(std::size_t{0}));
+            } else {
+                vx = static_cast<float>(components[std::size_t{0}]);
+            }
+        }
+        if (n > 1) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vy = static_cast<float>(components(std::size_t{1}));
+            } else {
+                vy = static_cast<float>(components[std::size_t{1}]);
+            }
+        }
+        return setVector(graph, vx, vy);
+    }
+
+    // Batch vector creation. For matrix input: if rows==dims, uses columns as vectors; else if cols==dims, uses rows.
+    template <typename Derived>
+    Group setVectors(AxesElement& axes, const Eigen::MatrixBase<Derived>& vectors);
+    template <typename Derived>
+    Group setVectors(GraphElement& graph, const Eigen::MatrixBase<Derived>& vectors);
+    template <typename Tensor2D>
+    Group setVectors(AxesElement& axes, const Tensor2D& vectors)
+        requires requires(const Tensor2D& t) {
+            t.shape().size();
+            t.shape()[0];
+            t.shape()[1];
+            static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+        };
+    template <typename Tensor2D>
+    Group setVectors(GraphElement& graph, const Tensor2D& vectors)
+        requires requires(const Tensor2D& t) {
+            t.shape().size();
+            t.shape()[0];
+            t.shape()[1];
+            static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+        };
 
     // Number line factory method
     NumberLineElement setNumberLine(float min, float max);
@@ -817,6 +1122,10 @@ public:
     ImageElement setImage(const std::string& path);
     ImageElement setImage(const std::string& path, float width, float height);
 
+    // SVG import (Manim-style SVGMobject)
+    Group SVGMobject(const std::string& path);
+    Group SVGMobject(const std::string& path, float targetHeightPx);
+
     // 3D Mode and Elements
     void set3DMode(bool enable);  // Enable 3D rendering for current scene
 
@@ -840,6 +1149,60 @@ public:
     Shape3DElement setCone(float radius, float height);
     Shape3DElement setCone(float radius, float height, int segments);
     Shape3DElement setArrow3D(float x1, float y1, float z1, float x2, float y2, float z2);
+    Shape3DElement setVector(Axes3DElement& axes, float vx, float vy, float vz);
+
+    template <typename Derived>
+    Shape3DElement setVector(Axes3DElement& axes, const Eigen::MatrixBase<Derived>& components) {
+        const Eigen::Index n = components.size();
+        const float vx = (n > 0) ? static_cast<float>(components.derived().coeff(0)) : 0.0f;
+        const float vy = (n > 1) ? static_cast<float>(components.derived().coeff(1)) : 0.0f;
+        const float vz = (n > 2) ? static_cast<float>(components.derived().coeff(2)) : 0.0f;
+        return setVector(axes, vx, vy, vz);
+    }
+
+    template <typename VecLike>
+    Shape3DElement setVector(Axes3DElement& axes, const VecLike& components)
+        requires(!std::is_base_of_v<Eigen::EigenBase<VecLike>, VecLike>) && requires(const VecLike& v) { v.size(); } &&
+                (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); } ||
+                 requires(const VecLike& v) { static_cast<float>(v[std::size_t{0}]); }) {
+        const std::size_t n = static_cast<std::size_t>(components.size());
+        float vx = 0.0f;
+        float vy = 0.0f;
+        float vz = 0.0f;
+        if (n > 0) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vx = static_cast<float>(components(std::size_t{0}));
+            } else {
+                vx = static_cast<float>(components[std::size_t{0}]);
+            }
+        }
+        if (n > 1) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vy = static_cast<float>(components(std::size_t{1}));
+            } else {
+                vy = static_cast<float>(components[std::size_t{1}]);
+            }
+        }
+        if (n > 2) {
+            if constexpr (requires(const VecLike& v) { static_cast<float>(v(std::size_t{0})); }) {
+                vz = static_cast<float>(components(std::size_t{2}));
+            } else {
+                vz = static_cast<float>(components[std::size_t{2}]);
+            }
+        }
+        return setVector(axes, vx, vy, vz);
+    }
+
+    template <typename Derived>
+    Group setVectors(Axes3DElement& axes, const Eigen::MatrixBase<Derived>& vectors);
+    template <typename Tensor2D>
+    Group setVectors(Axes3DElement& axes, const Tensor2D& vectors)
+        requires requires(const Tensor2D& t) {
+            t.shape().size();
+            t.shape()[0];
+            t.shape()[1];
+            static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+        };
 
     // 3D Camera controls
     void setCamera3D(float eyeX, float eyeY, float eyeZ,
@@ -852,6 +1215,20 @@ public:
     void orbitCamera(float theta, float phi, float distance, float duration);
     void resetCamera3D();
     void resetCamera3D(float duration);
+    void setCamera3DTarget(float targetX, float targetY, float targetZ);
+    void setCamera3DTarget(float targetX, float targetY, float targetZ, float duration);
+    void shiftCamera3D(float dx, float dy, float dz);
+    void shiftCamera3D(float dx, float dy, float dz, float duration);
+    void setCamera3DDistance(float distance);
+    void setCamera3DDistance(float distance, float duration);
+    void scaleCamera3DDistance(float scale);
+    void scaleCamera3DDistance(float scale, float duration);
+    void rotateCamera3D(float axisX, float axisY, float axisZ, float angleRadians);
+    void rotateCamera3D(float axisX, float axisY, float axisZ, float angleRadians, float duration);
+    void beginAmbientCameraRotation(float rateRadians);
+    void stopAmbientCameraRotation();
+    void reorientCamera(float thetaDegrees, float phiDegrees);
+    void reorientCamera(float thetaDegrees, float phiDegrees, float duration);
 
     // Scene & Camera
     void setBackground(const std::string& hex);    // Set background color via hex
@@ -882,6 +1259,9 @@ public:
     // Element groups (for layout and batch operations)
     Group createGroup();                                     // Create empty group
 
+    // Manim-style value tracker (updated during run())
+    ValueTracker createValueTracker(float initialValue = 0.0f);
+
     void wait(float seconds);   // Delay subsequent operations by X seconds
     void clear();               // Remove all elements and reset timeline
     void run();
@@ -889,6 +1269,7 @@ public:
 private:
     friend class TextElement;
     friend class MathElement;
+    friend class Submobject;
     friend class ShapeElement;
     friend class AxesElement;
     friend class GraphElement;
@@ -900,6 +1281,7 @@ private:
     friend class PathBuilder;
     friend class TableElement;
     friend class ImageElement;
+    friend class ValueTracker;
     friend class Scene;
     friend class Axes3DElement;
     friend class Surface3DElement;
@@ -916,11 +1298,15 @@ public:
     // Element creation (mirrors Catalyst API)
     TextElement setText(const std::string& text);
     MathElement setMath(const std::string& latex);
+    MathElement setMath(const std::string& latex, std::initializer_list<std::pair<std::string, std::string>> t2c);
     ShapeElement setCircle(float radius);
     ShapeElement setRectangle(float width, float height);
     ShapeElement setLine(float x1, float y1, float x2, float y2);
     ShapeElement setTriangle(float size);
     ShapeElement setArrow(float x1, float y1, float x2, float y2);
+    Group SVGMobject(const std::string& path);
+    Group SVGMobject(const std::string& path, float targetHeightPx);
+    ValueTracker createValueTracker(float initialValue = 0.0f);
 
     // Scene-specific settings
     void setBackground(const std::string& hex);
@@ -1004,6 +1390,99 @@ private:
     AnimationGroup(Catalyst* p) : parent(p) {}
 };
 
+// Python-style slice helper for group indexing:
+// - `group[1]` -> element at index 1 (supports negative indices)
+// - `group[Slice::to(3)]` -> elements [0, 3)
+// - `group[Slice::from(2)]` -> elements [2, end)
+// - `group[Slice::between(1, 4)]` -> elements [1, 4)
+struct Slice {
+    static constexpr int kNone = (std::numeric_limits<int>::max)();
+
+    int start = kNone;  // Inclusive
+    int stop = kNone;   // Exclusive
+    int step = 1;
+
+    constexpr Slice() = default;
+    constexpr explicit Slice(int start) : start(start) {}
+    constexpr Slice(int start, int stop, int step = 1) : start(start), stop(stop), step(step) {}
+
+    static constexpr Slice all() { return Slice(kNone, kNone, 1); }
+    static constexpr Slice from(int start, int step = 1) { return Slice(start, kNone, step); }
+    static constexpr Slice to(int stop, int step = 1) { return Slice(kNone, stop, step); }
+    static constexpr Slice between(int start, int stop, int step = 1) { return Slice(start, stop, step); }
+};
+
+enum class SubmobjectType {
+    Invalid,
+    Text,
+    Math,
+    Shape,
+    Image,
+    Graph,
+    Axes,
+    NumberLine,
+    BarChart,
+    PieChart,
+    VectorField,
+    Table,
+    Vector,
+    Shape3D,
+    Axes3D,
+    Surface3D,
+    Group,
+};
+
+// Variant handle returned by `Group::operator[]` (Manim-style submobject indexing).
+class Submobject {
+public:
+    Submobject() = default;
+
+    // Converting constructors to enable passing core elements into helpers that accept `Submobject`.
+    Submobject(const TextElement& element);
+    Submobject(const MathElement& element);
+    Submobject(const ShapeElement& element);
+    Submobject(const ImageElement& element);
+    Submobject(const Group& group);
+
+    bool valid() const;
+    SubmobjectType type() const;
+
+    // Indexing/slicing only valid when this is a Group.
+    Submobject operator[](int index) const;
+    Group operator[](Slice slice) const;
+
+    // Common operations (no-ops when unsupported by the underlying element type).
+    void show(float duration);
+    void hide(float duration);
+    void MoveTo(float duration, float x, float y);
+    void Scale(float duration, float targetScale);
+    void Rotate(float duration, float degrees);
+
+    void setColor(const std::string& hex);
+    void setColor(int r, int g, int b);
+
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    void fix_in_frame();
+    void unfix_from_frame();
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
+
+private:
+    friend class Group;
+    Catalyst* parent = nullptr;
+    SubmobjectType subType = SubmobjectType::Invalid;
+    size_t elementIndex = 0;
+
+    Submobject(Catalyst* p, SubmobjectType t, size_t idx) : parent(p), subType(t), elementIndex(idx) {}
+};
+
 // Group class for grouping elements and layout arrangement (like Manim's VGroup)
 class Group {
 public:
@@ -1036,9 +1515,38 @@ public:
     size_t size() const;
     bool empty() const;
 
+    // Submobject-style indexing/slicing
+    Submobject operator[](int index) const;
+    Group operator[](Slice slice) const;
+
     // Positioning
     void setPosition(float x, float y);       // Pixel position
     void setPosition(Position anchor);        // Anchor preset
+
+    // Spatial helpers (Manim-style, instant)
+    void shift(float dx, float dy);
+    void shift(Direction direction, float amount = 20.0f);
+    void move_to(float x, float y);  // Center-based
+    void next_to(const Submobject& other, Direction direction = Direction::RIGHT, float buff = 20.0f);
+    void to_edge(Direction direction, float buff = 20.0f);
+    void to_corner(Position corner, float buff = 20.0f);
+    void align_to(const Submobject& other, Direction direction);
+
+    // Fix/unfix relative to the camera frame (HUD overlay): ignores camera pan/zoom/rotate.
+    Group& fix_in_frame();
+    Group& unfix_from_frame();
+
+    // Styling (recursive to members when supported)
+    void setColor(const std::string& hex);
+    void setColor(int r, int g, int b);
+    void setOpacity(float opacity);
+    void setFill(const std::string& hex);
+    void setFill(int r, int g, int b);
+    void setFillOpacity(float opacity);
+    void setStroke(float width);
+    void setStrokeColor(const std::string& hex);
+    void setStrokeColor(int r, int g, int b);
+    void setStrokeOpacity(float opacity);
 
     // Layout arrangement
     void arrange(Direction direction, float spacing = 20.0f);
@@ -1081,11 +1589,211 @@ public:
     void Rotate(float duration, float degrees);
     void Rotate(float duration, float degrees, Easing easing);
 
+    // Updaters (Manim-style per-frame callbacks)
+    Group& add_updater(std::function<void(Group&)> updater);
+    Group& add_updater(std::function<void(Group&, float)> updater);
+    Group& clear_updaters();
+
 private:
     friend class Catalyst;
     friend class Scene;
+    friend class Submobject;
     Catalyst* parent;
     size_t groupIndex;
 
     Group(Catalyst* p, size_t idx) : parent(p), groupIndex(idx) {}
 };
+
+// ================== Catalyst::setVectors template implementations ==================
+template <typename Derived>
+inline Group Catalyst::setVectors(AxesElement& axes, const Eigen::MatrixBase<Derived>& vectors) {
+    Group group = createGroup();
+    const auto& m = vectors.derived();
+    const Eigen::Index rows = m.rows();
+    const Eigen::Index cols = m.cols();
+
+    if (rows == 2) {
+        for (Eigen::Index j = 0; j < cols; ++j) {
+            auto v = setVector(axes, m.col(j));
+            group.add(v);
+        }
+    } else if (cols == 2) {
+        for (Eigen::Index i = 0; i < rows; ++i) {
+            auto v = setVector(axes, m.row(i));
+            group.add(v);
+        }
+    } else if (m.size() == 2) {
+        auto v = setVector(axes, m);
+        group.add(v);
+    }
+
+    return group;
+}
+
+template <typename Derived>
+inline Group Catalyst::setVectors(GraphElement& graph, const Eigen::MatrixBase<Derived>& vectors) {
+    Group group = createGroup();
+    const auto& m = vectors.derived();
+    const Eigen::Index rows = m.rows();
+    const Eigen::Index cols = m.cols();
+
+    if (rows == 2) {
+        for (Eigen::Index j = 0; j < cols; ++j) {
+            auto v = setVector(graph, m.col(j));
+            group.add(v);
+        }
+    } else if (cols == 2) {
+        for (Eigen::Index i = 0; i < rows; ++i) {
+            auto v = setVector(graph, m.row(i));
+            group.add(v);
+        }
+    } else if (m.size() == 2) {
+        auto v = setVector(graph, m);
+        group.add(v);
+    }
+
+    return group;
+}
+
+template <typename Tensor2D>
+inline Group Catalyst::setVectors(AxesElement& axes, const Tensor2D& vectors)
+    requires requires(const Tensor2D& t) {
+        t.shape().size();
+        t.shape()[0];
+        t.shape()[1];
+        static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+    } {
+    Group group = createGroup();
+    const auto& shape = vectors.shape();
+    if (shape.size() < 2) return group;
+
+    const std::size_t rows = static_cast<std::size_t>(shape[0]);
+    const std::size_t cols = static_cast<std::size_t>(shape[1]);
+
+    if (rows == 2) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            auto v = setVector(axes, static_cast<float>(vectors(std::size_t{0}, j)),
+                               static_cast<float>(vectors(std::size_t{1}, j)));
+            group.add(v);
+        }
+    } else if (cols == 2) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            auto v = setVector(axes, static_cast<float>(vectors(i, std::size_t{0})),
+                               static_cast<float>(vectors(i, std::size_t{1})));
+            group.add(v);
+        }
+    }
+
+    return group;
+}
+
+template <typename Tensor2D>
+inline Group Catalyst::setVectors(GraphElement& graph, const Tensor2D& vectors)
+    requires requires(const Tensor2D& t) {
+        t.shape().size();
+        t.shape()[0];
+        t.shape()[1];
+        static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+    } {
+    Group group = createGroup();
+    const auto& shape = vectors.shape();
+    if (shape.size() < 2) return group;
+
+    const std::size_t rows = static_cast<std::size_t>(shape[0]);
+    const std::size_t cols = static_cast<std::size_t>(shape[1]);
+
+    if (rows == 2) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            auto v = setVector(graph, static_cast<float>(vectors(std::size_t{0}, j)),
+                               static_cast<float>(vectors(std::size_t{1}, j)));
+            group.add(v);
+        }
+    } else if (cols == 2) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            auto v = setVector(graph, static_cast<float>(vectors(i, std::size_t{0})),
+                               static_cast<float>(vectors(i, std::size_t{1})));
+            group.add(v);
+        }
+    }
+
+    return group;
+}
+
+template <typename Derived>
+inline Group Catalyst::setVectors(Axes3DElement& axes, const Eigen::MatrixBase<Derived>& vectors) {
+    Group group = createGroup();
+    const auto& m = vectors.derived();
+    const Eigen::Index rows = m.rows();
+    const Eigen::Index cols = m.cols();
+
+    if (rows == 3) {
+        for (Eigen::Index j = 0; j < cols; ++j) {
+            auto v = setVector(axes, m.col(j));
+            group.add(v);
+        }
+    } else if (cols == 3) {
+        for (Eigen::Index i = 0; i < rows; ++i) {
+            auto v = setVector(axes, m.row(i));
+            group.add(v);
+        }
+    } else if (m.size() == 3) {
+        auto v = setVector(axes, m);
+        group.add(v);
+    }
+
+    return group;
+}
+
+template <typename Tensor2D>
+inline Group Catalyst::setVectors(Axes3DElement& axes, const Tensor2D& vectors)
+    requires requires(const Tensor2D& t) {
+        t.shape().size();
+        t.shape()[0];
+        t.shape()[1];
+        static_cast<float>(t(std::size_t{0}, std::size_t{0}));
+    } {
+    Group group = createGroup();
+    const auto& shape = vectors.shape();
+    if (shape.size() < 2) return group;
+
+    const std::size_t rows = static_cast<std::size_t>(shape[0]);
+    const std::size_t cols = static_cast<std::size_t>(shape[1]);
+
+    if (rows == 3) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            auto v = setVector(axes, static_cast<float>(vectors(std::size_t{0}, j)),
+                               static_cast<float>(vectors(std::size_t{1}, j)),
+                               static_cast<float>(vectors(std::size_t{2}, j)));
+            group.add(v);
+        }
+    } else if (cols == 3) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            auto v = setVector(axes, static_cast<float>(vectors(i, std::size_t{0})),
+                               static_cast<float>(vectors(i, std::size_t{1})),
+                               static_cast<float>(vectors(i, std::size_t{2})));
+            group.add(v);
+        }
+    }
+
+    return group;
+}
+
+// Helper matching Manim's `always_redraw` pattern: create once, then update every frame via an updater.
+template <typename CreateFn, typename UpdateFn>
+inline auto always_redraw(CreateFn create, UpdateFn update) -> decltype(create()) {
+    using Element = decltype(create());
+    Element element = create();
+
+    if constexpr (std::is_invocable_v<UpdateFn, Element&, float>) {
+        update(element, 0.0f);
+        element.add_updater([update = std::move(update)](Element& m, float dt) mutable { update(m, dt); });
+    } else if constexpr (std::is_invocable_v<UpdateFn, Element&>) {
+        update(element);
+        element.add_updater([update = std::move(update)](Element& m) mutable { update(m); });
+    } else {
+        static_assert(std::is_invocable_v<UpdateFn, Element&> || std::is_invocable_v<UpdateFn, Element&, float>,
+                      "always_redraw update must be callable with (Element&) or (Element&, float)");
+    }
+
+    return element;
+}

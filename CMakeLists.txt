@@ -20,6 +20,9 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(CairoMM REQUIRED IMPORTED_TARGET cairomm-1.0)
 pkg_check_modules(PangoMM REQUIRED IMPORTED_TARGET pangomm-1.4)
 
+# Eigen (header-only) for VID-style math utilities
+find_package(Eigen3 REQUIRED)
+
 # ============================================
 # Shader compilation (must be before targets)
 # ============================================
@@ -64,13 +67,16 @@ target_compile_definitions(CatalystLib PRIVATE CATALYST_LIBRARY_BUILD)
 # Ensure it is built with PIC so linking into a shared object works reliably.
 set_property(TARGET LaTeX PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-target_link_libraries(CatalystLib PRIVATE
-    Vulkan::Vulkan
-    glfw
-    LaTeX
-    PkgConfig::CairoMM
-    PkgConfig::PangoMM
-    ${CMAKE_DL_LIBS}
+target_link_libraries(CatalystLib
+    PUBLIC
+        Eigen3::Eigen
+    PRIVATE
+        Vulkan::Vulkan
+        glfw
+        LaTeX
+        PkgConfig::CairoMM
+        PkgConfig::PangoMM
+        ${CMAKE_DL_LIBS}
 )
 
 target_include_directories(CatalystLib PUBLIC
@@ -91,6 +97,7 @@ set_target_properties(CatalystLib PROPERTIES
 add_executable(Catalyst main.cpp)
 
 target_link_libraries(Catalyst PRIVATE
+    Eigen3::Eigen
     Vulkan::Vulkan
     glfw
     LaTeX
@@ -159,6 +166,7 @@ install(TARGETS CatalystLib
 
 install(FILES
     ${CMAKE_SOURCE_DIR}/catalyst.h
+    ${CMAKE_SOURCE_DIR}/vid_utils.h
     ${CMAKE_SOURCE_DIR}/Catalyst
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )

@@ -90,6 +90,20 @@ int main() {
 | `void orbitCamera(theta, phi, distance, float duration)` | Animate camera orbit |
 | `void resetCamera3D()` | Reset 3D camera to default |
 | `void resetCamera3D(float duration)` | Animate 3D camera reset |
+| `void setCamera3DTarget(float x, float y, float z)` | Set 3D camera target (preserve offset) |
+| `void setCamera3DTarget(x, y, z, float duration)` | Animate camera target move |
+| `void shiftCamera3D(float dx, float dy, float dz)` | Shift camera + target by delta |
+| `void shiftCamera3D(dx, dy, dz, float duration)` | Animate camera shift |
+| `void setCamera3DDistance(float distance)` | Set camera distance to target |
+| `void setCamera3DDistance(distance, float duration)` | Animate camera distance |
+| `void scaleCamera3DDistance(float scale)` | Scale camera distance (zoom) |
+| `void scaleCamera3DDistance(scale, float duration)` | Animate distance scaling |
+| `void rotateCamera3D(axisX, axisY, axisZ, float angleRadians)` | Rotate camera around target |
+| `void rotateCamera3D(axisX, axisY, axisZ, angleRadians, float duration)` | Animate camera rotation |
+| `void reorientCamera(float thetaDeg, float phiDeg)` | Reorient camera (degrees) preserving distance |
+| `void reorientCamera(thetaDeg, phiDeg, float duration)` | Animate reorientation |
+| `void beginAmbientCameraRotation(float rateRadians)` | Start continuous orbit (rad/sec) |
+| `void stopAmbientCameraRotation()` | Stop ambient orbit |
 
 ### TextElement Class
 
@@ -378,6 +392,16 @@ For grouping multiple elements together with layout and z-ordering:
 | `void arrangeInGrid(int cols, float hSpacing, float vSpacing)` | Arrange elements in grid layout |
 | `void setZIndex(int zIndex)` | Set z-order for all group elements (higher = on top) |
 | `int getZIndex() const` | Get group z-index |
+| `void setColor(const std::string& hex)` | Set color recursively (shapes: fill+stroke) |
+| `void setColor(int r, int g, int b)` | Set color recursively (RGB 0-255) |
+| `void setOpacity(float opacity)` | Set opacity recursively where supported |
+| `void setFill(const std::string& hex)` | Set fill for shape members |
+| `void setFill(int r, int g, int b)` | Set fill for shape members (RGB 0-255) |
+| `void setFillOpacity(float opacity)` | Set fill opacity for shape members |
+| `void setStroke(float width)` | Set stroke width for shape members |
+| `void setStrokeColor(const std::string& hex)` | Set stroke color for shape members |
+| `void setStrokeColor(int r, int g, int b)` | Set stroke color for shape members (RGB 0-255) |
+| `void setStrokeOpacity(float opacity)` | Set stroke opacity for shape members |
 | `void getBounds(float& minX, float& minY, float& maxX, float& maxY) const` | Get bounding box |
 | `float getWidth() const` | Get group width in pixels |
 | `float getHeight() const` | Get group height in pixels |
@@ -399,6 +423,16 @@ Factory method on Catalyst:
 | Method | Description |
 |--------|-------------|
 | `Group createGroup()` | Create new empty group |
+| `Group SVGMobject(const std::string& path)` | Import an SVG as vector shapes |
+| `Group SVGMobject(const std::string& path, float targetHeightPx)` | Import and scale to target height |
+
+### SVG Import
+
+```cpp
+auto logo = window.SVGMobject("assets/logo.svg", 200);  // Scale to 200px tall
+logo.setFill("#FFFFFF");
+logo.show(1.0f);
+```
 
 ### Examples
 
@@ -727,6 +761,14 @@ window.resetCamera3D(1.5f);        // Animate back to default
 window.orbitCamera(0.785f, 1.047f, 6.0f);  // theta, phi, distance
 window.orbitCamera(1.57f, 0.785f, 8.0f, 2.0f);  // Animate orbit
 
+// "Camera frame" style controls
+window.setCamera3DTarget(0.0f, 1.0f, 0.0f, 1.0f);
+window.scaleCamera3DDistance(0.8f, 1.0f);
+window.rotateCamera3D(0.0f, 1.0f, 0.0f, 0.5f, 1.0f);  // 0.5 rad about Y
+window.reorientCamera(-30.0f, 75.0f, 1.0f);            // degrees
+window.beginAmbientCameraRotation(0.1f);
+window.stopAmbientCameraRotation();
+
 // Mixed mode: 2D overlay on 3D content
 window.set3DMode(true);
 auto sphere2 = window.setSphere(1.0f);
@@ -737,6 +779,7 @@ auto label = window.setText("3D Rendering Demo");
 label.setPosition(Position::TOP);
 label.setSize(48);
 label.setColor("#FFFFFF");
+label.fix_in_frame();  // HUD overlay (ignore 2D camera pan/zoom/rotate)
 label.show(0.5f);
 ```
 

@@ -17,8 +17,13 @@
 #include <optional>
 #include <set>
 #include <limits>
+#include <cctype>
+#include <cstdio>
 #include <algorithm>
 #include <array>
+#include <numeric>
+#include <unordered_map>
+#include <string_view>
 #include <cmath>
 #include <functional>
 #include <dlfcn.h>
@@ -447,6 +452,7 @@ struct TextObject {
     Position anchor = Position::CENTER;
     float posX = 0.0f, posY = 0.0f;
     bool usePixelPosition = false;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Animation state
     AnimationType animationType = AnimationType::None;
@@ -508,9 +514,13 @@ struct TextObject {
     mutable int totalCharCount = 0;     // Total renderable characters (computed during vertex generation)
     float charRevealProgress = 1.0f;    // 0.0 = no chars visible, 1.0 = all visible
 
-    // Separate stroke/fill opacity (for DrawBorderThenFill)
-    float strokeOpacity = 1.0f;         // Independent stroke opacity (0.0-1.0)
-    float fillOpacity = 1.0f;           // Independent fill opacity (0.0-1.0)
+    // Opacity controls
+    float strokeOpacity = 1.0f;         // Base stroke opacity (0.0-1.0)
+    float fillOpacity = 1.0f;           // Base fill opacity (0.0-1.0)
+
+    // Separate stroke/fill multipliers (for DrawBorderThenFill / Write)
+    float strokeOpacityMul = 1.0f;      // Multiplier (0.0-1.0)
+    float fillOpacityMul = 1.0f;        // Multiplier (0.0-1.0)
     bool useSeparateStrokeFill = false; // Enable split stroke/fill rendering
 
     // Emphasis animation - original state storage (for ping-pong animations)
@@ -641,17 +651,26 @@ struct TextObject {
     MorphState morphState;
     bool isMorphTarget = false;  // True if this text is the target of a morph
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;  // True if element was cleared and should not render
 };
 
 // Per-math element state (LaTeX formulas)
 struct MathObject {
     // Content
+    // Rendered LaTeX source (may include `\\textcolor{...}{...}` wrappers from `set_color_by_tex`).
     std::string latex;
+    // Original LaTeX source before applying any `set_color_by_tex` rules.
+    std::string latexRaw;
+    // Ordered list of (tex -> color) rules applied over `latexRaw`.
+    std::vector<std::pair<std::string, std::string>> texColorRules;
 
     // Rendering properties
     float fontSize = 64.0f;
     float colorR = 1.0f, colorG = 1.0f, colorB = 1.0f;
+    float opacity = 1.0f;  // Base opacity (0.0-1.0)
 
     // Z-ordering (higher values render on top)
     int zIndex = 0;
@@ -660,6 +679,7 @@ struct MathObject {
     Position anchor = Position::CENTER;
     float posX = 0.0f, posY = 0.0f;
     bool usePixelPosition = false;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Animation state
     AnimationType animationType = AnimationType::None;
@@ -721,6 +741,13 @@ struct MathObject {
     uint32_t textureWidth = 0;
     uint32_t textureHeight = 0;
     bool textureDirty = true;
+
+    // Layout-only size (available before Vulkan textures are created).
+    // These are the raw render dimensions (including padding) returned by MicroTeX parse,
+    // matching what would be stored into textureWidth/textureHeight during renderLatexToTexture().
+    uint32_t layoutTextureWidth = 0;
+    uint32_t layoutTextureHeight = 0;
+    bool layoutDirty = true;
 
     // Vertex data
     uint32_t vertexOffset = 0;
@@ -813,6 +840,9 @@ struct MathObject {
     float phaseFlowStrength = 1.0f;
     float lastProgress = 0.0f;
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;  // True if element was cleared and should not render
 };
 
@@ -828,6 +858,9 @@ struct PathCommand {
 
 // Shape types
 enum class ShapeType { Circle, Rectangle, Line, Triangle, Arrow, Arc, Ellipse, Dot, Polygon, RegularPolygon, Star, DoubleArrow, Brace, RoundedRectangle, CubicBezier, CustomPath };
+
+// CustomPath rendering mode
+enum class CustomPathMode { Stroke, Fill };
 
 // Per-shape element state
 struct ShapeObject {
@@ -880,9 +913,11 @@ struct ShapeObject {
 
     // Custom path commands (for CustomPath type)
     std::vector<PathCommand> pathCommands;
+    CustomPathMode customPathMode = CustomPathMode::Stroke;
 
     // Fill color
     float fillR = 1.0f, fillG = 1.0f, fillB = 1.0f;
+    float fillOpacity = 1.0f;  // Base fill opacity (0.0-1.0)
 
     // Z-ordering (higher values render on top)
     int zIndex = 0;
@@ -890,11 +925,13 @@ struct ShapeObject {
     // Stroke properties
     float strokeWidth = 0.0f;
     float strokeR = 0.0f, strokeG = 0.0f, strokeB = 0.0f;
+    float strokeOpacity = 1.0f;  // Base stroke opacity (0.0-1.0)
 
     // Positioning
     Position anchor = Position::CENTER;
     float posX = 0.0f, posY = 0.0f;
     bool usePixelPosition = false;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Animation state (same pattern as TextObject/MathObject)
     AnimationType animationType = AnimationType::None;
@@ -1038,8 +1075,1415 @@ struct ShapeObject {
     MorphState morphState;
     bool isMorphTarget = false;  // True if this shape is the target of a morph
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;  // True if element was cleared and should not render
 };
+
+namespace {
+struct Vec2f {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+inline Vec2f operator+(Vec2f a, Vec2f b) { return {a.x + b.x, a.y + b.y}; }
+inline Vec2f operator-(Vec2f a, Vec2f b) { return {a.x - b.x, a.y - b.y}; }
+inline Vec2f operator*(Vec2f a, float s) { return {a.x * s, a.y * s}; }
+inline Vec2f operator/(Vec2f a, float s) { return {a.x / s, a.y / s}; }
+
+inline float dot(Vec2f a, Vec2f b) { return a.x * b.x + a.y * b.y; }
+inline float length(Vec2f v) { return std::sqrt(dot(v, v)); }
+
+inline Vec2f lerp(Vec2f a, Vec2f b, float t) { return a + (b - a) * t; }
+
+struct CubicBezier2D {
+    Vec2f p0;
+    Vec2f p1;
+    Vec2f p2;
+    Vec2f p3;
+};
+
+inline Vec2f cubicPoint(const CubicBezier2D& c, float t) {
+    float u = 1.0f - t;
+    float b0 = u * u * u;
+    float b1 = 3.0f * u * u * t;
+    float b2 = 3.0f * u * t * t;
+    float b3 = t * t * t;
+    return c.p0 * b0 + c.p1 * b1 + c.p2 * b2 + c.p3 * b3;
+}
+
+inline void splitCubic(const CubicBezier2D& c, float t, CubicBezier2D& left, CubicBezier2D& right) {
+    Vec2f q0 = lerp(c.p0, c.p1, t);
+    Vec2f q1 = lerp(c.p1, c.p2, t);
+    Vec2f q2 = lerp(c.p2, c.p3, t);
+
+    Vec2f r0 = lerp(q0, q1, t);
+    Vec2f r1 = lerp(q1, q2, t);
+
+    Vec2f s = lerp(r0, r1, t);
+
+    left = {c.p0, q0, r0, s};
+    right = {s, r1, q2, c.p3};
+}
+
+inline CubicBezier2D subCubic(const CubicBezier2D& c, float a, float b) {
+    a = std::clamp(a, 0.0f, 1.0f);
+    b = std::clamp(b, 0.0f, 1.0f);
+    if (b <= a) {
+        Vec2f p = cubicPoint(c, a);
+        return {p, p, p, p};
+    }
+    if (a <= 0.0f && b >= 1.0f) return c;
+
+    CubicBezier2D left, right;
+    if (a <= 0.0f) {
+        splitCubic(c, b, left, right);
+        return left;
+    }
+
+    splitCubic(c, a, left, right);
+    if (b >= 1.0f) return right;
+
+    float t = (b - a) / (1.0f - a);
+    CubicBezier2D left2, right2;
+    splitCubic(right, t, left2, right2);
+    return left2;
+}
+
+inline CubicBezier2D lineAsCubic(Vec2f p0, Vec2f p3) {
+    Vec2f d = (p3 - p0) / 3.0f;
+    return {p0, p0 + d, p0 + d * 2.0f, p3};
+}
+
+inline bool nearlyEqual(Vec2f a, Vec2f b, float eps = 1e-3f) {
+    return std::abs(a.x - b.x) <= eps && std::abs(a.y - b.y) <= eps;
+}
+
+inline std::vector<CubicBezier2D> shapeToCubics(const ShapeObject& obj) {
+    std::vector<CubicBezier2D> curves;
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow: {
+            curves.push_back(lineAsCubic({obj.x1, obj.y1}, {obj.x2, obj.y2}));
+            break;
+        }
+        case ShapeType::CubicBezier: {
+            curves.push_back({
+                {obj.bezierP0X, obj.bezierP0Y},
+                {obj.bezierP1X, obj.bezierP1Y},
+                {obj.bezierP2X, obj.bezierP2Y},
+                {obj.bezierP3X, obj.bezierP3Y},
+            });
+            break;
+        }
+        case ShapeType::CustomPath: {
+            Vec2f current{};
+            Vec2f subpathStart{};
+            bool hasCurrent = false;
+            for (const auto& cmd : obj.pathCommands) {
+                switch (cmd.type) {
+                    case PathCommandType::MoveTo:
+                        current = {cmd.x, cmd.y};
+                        subpathStart = current;
+                        hasCurrent = true;
+                        break;
+                    case PathCommandType::LineTo: {
+                        Vec2f target{cmd.x, cmd.y};
+                        if (!hasCurrent) {
+                            current = target;
+                            subpathStart = current;
+                            hasCurrent = true;
+                            break;
+                        }
+                        curves.push_back(lineAsCubic(current, target));
+                        current = target;
+                        break;
+                    }
+                    case PathCommandType::CurveTo: {
+                        Vec2f target{cmd.x, cmd.y};
+                        if (!hasCurrent) {
+                            current = target;
+                            subpathStart = current;
+                            hasCurrent = true;
+                            break;
+                        }
+                        curves.push_back({current, {cmd.cx1, cmd.cy1}, {cmd.cx2, cmd.cy2}, target});
+                        current = target;
+                        break;
+                    }
+                    case PathCommandType::Close: {
+                        if (!hasCurrent) break;
+                        if (!nearlyEqual(current, subpathStart)) {
+                            curves.push_back(lineAsCubic(current, subpathStart));
+                        }
+                        current = subpathStart;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return curves;
+}
+
+inline void setCustomPathFromCubics(ShapeObject& obj, const std::vector<CubicBezier2D>& curves) {
+    obj.type = ShapeType::CustomPath;
+    obj.pathCommands.clear();
+    obj.customPathMode = CustomPathMode::Stroke;
+    if (curves.empty()) return;
+
+    Vec2f current{};
+    bool hasCurrent = false;
+    constexpr float eps = 1e-3f;
+
+    for (const auto& c : curves) {
+        if (!hasCurrent || !nearlyEqual(current, c.p0, eps)) {
+            PathCommand move;
+            move.type = PathCommandType::MoveTo;
+            move.x = c.p0.x;
+            move.y = c.p0.y;
+            obj.pathCommands.push_back(move);
+            current = c.p0;
+            hasCurrent = true;
+        }
+
+        PathCommand curve;
+        curve.type = PathCommandType::CurveTo;
+        curve.cx1 = c.p1.x;
+        curve.cy1 = c.p1.y;
+        curve.cx2 = c.p2.x;
+        curve.cy2 = c.p2.y;
+        curve.x = c.p3.x;
+        curve.y = c.p3.y;
+        obj.pathCommands.push_back(curve);
+        current = c.p3;
+    }
+}
+
+inline std::pair<size_t, float> curveIndexAndT(float alpha, size_t curveCount) {
+    if (curveCount == 0) return {0u, 0.0f};
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    if (alpha >= 1.0f) return {curveCount - 1, 1.0f};
+
+    float scaled = alpha * static_cast<float>(curveCount);
+    size_t index = static_cast<size_t>(std::floor(scaled));
+    if (index >= curveCount) index = curveCount - 1;
+    float t = scaled - static_cast<float>(index);
+    return {index, t};
+}
+
+inline double ringSignedArea(const std::vector<Vec2f>& ring) {
+    const size_t n = ring.size();
+    if (n < 3) return 0.0;
+    double area = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const Vec2f& p = ring[i];
+        const Vec2f& q = ring[(i + 1) % n];
+        area += static_cast<double>(p.x) * static_cast<double>(q.y) - static_cast<double>(q.x) * static_cast<double>(p.y);
+    }
+    return area * 0.5;
+}
+
+inline double triangleSignedArea(Vec2f a, Vec2f b, Vec2f c) {
+    return static_cast<double>(b.x - a.x) * static_cast<double>(c.y - a.y) -
+           static_cast<double>(b.y - a.y) * static_cast<double>(c.x - a.x);
+}
+
+inline bool pointInTriangle(Vec2f a, Vec2f b, Vec2f c, Vec2f p) {
+    const double d1 = triangleSignedArea(p, a, b);
+    const double d2 = triangleSignedArea(p, b, c);
+    const double d3 = triangleSignedArea(p, c, a);
+    const bool hasNeg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    const bool hasPos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+    return !(hasNeg && hasPos);
+}
+
+inline bool pointInPolygon(Vec2f p, const std::vector<Vec2f>& poly) {
+    if (poly.size() < 3) return false;
+    bool inside = false;
+    size_t j = poly.size() - 1;
+    for (size_t i = 0; i < poly.size(); ++i) {
+        const Vec2f& pi = poly[i];
+        const Vec2f& pj = poly[j];
+        const bool intersect = ((pi.y > p.y) != (pj.y > p.y)) &&
+                               (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y + 1e-12f) + pi.x);
+        if (intersect) inside = !inside;
+        j = i;
+    }
+    return inside;
+}
+
+inline void cleanupRing(std::vector<Vec2f>& ring, float eps = 1e-4f) {
+    if (ring.size() < 2) return;
+
+    // Remove consecutive duplicates.
+    std::vector<Vec2f> cleaned;
+    cleaned.reserve(ring.size());
+    for (const auto& p : ring) {
+        if (cleaned.empty() || !nearlyEqual(cleaned.back(), p, eps)) {
+            cleaned.push_back(p);
+        }
+    }
+    if (cleaned.size() >= 2 && nearlyEqual(cleaned.front(), cleaned.back(), eps)) {
+        cleaned.pop_back();
+    }
+
+    // Remove collinear points.
+    bool changed = true;
+    while (changed && cleaned.size() >= 3) {
+        changed = false;
+        std::vector<Vec2f> tmp;
+        tmp.reserve(cleaned.size());
+        const size_t n = cleaned.size();
+        for (size_t i = 0; i < n; ++i) {
+            const Vec2f& prev = cleaned[(i + n - 1) % n];
+            const Vec2f& curr = cleaned[i];
+            const Vec2f& next = cleaned[(i + 1) % n];
+            const double a = triangleSignedArea(prev, curr, next);
+            if (std::abs(a) <= static_cast<double>(eps)) {
+                changed = true;
+                continue;
+            }
+            tmp.push_back(curr);
+        }
+        cleaned.swap(tmp);
+    }
+
+    ring.swap(cleaned);
+}
+
+inline std::vector<Vec2f> triangulateSimplePolygon(std::vector<Vec2f> poly) {
+    std::vector<Vec2f> triangles;
+    cleanupRing(poly);
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) return triangles;
+
+    // Ensure clockwise orientation (positive area in this renderer's pixel space).
+    if (ringSignedArea(poly) < 0.0) {
+        std::reverse(poly.begin(), poly.end());
+    }
+
+    std::vector<int> V(n);
+    std::iota(V.begin(), V.end(), 0);
+
+    auto snip = [&](int u, int v, int w, int nv) -> bool {
+        const Vec2f a = poly[static_cast<size_t>(V[u])];
+        const Vec2f b = poly[static_cast<size_t>(V[v])];
+        const Vec2f c = poly[static_cast<size_t>(V[w])];
+        constexpr double kEps = 1e-10;
+        if (triangleSignedArea(a, b, c) <= kEps) return false;
+        for (int p = 0; p < nv; ++p) {
+            if (p == u || p == v || p == w) continue;
+            const Vec2f pt = poly[static_cast<size_t>(V[p])];
+            if (pointInTriangle(a, b, c, pt)) return false;
+        }
+        return true;
+    };
+
+    int nv = n;
+    int count = 2 * nv;
+    int v = nv - 1;
+    while (nv > 2) {
+        if (count-- <= 0) break;  // Polygon may be self-intersecting or otherwise invalid.
+        int u = v;
+        if (u >= nv) u = 0;
+        v = u + 1;
+        if (v >= nv) v = 0;
+        int w = v + 1;
+        if (w >= nv) w = 0;
+
+        if (snip(u, v, w, nv)) {
+            const Vec2f a = poly[static_cast<size_t>(V[u])];
+            const Vec2f b = poly[static_cast<size_t>(V[v])];
+            const Vec2f c = poly[static_cast<size_t>(V[w])];
+            triangles.push_back(a);
+            triangles.push_back(b);
+            triangles.push_back(c);
+            V.erase(V.begin() + v);
+            nv--;
+            count = 2 * nv;
+            v = std::max(v - 1, 0);
+        }
+    }
+
+    return triangles;
+}
+
+inline std::vector<Vec2f> triangulatePolygonWithHoles(std::vector<Vec2f> outer, std::vector<std::vector<Vec2f>> holes) {
+    cleanupRing(outer);
+    if (outer.size() < 3) return {};
+
+    // Ensure clockwise for outer.
+    if (ringSignedArea(outer) < 0.0) {
+        std::reverse(outer.begin(), outer.end());
+    }
+
+    struct HoleInfo {
+        std::vector<Vec2f> ring;
+        size_t leftmost = 0;
+    };
+
+    std::vector<HoleInfo> holeInfos;
+    holeInfos.reserve(holes.size());
+    for (auto& hole : holes) {
+        cleanupRing(hole);
+        if (hole.size() < 3) continue;
+
+        // Ensure clockwise traversal in the bridged polygon.
+        if (ringSignedArea(hole) < 0.0) {
+            std::reverse(hole.begin(), hole.end());
+        }
+
+        size_t left = 0;
+        for (size_t i = 1; i < hole.size(); ++i) {
+            if (hole[i].x < hole[left].x || (hole[i].x == hole[left].x && hole[i].y < hole[left].y)) {
+                left = i;
+            }
+        }
+        holeInfos.push_back({std::move(hole), left});
+    }
+
+    std::sort(holeInfos.begin(), holeInfos.end(), [](const HoleInfo& a, const HoleInfo& b) {
+        return a.ring[a.leftmost].x < b.ring[b.leftmost].x;
+    });
+
+    // Bridge each hole into outer polygon using a leftward horizontal ray from the hole's leftmost vertex.
+    for (const auto& holeInfo : holeInfos) {
+        const auto& hole = holeInfo.ring;
+        const Vec2f h = hole[holeInfo.leftmost];
+
+        // Find the closest intersection of ray (h.x -> -inf, at y = h.y) with the current outer boundary.
+        float bestX = -std::numeric_limits<float>::infinity();
+        size_t bestEdge = SIZE_MAX;
+        const size_t n = outer.size();
+
+        for (size_t i = 0; i < n; ++i) {
+            const Vec2f p = outer[i];
+            const Vec2f q = outer[(i + 1) % n];
+            if (std::abs(p.y - q.y) <= 1e-8f) continue;  // horizontal edge
+
+            const bool crosses = ((p.y > h.y) != (q.y > h.y));
+            if (!crosses) continue;
+
+            const float t = (h.y - p.y) / (q.y - p.y);
+            const float x = p.x + t * (q.x - p.x);
+            if (x <= h.x && x > bestX) {
+                bestX = x;
+                bestEdge = i;
+            }
+        }
+
+        if (bestEdge == SIZE_MAX || !std::isfinite(bestX)) {
+            continue;
+        }
+
+        const Vec2f p = outer[bestEdge];
+        const Vec2f q = outer[(bestEdge + 1) % n];
+        const Vec2f intersection{bestX, h.y};
+
+        size_t insertIndex = SIZE_MAX;
+        std::vector<Vec2f> outerWithIntersection = outer;
+        if (nearlyEqual(intersection, p, 1e-3f)) {
+            insertIndex = bestEdge;
+        } else if (nearlyEqual(intersection, q, 1e-3f)) {
+            insertIndex = (bestEdge + 1) % n;
+        } else {
+            if (bestEdge == n - 1) {
+                insertIndex = outerWithIntersection.size();
+                outerWithIntersection.push_back(intersection);
+            } else {
+                insertIndex = bestEdge + 1;
+                outerWithIntersection.insert(outerWithIntersection.begin() + static_cast<std::ptrdiff_t>(insertIndex), intersection);
+            }
+        }
+
+        // Splice hole vertices after the intersection point.
+        std::vector<Vec2f> combined;
+        combined.reserve(outerWithIntersection.size() + hole.size());
+
+        for (size_t i = 0; i <= insertIndex && i < outerWithIntersection.size(); ++i) {
+            combined.push_back(outerWithIntersection[i]);
+        }
+
+        for (size_t k = 0; k < hole.size(); ++k) {
+            combined.push_back(hole[(holeInfo.leftmost + k) % hole.size()]);
+        }
+
+        for (size_t i = insertIndex + 1; i < outerWithIntersection.size(); ++i) {
+            combined.push_back(outerWithIntersection[i]);
+        }
+
+        outer.swap(combined);
+        cleanupRing(outer);
+        if (outer.size() < 3) break;
+        if (ringSignedArea(outer) < 0.0) {
+            std::reverse(outer.begin(), outer.end());
+        }
+    }
+
+    return triangulateSimplePolygon(std::move(outer));
+}
+
+struct SvgTransform2D {
+    double a = 1.0;
+    double b = 0.0;
+    double c = 0.0;
+    double d = 1.0;
+    double e = 0.0;
+    double f = 0.0;
+};
+
+inline SvgTransform2D mul(const SvgTransform2D& lhs, const SvgTransform2D& rhs) {
+    SvgTransform2D out;
+    out.a = lhs.a * rhs.a + lhs.c * rhs.b;
+    out.b = lhs.b * rhs.a + lhs.d * rhs.b;
+    out.c = lhs.a * rhs.c + lhs.c * rhs.d;
+    out.d = lhs.b * rhs.c + lhs.d * rhs.d;
+    out.e = lhs.a * rhs.e + lhs.c * rhs.f + lhs.e;
+    out.f = lhs.b * rhs.e + lhs.d * rhs.f + lhs.f;
+    return out;
+}
+
+inline Vec2f applyTransform(const SvgTransform2D& t, Vec2f p) {
+    return {
+        static_cast<float>(t.a * p.x + t.c * p.y + t.e),
+        static_cast<float>(t.b * p.x + t.d * p.y + t.f)
+    };
+}
+
+inline SvgTransform2D translate2D(double tx, double ty) {
+    SvgTransform2D t;
+    t.e = tx;
+    t.f = ty;
+    return t;
+}
+
+inline SvgTransform2D scale2D(double sx, double sy) {
+    SvgTransform2D t;
+    t.a = sx;
+    t.d = sy;
+    return t;
+}
+
+inline SvgTransform2D rotate2D(double radians) {
+    SvgTransform2D t;
+    const double c = std::cos(radians);
+    const double s = std::sin(radians);
+    t.a = c;
+    t.b = s;
+    t.c = -s;
+    t.d = c;
+    return t;
+}
+
+inline double degToRad(double degrees) {
+    return degrees * 3.14159265358979323846 / 180.0;
+}
+
+inline void skipSeparators(const std::string& s, size_t& i) {
+    while (i < s.size()) {
+        const unsigned char ch = static_cast<unsigned char>(s[i]);
+        if (std::isspace(ch) || s[i] == ',') {
+            ++i;
+            continue;
+        }
+        break;
+    }
+}
+
+inline bool parseNumber(const std::string& s, size_t& i, double& out) {
+    skipSeparators(s, i);
+    if (i >= s.size()) return false;
+    const char* start = s.c_str() + i;
+    char* end = nullptr;
+    out = std::strtod(start, &end);
+    if (end == start) return false;
+    i = static_cast<size_t>(end - s.c_str());
+    return true;
+}
+
+inline std::string trim(std::string_view sv) {
+    size_t start = 0;
+    while (start < sv.size() && std::isspace(static_cast<unsigned char>(sv[start]))) ++start;
+    size_t end = sv.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1]))) --end;
+    return std::string(sv.substr(start, end - start));
+}
+
+inline std::unordered_map<std::string, std::string> parseXmlAttributes(std::string_view s) {
+    std::unordered_map<std::string, std::string> attrs;
+    size_t i = 0;
+
+    auto skipWs = [&]() {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    };
+
+    auto parseKey = [&]() -> std::string {
+        size_t start = i;
+        while (i < s.size()) {
+            char ch = s[i];
+            if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-' || ch == ':') {
+                ++i;
+                continue;
+            }
+            break;
+        }
+        return std::string(s.substr(start, i - start));
+    };
+
+    while (i < s.size()) {
+        skipWs();
+        if (i >= s.size()) break;
+        if (s[i] == '/' || s[i] == '>') break;
+
+        std::string key = parseKey();
+        if (key.empty()) {
+            ++i;
+            continue;
+        }
+
+        skipWs();
+        if (i >= s.size() || s[i] != '=') {
+            attrs.emplace(std::move(key), std::string{});
+            continue;
+        }
+        ++i;
+        skipWs();
+        if (i >= s.size()) break;
+
+        char quote = s[i];
+        std::string value;
+        if (quote == '"' || quote == '\'') {
+            ++i;
+            size_t start = i;
+            while (i < s.size() && s[i] != quote) ++i;
+            value = std::string(s.substr(start, i - start));
+            if (i < s.size() && s[i] == quote) ++i;
+        } else {
+            size_t start = i;
+            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])) && s[i] != '/' && s[i] != '>') ++i;
+            value = std::string(s.substr(start, i - start));
+        }
+        attrs.emplace(std::move(key), std::move(value));
+    }
+
+    return attrs;
+}
+
+inline std::unordered_map<std::string, std::string> parseStyleDeclarations(const std::string& style) {
+    std::unordered_map<std::string, std::string> out;
+    size_t start = 0;
+    while (start < style.size()) {
+        size_t end = style.find(';', start);
+        if (end == std::string::npos) end = style.size();
+        std::string_view decl(style.c_str() + start, end - start);
+        size_t colon = decl.find(':');
+        if (colon != std::string::npos) {
+            std::string key = trim(decl.substr(0, colon));
+            std::string val = trim(decl.substr(colon + 1));
+            if (!key.empty()) out[key] = val;
+        }
+        start = end + 1;
+    }
+    return out;
+}
+
+inline double parseNumberWithUnits(const std::string& s, double fallback = 0.0) {
+    const char* start = s.c_str();
+    char* end = nullptr;
+    double value = std::strtod(start, &end);
+    if (end == start) return fallback;
+    return value;
+}
+
+inline bool parseSvgColor(const std::string& value, bool& isNone, float& r, float& g, float& b) {
+    std::string v = trim(value);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (v.empty()) return false;
+    if (v == "none") {
+        isNone = true;
+        return true;
+    }
+    isNone = false;
+
+    auto fromHex = [&](unsigned int hex) {
+        r = static_cast<float>((hex >> 16) & 0xFF) / 255.0f;
+        g = static_cast<float>((hex >> 8) & 0xFF) / 255.0f;
+        b = static_cast<float>(hex & 0xFF) / 255.0f;
+    };
+
+    if (v[0] == '#') {
+        std::string hexStr = v.substr(1);
+        if (!std::all_of(hexStr.begin(), hexStr.end(), [](unsigned char c) { return std::isxdigit(c); })) {
+            return false;
+        }
+        if (hexStr.size() == 3) {
+            unsigned int rr = std::stoul(hexStr.substr(0, 1), nullptr, 16);
+            unsigned int gg = std::stoul(hexStr.substr(1, 1), nullptr, 16);
+            unsigned int bb = std::stoul(hexStr.substr(2, 1), nullptr, 16);
+            r = static_cast<float>(rr * 17) / 255.0f;
+            g = static_cast<float>(gg * 17) / 255.0f;
+            b = static_cast<float>(bb * 17) / 255.0f;
+            return true;
+        }
+        if (hexStr.size() >= 6) {
+            unsigned int hex = std::stoul(hexStr.substr(0, 6), nullptr, 16);
+            fromHex(hex);
+            return true;
+        }
+        return false;
+    }
+
+    if (v.rfind("rgb(", 0) == 0) {
+        size_t l = v.find('(');
+        size_t rParen = v.find(')', l == std::string::npos ? 0 : l + 1);
+        if (l == std::string::npos || rParen == std::string::npos) return false;
+        std::string inner = v.substr(l + 1, rParen - l - 1);
+        size_t idx = 0;
+        double cr = 0.0, cg = 0.0, cb = 0.0;
+        if (!parseNumber(inner, idx, cr)) return false;
+        if (!parseNumber(inner, idx, cg)) return false;
+        if (!parseNumber(inner, idx, cb)) return false;
+        r = static_cast<float>(std::clamp(cr, 0.0, 255.0) / 255.0);
+        g = static_cast<float>(std::clamp(cg, 0.0, 255.0) / 255.0);
+        b = static_cast<float>(std::clamp(cb, 0.0, 255.0) / 255.0);
+        return true;
+    }
+
+    return false;
+}
+
+inline SvgTransform2D parseTransformList(const std::string& value) {
+    SvgTransform2D result;
+    size_t i = 0;
+    while (i < value.size()) {
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) ++i;
+        if (i >= value.size()) break;
+
+        size_t nameStart = i;
+        while (i < value.size() && std::isalpha(static_cast<unsigned char>(value[i]))) ++i;
+        std::string name = value.substr(nameStart, i - nameStart);
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) ++i;
+        if (i >= value.size() || value[i] != '(') {
+            break;
+        }
+        ++i;
+        std::vector<double> args;
+        args.reserve(8);
+        while (i < value.size() && value[i] != ')') {
+            double num = 0.0;
+            if (!parseNumber(value, i, num)) break;
+            args.push_back(num);
+        }
+        if (i < value.size() && value[i] == ')') ++i;
+
+        SvgTransform2D m;
+        if (name == "translate") {
+            double tx = args.size() > 0 ? args[0] : 0.0;
+            double ty = args.size() > 1 ? args[1] : 0.0;
+            m = translate2D(tx, ty);
+        } else if (name == "scale") {
+            double sx = args.size() > 0 ? args[0] : 1.0;
+            double sy = args.size() > 1 ? args[1] : sx;
+            m = scale2D(sx, sy);
+        } else if (name == "rotate") {
+            double angle = args.size() > 0 ? args[0] : 0.0;
+            m = rotate2D(degToRad(angle));
+            if (args.size() >= 3) {
+                double cx = args[1];
+                double cy = args[2];
+                m = mul(translate2D(cx, cy), mul(m, translate2D(-cx, -cy)));
+            }
+        } else if (name == "matrix" && args.size() >= 6) {
+            m.a = args[0];
+            m.b = args[1];
+            m.c = args[2];
+            m.d = args[3];
+            m.e = args[4];
+            m.f = args[5];
+        } else {
+            continue;
+        }
+
+        // Apply transforms in listed order (left-to-right) for column-vector convention.
+        result = mul(m, result);
+    }
+    return result;
+}
+
+inline std::vector<CubicBezier2D> svgArcToCubics(Vec2f from, double rx, double ry, double xAxisRotationDeg,
+                                                 bool largeArcFlag, bool sweepFlag, Vec2f to) {
+    std::vector<CubicBezier2D> cubics;
+    rx = std::abs(rx);
+    ry = std::abs(ry);
+
+    if (rx <= 1e-8 || ry <= 1e-8 || nearlyEqual(from, to, 1e-6f)) {
+        cubics.push_back(lineAsCubic(from, to));
+        return cubics;
+    }
+
+    const double phi = degToRad(xAxisRotationDeg);
+    const double cosPhi = std::cos(phi);
+    const double sinPhi = std::sin(phi);
+
+    const double dx2 = (static_cast<double>(from.x) - static_cast<double>(to.x)) / 2.0;
+    const double dy2 = (static_cast<double>(from.y) - static_cast<double>(to.y)) / 2.0;
+
+    double x1p = cosPhi * dx2 + sinPhi * dy2;
+    double y1p = -sinPhi * dx2 + cosPhi * dy2;
+
+    double rx2 = rx * rx;
+    double ry2 = ry * ry;
+    double x1p2 = x1p * x1p;
+    double y1p2 = y1p * y1p;
+
+    double lambda = x1p2 / rx2 + y1p2 / ry2;
+    if (lambda > 1.0) {
+        const double s = std::sqrt(lambda);
+        rx *= s;
+        ry *= s;
+        rx2 = rx * rx;
+        ry2 = ry * ry;
+    }
+
+    const double sign = (largeArcFlag == sweepFlag) ? -1.0 : 1.0;
+    double sq = (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2) / (rx2 * y1p2 + ry2 * x1p2);
+    if (sq < 0.0) sq = 0.0;
+    const double coef = sign * std::sqrt(sq);
+    const double cxp = coef * (rx * y1p / ry);
+    const double cyp = coef * (-ry * x1p / rx);
+
+    const double cx = cosPhi * cxp - sinPhi * cyp + (static_cast<double>(from.x) + static_cast<double>(to.x)) / 2.0;
+    const double cy = sinPhi * cxp + cosPhi * cyp + (static_cast<double>(from.y) + static_cast<double>(to.y)) / 2.0;
+
+    auto vectorAngle = [](double ux, double uy, double vx, double vy) {
+        const double dotp = ux * vx + uy * vy;
+        const double len = std::sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
+        double ang = 0.0;
+        if (len > 1e-12) {
+            double v = std::clamp(dotp / len, -1.0, 1.0);
+            ang = std::acos(v);
+        }
+        if (ux * vy - uy * vx < 0.0) ang = -ang;
+        return ang;
+    };
+
+    const double ux = (x1p - cxp) / rx;
+    const double uy = (y1p - cyp) / ry;
+    const double vx = (-x1p - cxp) / rx;
+    const double vy = (-y1p - cyp) / ry;
+
+    double theta1 = vectorAngle(1.0, 0.0, ux, uy);
+    double dtheta = vectorAngle(ux, uy, vx, vy);
+
+    if (!sweepFlag && dtheta > 0.0) dtheta -= 2.0 * 3.14159265358979323846;
+    if (sweepFlag && dtheta < 0.0) dtheta += 2.0 * 3.14159265358979323846;
+
+    const int segments = std::max(1, static_cast<int>(std::ceil(std::abs(dtheta) / (3.14159265358979323846 / 2.0))));
+    const double delta = dtheta / static_cast<double>(segments);
+
+    auto transformUnitPoint = [&](double ux, double uy) -> Vec2f {
+        const double xp = ux * rx;
+        const double yp = uy * ry;
+        const double xr = cosPhi * xp - sinPhi * yp + cx;
+        const double yr = sinPhi * xp + cosPhi * yp + cy;
+        return {static_cast<float>(xr), static_cast<float>(yr)};
+    };
+
+    for (int i = 0; i < segments; ++i) {
+        const double t1 = theta1 + delta * static_cast<double>(i);
+        const double t2 = t1 + delta;
+        const double alpha = 4.0 / 3.0 * std::tan((t2 - t1) / 4.0);
+
+        const double cos1 = std::cos(t1);
+        const double sin1 = std::sin(t1);
+        const double cos2 = std::cos(t2);
+        const double sin2 = std::sin(t2);
+
+        const Vec2f p0 = transformUnitPoint(cos1, sin1);
+        const Vec2f p1 = transformUnitPoint(cos1 - alpha * sin1, sin1 + alpha * cos1);
+        const Vec2f p2 = transformUnitPoint(cos2 + alpha * sin2, sin2 - alpha * cos2);
+        const Vec2f p3 = transformUnitPoint(cos2, sin2);
+
+        cubics.push_back({p0, p1, p2, p3});
+    }
+
+    // Fix endpoints to match exactly.
+    if (!cubics.empty()) {
+        cubics.front().p0 = from;
+        cubics.back().p3 = to;
+    }
+
+    return cubics;
+}
+
+inline std::vector<PathCommand> parseSvgPathData(const std::string& d) {
+    std::vector<PathCommand> commands;
+    size_t i = 0;
+    char cmd = 0;
+
+    double x = 0.0;
+    double y = 0.0;
+    double startX = 0.0;
+    double startY = 0.0;
+    double lastCx = 0.0;
+    double lastCy = 0.0;
+    double lastQx = 0.0;
+    double lastQy = 0.0;
+    char prevCmd = 0;
+
+    auto pushMove = [&](double nx, double ny) {
+        PathCommand c;
+        c.type = PathCommandType::MoveTo;
+        c.x = static_cast<float>(nx);
+        c.y = static_cast<float>(ny);
+        commands.push_back(c);
+    };
+
+    auto pushLine = [&](double nx, double ny) {
+        PathCommand c;
+        c.type = PathCommandType::LineTo;
+        c.x = static_cast<float>(nx);
+        c.y = static_cast<float>(ny);
+        commands.push_back(c);
+    };
+
+    auto pushCubic = [&](Vec2f c1, Vec2f c2, Vec2f p) {
+        PathCommand c;
+        c.type = PathCommandType::CurveTo;
+        c.cx1 = c1.x;
+        c.cy1 = c1.y;
+        c.cx2 = c2.x;
+        c.cy2 = c2.y;
+        c.x = p.x;
+        c.y = p.y;
+        commands.push_back(c);
+    };
+
+    while (i < d.size()) {
+        skipSeparators(d, i);
+        if (i >= d.size()) break;
+
+        if (std::isalpha(static_cast<unsigned char>(d[i]))) {
+            cmd = d[i];
+            ++i;
+        } else if (cmd == 0) {
+            break;
+        }
+
+        const bool isRel = std::islower(static_cast<unsigned char>(cmd));
+        const char ucmd = static_cast<char>(std::toupper(static_cast<unsigned char>(cmd)));
+
+        auto readPair = [&](double& outX, double& outY) -> bool {
+            if (!parseNumber(d, i, outX)) return false;
+            if (!parseNumber(d, i, outY)) return false;
+            return true;
+        };
+
+        if (ucmd == 'M') {
+            double nx = 0.0, ny = 0.0;
+            bool first = true;
+            while (readPair(nx, ny)) {
+                if (isRel) {
+                    nx += x;
+                    ny += y;
+                }
+                x = nx;
+                y = ny;
+                if (first) {
+                    pushMove(x, y);
+                    startX = x;
+                    startY = y;
+                    first = false;
+                } else {
+                    pushLine(x, y);
+                }
+            }
+        } else if (ucmd == 'L') {
+            double nx = 0.0, ny = 0.0;
+            while (readPair(nx, ny)) {
+                if (isRel) {
+                    nx += x;
+                    ny += y;
+                }
+                x = nx;
+                y = ny;
+                pushLine(x, y);
+            }
+        } else if (ucmd == 'H') {
+            double nx = 0.0;
+            while (parseNumber(d, i, nx)) {
+                if (isRel) nx += x;
+                x = nx;
+                pushLine(x, y);
+            }
+        } else if (ucmd == 'V') {
+            double ny = 0.0;
+            while (parseNumber(d, i, ny)) {
+                if (isRel) ny += y;
+                y = ny;
+                pushLine(x, y);
+            }
+        } else if (ucmd == 'C') {
+            double x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 0.0, x3 = 0.0, y3 = 0.0;
+            while (readPair(x1, y1) && readPair(x2, y2) && readPair(x3, y3)) {
+                if (isRel) {
+                    x1 += x; y1 += y;
+                    x2 += x; y2 += y;
+                    x3 += x; y3 += y;
+                }
+                pushCubic({static_cast<float>(x1), static_cast<float>(y1)},
+                          {static_cast<float>(x2), static_cast<float>(y2)},
+                          {static_cast<float>(x3), static_cast<float>(y3)});
+                x = x3;
+                y = y3;
+                lastCx = x2;
+                lastCy = y2;
+            }
+        } else if (ucmd == 'S') {
+            double x2 = 0.0, y2 = 0.0, x3 = 0.0, y3 = 0.0;
+            while (readPair(x2, y2) && readPair(x3, y3)) {
+                if (isRel) {
+                    x2 += x; y2 += y;
+                    x3 += x; y3 += y;
+                }
+                double x1 = x;
+                double y1 = y;
+                if (prevCmd == 'C' || prevCmd == 'S') {
+                    x1 = 2.0 * x - lastCx;
+                    y1 = 2.0 * y - lastCy;
+                }
+                pushCubic({static_cast<float>(x1), static_cast<float>(y1)},
+                          {static_cast<float>(x2), static_cast<float>(y2)},
+                          {static_cast<float>(x3), static_cast<float>(y3)});
+                x = x3;
+                y = y3;
+                lastCx = x2;
+                lastCy = y2;
+            }
+        } else if (ucmd == 'Q') {
+            double qx = 0.0, qy = 0.0, x3 = 0.0, y3 = 0.0;
+            while (readPair(qx, qy) && readPair(x3, y3)) {
+                if (isRel) {
+                    qx += x; qy += y;
+                    x3 += x; y3 += y;
+                }
+                Vec2f p0{static_cast<float>(x), static_cast<float>(y)};
+                Vec2f q{static_cast<float>(qx), static_cast<float>(qy)};
+                Vec2f p3{static_cast<float>(x3), static_cast<float>(y3)};
+                Vec2f c1 = p0 + (q - p0) * (2.0f / 3.0f);
+                Vec2f c2 = p3 + (q - p3) * (2.0f / 3.0f);
+                pushCubic(c1, c2, p3);
+                x = x3;
+                y = y3;
+                lastQx = qx;
+                lastQy = qy;
+            }
+        } else if (ucmd == 'T') {
+            double x3 = 0.0, y3 = 0.0;
+            while (readPair(x3, y3)) {
+                if (isRel) {
+                    x3 += x;
+                    y3 += y;
+                }
+                double qx = x;
+                double qy = y;
+                if (prevCmd == 'Q' || prevCmd == 'T') {
+                    qx = 2.0 * x - lastQx;
+                    qy = 2.0 * y - lastQy;
+                }
+                Vec2f p0{static_cast<float>(x), static_cast<float>(y)};
+                Vec2f q{static_cast<float>(qx), static_cast<float>(qy)};
+                Vec2f p3{static_cast<float>(x3), static_cast<float>(y3)};
+                Vec2f c1 = p0 + (q - p0) * (2.0f / 3.0f);
+                Vec2f c2 = p3 + (q - p3) * (2.0f / 3.0f);
+                pushCubic(c1, c2, p3);
+                x = x3;
+                y = y3;
+                lastQx = qx;
+                lastQy = qy;
+            }
+        } else if (ucmd == 'A') {
+            double rx = 0.0, ry = 0.0, angle = 0.0, large = 0.0, sweep = 0.0, x3 = 0.0, y3 = 0.0;
+            while (parseNumber(d, i, rx) && parseNumber(d, i, ry) && parseNumber(d, i, angle) &&
+                   parseNumber(d, i, large) && parseNumber(d, i, sweep) && readPair(x3, y3)) {
+                if (isRel) {
+                    x3 += x;
+                    y3 += y;
+                }
+                Vec2f p0{static_cast<float>(x), static_cast<float>(y)};
+                Vec2f p1{static_cast<float>(x3), static_cast<float>(y3)};
+                auto cubs = svgArcToCubics(p0, rx, ry, angle, large >= 0.5, sweep >= 0.5, p1);
+                for (const auto& c : cubs) {
+                    pushCubic(c.p1, c.p2, c.p3);
+                }
+                x = x3;
+                y = y3;
+            }
+        } else if (ucmd == 'Z') {
+            PathCommand c;
+            c.type = PathCommandType::Close;
+            commands.push_back(c);
+            x = startX;
+            y = startY;
+        } else {
+            // Unsupported command; abort to avoid infinite loop.
+            break;
+        }
+
+        prevCmd = ucmd;
+    }
+
+    return commands;
+}
+
+inline std::vector<Vec2f> parseSvgPoints(const std::string& points) {
+    std::vector<Vec2f> out;
+    size_t i = 0;
+    while (i < points.size()) {
+        double x = 0.0, y = 0.0;
+        if (!parseNumber(points, i, x)) break;
+        if (!parseNumber(points, i, y)) break;
+        out.push_back({static_cast<float>(x), static_cast<float>(y)});
+    }
+    return out;
+}
+
+struct SvgStyleState {
+    bool fillNone = false;
+    float fillR = 0.0f, fillG = 0.0f, fillB = 0.0f;
+    float fillOpacity = 1.0f;
+
+    bool strokeNone = true;
+    float strokeR = 0.0f, strokeG = 0.0f, strokeB = 0.0f;
+    float strokeOpacity = 1.0f;
+    float strokeWidth = 1.0f;
+
+    float opacity = 1.0f;
+};
+
+inline SvgStyleState applySvgStyle(const SvgStyleState& parent, const std::unordered_map<std::string, std::string>& attrs) {
+    SvgStyleState style = parent;
+    std::unordered_map<std::string, std::string> decls;
+    if (auto it = attrs.find("style"); it != attrs.end()) {
+        decls = parseStyleDeclarations(it->second);
+    }
+
+    auto applyProp = [&](const std::string& key, const std::string& val) {
+        if (key == "opacity") {
+            style.opacity = static_cast<float>(std::clamp(parseNumberWithUnits(val, style.opacity), 0.0, 1.0));
+        } else if (key == "fill") {
+            bool none = false;
+            float r = style.fillR, g = style.fillG, b = style.fillB;
+            if (parseSvgColor(val, none, r, g, b)) {
+                style.fillNone = none;
+                if (!none) {
+                    style.fillR = r;
+                    style.fillG = g;
+                    style.fillB = b;
+                }
+            }
+        } else if (key == "fill-opacity") {
+            style.fillOpacity = static_cast<float>(std::clamp(parseNumberWithUnits(val, style.fillOpacity), 0.0, 1.0));
+        } else if (key == "stroke") {
+            bool none = false;
+            float r = style.strokeR, g = style.strokeG, b = style.strokeB;
+            if (parseSvgColor(val, none, r, g, b)) {
+                style.strokeNone = none;
+                if (!none) {
+                    style.strokeR = r;
+                    style.strokeG = g;
+                    style.strokeB = b;
+                }
+            }
+        } else if (key == "stroke-opacity") {
+            style.strokeOpacity = static_cast<float>(std::clamp(parseNumberWithUnits(val, style.strokeOpacity), 0.0, 1.0));
+        } else if (key == "stroke-width") {
+            style.strokeWidth = static_cast<float>(std::max(0.0, parseNumberWithUnits(val, style.strokeWidth)));
+        }
+    };
+
+    for (const auto& [k, v] : decls) {
+        applyProp(k, v);
+    }
+
+    for (const auto& [k, v] : attrs) {
+        if (k == "style") continue;
+        applyProp(k, v);
+    }
+
+    return style;
+}
+
+struct SvgShapeDescriptor {
+    std::vector<PathCommand> commands;
+    CustomPathMode mode = CustomPathMode::Fill;
+    float r = 1.0f, g = 1.0f, b = 1.0f;
+    float opacity = 1.0f;
+    float thickness = 2.0f;
+};
+
+inline size_t findTagEnd(const std::string& s, size_t start) {
+    char quote = 0;
+    for (size_t i = start; i < s.size(); ++i) {
+        char ch = s[i];
+        if (quote) {
+            if (ch == quote) quote = 0;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+            continue;
+        }
+        if (ch == '>') return i;
+    }
+    return std::string::npos;
+}
+
+inline std::vector<SvgShapeDescriptor> parseSvgToShapes(const std::string& svgText) {
+    struct Context {
+        SvgTransform2D transform;
+        SvgStyleState style;
+    };
+
+    std::vector<SvgShapeDescriptor> out;
+    std::vector<Context> stack;
+    stack.push_back({SvgTransform2D{}, SvgStyleState{}});
+    bool rootSeen = false;
+
+    size_t pos = 0;
+    while ((pos = svgText.find('<', pos)) != std::string::npos) {
+        if (svgText.compare(pos, 4, "<!--") == 0) {
+            size_t end = svgText.find("-->", pos + 4);
+            pos = end == std::string::npos ? svgText.size() : end + 3;
+            continue;
+        }
+        if (svgText.compare(pos, 2, "<?") == 0) {
+            size_t end = svgText.find("?>", pos + 2);
+            pos = end == std::string::npos ? svgText.size() : end + 2;
+            continue;
+        }
+
+        const size_t tagEnd = findTagEnd(svgText, pos + 1);
+        if (tagEnd == std::string::npos) break;
+        std::string_view tagContent(svgText.c_str() + pos + 1, tagEnd - pos - 1);
+
+        bool isEndTag = false;
+        bool selfClosing = false;
+
+        size_t i = 0;
+        while (i < tagContent.size() && std::isspace(static_cast<unsigned char>(tagContent[i]))) ++i;
+        if (i < tagContent.size() && tagContent[i] == '/') {
+            isEndTag = true;
+            ++i;
+        }
+
+        while (i < tagContent.size() && std::isspace(static_cast<unsigned char>(tagContent[i]))) ++i;
+        size_t nameStart = i;
+        while (i < tagContent.size()) {
+            char ch = tagContent[i];
+            if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-') {
+                ++i;
+                continue;
+            }
+            break;
+        }
+        std::string tagName = std::string(tagContent.substr(nameStart, i - nameStart));
+
+        if (!isEndTag) {
+            if (!tagContent.empty() && tagContent.back() == '/') {
+                selfClosing = true;
+            }
+
+            auto attrs = parseXmlAttributes(tagContent.substr(i));
+
+            if (tagName == "svg" || tagName == "g") {
+                Context ctx = stack.back();
+                ctx.style = applySvgStyle(ctx.style, attrs);
+
+                SvgTransform2D elementTransform;
+                if (auto it = attrs.find("transform"); it != attrs.end()) {
+                    elementTransform = parseTransformList(it->second);
+                }
+
+                if (tagName == "svg" && !rootSeen) {
+                    rootSeen = true;
+                    // Apply viewBox scaling if present.
+                    if (auto it = attrs.find("viewBox"); it != attrs.end()) {
+                        std::string vb = it->second;
+                        size_t idx = 0;
+                        double minX = 0.0, minY = 0.0, vbW = 0.0, vbH = 0.0;
+                        if (parseNumber(vb, idx, minX) && parseNumber(vb, idx, minY) &&
+                            parseNumber(vb, idx, vbW) && parseNumber(vb, idx, vbH) &&
+                            vbW > 0.0 && vbH > 0.0) {
+                            const double w = attrs.count("width") ? parseNumberWithUnits(attrs.at("width"), vbW) : vbW;
+                            const double h = attrs.count("height") ? parseNumberWithUnits(attrs.at("height"), vbH) : vbH;
+                            const double sx = w / vbW;
+                            const double sy = h / vbH;
+                            SvgTransform2D viewBoxXform = mul(scale2D(sx, sy), translate2D(-minX, -minY));
+                            elementTransform = mul(elementTransform, viewBoxXform);
+                        }
+                    }
+                }
+
+                ctx.transform = mul(ctx.transform, elementTransform);
+                stack.push_back(ctx);
+                if (selfClosing) {
+                    stack.pop_back();
+                }
+            } else if (tagName == "path") {
+                Context ctx = stack.back();
+                ctx.style = applySvgStyle(ctx.style, attrs);
+                SvgTransform2D xform = ctx.transform;
+                if (auto it = attrs.find("transform"); it != attrs.end()) {
+                    xform = mul(xform, parseTransformList(it->second));
+                }
+
+                auto itD = attrs.find("d");
+                if (itD != attrs.end()) {
+                    std::vector<PathCommand> cmds = parseSvgPathData(itD->second);
+                    for (auto& c : cmds) {
+                        switch (c.type) {
+                            case PathCommandType::MoveTo:
+                            case PathCommandType::LineTo: {
+                                Vec2f p = applyTransform(xform, {c.x, c.y});
+                                c.x = p.x;
+                                c.y = p.y;
+                                break;
+                            }
+                            case PathCommandType::CurveTo: {
+                                Vec2f c1 = applyTransform(xform, {c.cx1, c.cy1});
+                                Vec2f c2 = applyTransform(xform, {c.cx2, c.cy2});
+                                Vec2f p = applyTransform(xform, {c.x, c.y});
+                                c.cx1 = c1.x;
+                                c.cy1 = c1.y;
+                                c.cx2 = c2.x;
+                                c.cy2 = c2.y;
+                                c.x = p.x;
+                                c.y = p.y;
+                                break;
+                            }
+                            case PathCommandType::Close:
+                                break;
+                        }
+                    }
+
+                    const float alphaBase = std::clamp(ctx.style.opacity, 0.0f, 1.0f);
+
+                    if (!ctx.style.fillNone && alphaBase * ctx.style.fillOpacity > 0.0f) {
+                        SvgShapeDescriptor fill;
+                        fill.commands = cmds;
+                        fill.mode = CustomPathMode::Fill;
+                        fill.r = ctx.style.fillR;
+                        fill.g = ctx.style.fillG;
+                        fill.b = ctx.style.fillB;
+                        fill.opacity = alphaBase * ctx.style.fillOpacity;
+                        out.push_back(std::move(fill));
+                    }
+
+                    if (!ctx.style.strokeNone && ctx.style.strokeWidth > 0.0f && alphaBase * ctx.style.strokeOpacity > 0.0f) {
+                        const double sx = std::hypot(xform.a, xform.b);
+                        const double sy = std::hypot(xform.c, xform.d);
+                        const float strokeScale = static_cast<float>(0.5 * (sx + sy));
+                        SvgShapeDescriptor stroke;
+                        stroke.commands = std::move(cmds);
+                        stroke.mode = CustomPathMode::Stroke;
+                        stroke.r = ctx.style.strokeR;
+                        stroke.g = ctx.style.strokeG;
+                        stroke.b = ctx.style.strokeB;
+                        stroke.opacity = alphaBase * ctx.style.strokeOpacity;
+                        stroke.thickness = ctx.style.strokeWidth * strokeScale;
+                        out.push_back(std::move(stroke));
+                    }
+                }
+            } else if (tagName == "polygon" || tagName == "polyline" || tagName == "line") {
+                Context ctx = stack.back();
+                ctx.style = applySvgStyle(ctx.style, attrs);
+                SvgTransform2D xform = ctx.transform;
+                if (auto it = attrs.find("transform"); it != attrs.end()) {
+                    xform = mul(xform, parseTransformList(it->second));
+                }
+
+                std::vector<Vec2f> pts;
+                if (tagName == "line") {
+                    const double x1 = attrs.count("x1") ? parseNumberWithUnits(attrs.at("x1")) : 0.0;
+                    const double y1 = attrs.count("y1") ? parseNumberWithUnits(attrs.at("y1")) : 0.0;
+                    const double x2 = attrs.count("x2") ? parseNumberWithUnits(attrs.at("x2")) : 0.0;
+                    const double y2 = attrs.count("y2") ? parseNumberWithUnits(attrs.at("y2")) : 0.0;
+                    pts.push_back({static_cast<float>(x1), static_cast<float>(y1)});
+                    pts.push_back({static_cast<float>(x2), static_cast<float>(y2)});
+                } else if (auto itPts = attrs.find("points"); itPts != attrs.end()) {
+                    pts = parseSvgPoints(itPts->second);
+                }
+
+                if (pts.size() >= 2) {
+                    std::vector<PathCommand> cmds;
+                    PathCommand move;
+                    move.type = PathCommandType::MoveTo;
+                    Vec2f p0 = applyTransform(xform, pts[0]);
+                    move.x = p0.x;
+                    move.y = p0.y;
+                    cmds.push_back(move);
+                    for (size_t k = 1; k < pts.size(); ++k) {
+                        PathCommand line;
+                        line.type = PathCommandType::LineTo;
+                        Vec2f p = applyTransform(xform, pts[k]);
+                        line.x = p.x;
+                        line.y = p.y;
+                        cmds.push_back(line);
+                    }
+                    if (tagName == "polygon") {
+                        PathCommand close;
+                        close.type = PathCommandType::Close;
+                        cmds.push_back(close);
+                    }
+
+                    const float alphaBase = std::clamp(ctx.style.opacity, 0.0f, 1.0f);
+                    if (tagName == "polygon" && !ctx.style.fillNone && alphaBase * ctx.style.fillOpacity > 0.0f) {
+                        SvgShapeDescriptor fill;
+                        fill.commands = cmds;
+                        fill.mode = CustomPathMode::Fill;
+                        fill.r = ctx.style.fillR;
+                        fill.g = ctx.style.fillG;
+                        fill.b = ctx.style.fillB;
+                        fill.opacity = alphaBase * ctx.style.fillOpacity;
+                        out.push_back(std::move(fill));
+                    }
+                    if (!ctx.style.strokeNone && ctx.style.strokeWidth > 0.0f && alphaBase * ctx.style.strokeOpacity > 0.0f) {
+                        const double sx = std::hypot(xform.a, xform.b);
+                        const double sy = std::hypot(xform.c, xform.d);
+                        const float strokeScale = static_cast<float>(0.5 * (sx + sy));
+                        SvgShapeDescriptor stroke;
+                        stroke.commands = std::move(cmds);
+                        stroke.mode = CustomPathMode::Stroke;
+                        stroke.r = ctx.style.strokeR;
+                        stroke.g = ctx.style.strokeG;
+                        stroke.b = ctx.style.strokeB;
+                        stroke.opacity = alphaBase * ctx.style.strokeOpacity;
+                        stroke.thickness = ctx.style.strokeWidth * strokeScale;
+                        out.push_back(std::move(stroke));
+                    }
+                }
+            } else {
+                // Unhandled tag; ignore.
+            }
+        } else {
+            if ((tagName == "g" || tagName == "svg") && stack.size() > 1) {
+                stack.pop_back();
+            }
+        }
+
+        pos = tagEnd + 1;
+    }
+
+    return out;
+}
+}  // namespace
 
 // Per-group element state (for grouping and layout)
 struct GroupObject {
@@ -1080,7 +2524,47 @@ struct GroupObject {
     // Z-ordering (higher values render on top)
     int zIndex = 0;
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;
+};
+
+// Manim-style numeric tracker (not rendered) used for per-frame callbacks and reactive redraw.
+struct ValueTrackerAnimation {
+    float startTime = 0.0f;     // Scene time when this animation starts
+    float duration = 0.0f;      // Seconds
+    float targetValue = 0.0f;   // End value
+    Easing easing = Easing::EaseOutCubic;
+};
+
+struct ValueTrackerObject {
+    float value = 0.0f;
+
+    // Scene time when the tracker becomes active (creation time)
+    float activeStartTime = 0.0f;
+
+    // One-shot scheduling modifiers (match element conventions)
+    Easing easingFunction = Easing::EaseOutCubic;
+    float elementDelay = 0.0f;
+    bool chainNextAnimation = false;
+    float chainedStartTime = 0.0f;
+
+    // Scheduled value animations
+    std::vector<ValueTrackerAnimation> animationQueue;
+    size_t currentQueueIndex = 0;
+
+    // Active animation state
+    bool animating = false;
+    float animationSceneStartTime = 0.0f;  // Scene time
+    float animationStartTime = -1.0f;      // Absolute glfw time
+    float animationDuration = 0.0f;
+    float startValue = 0.0f;
+    float targetValue = 0.0f;
+    Easing activeEasing = Easing::EaseOutCubic;
+
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
 };
 
 // 3D Shape types
@@ -1177,6 +2661,9 @@ struct Shape3DObject {
     uint32_t vertexOffset = 0;
     uint32_t vertexCount = 0;
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;
 
     // Color helpers
@@ -1236,6 +2723,9 @@ struct Axes3DObject {
     uint32_t vertexOffset = 0;
     uint32_t vertexCount = 0;
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     bool cleared = false;
 };
 
@@ -1278,6 +2768,9 @@ struct Surface3DObject {
     // Vertex data
     uint32_t vertexOffset = 0;
     uint32_t vertexCount = 0;
+
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
 
     bool cleared = false;
 
@@ -1536,9 +3029,11 @@ struct ImageObject {
     float posY = 0.0f;
     bool usePixelPosition = true;
     Position anchor = Position::CENTER;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Z-ordering (higher values render on top)
     int zIndex = 0;
+    float opacity = 1.0f;  // Base opacity (0.0-1.0)
 
     // Vulkan resources (managed by Impl)
     VkImage texture = VK_NULL_HANDLE;
@@ -1600,6 +3095,9 @@ struct ImageObject {
     mutable float baseNdcX = 0.0f;
     mutable float baseNdcY = 0.0f;
 
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
+
     // Clear state
     bool cleared = false;
 
@@ -1622,6 +3120,7 @@ struct GraphObject {
 
     // Z-ordering (higher values render on top)
     int zIndex = 0;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Animation state
     AnimationType animationType = AnimationType::None;
@@ -1633,6 +3132,9 @@ struct GraphObject {
     // Scheduled animation queue (pre-run timeline)
     std::vector<AnimationQueueEntry> animationQueue;
     size_t currentQueueIndex = 0;
+
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
 
     bool cleared = false;
 
@@ -1673,6 +3175,7 @@ struct VectorObject {
 
     // Z-ordering (higher values render on top)
     int zIndex = 0;
+    bool fixedInFrame = false;  // If true, ignore 2D camera transforms (HUD / overlay)
 
     // Animation state
     AnimationType animationType = AnimationType::None;
@@ -1689,6 +3192,9 @@ struct VectorObject {
     // Vertex data
     uint32_t vertexOffset = 0;
     uint32_t vertexCount = 0;
+
+    // Per-frame callbacks (Manim-style updaters)
+    std::vector<std::function<void(float)>> updaters;
 
     void setColorHex(const std::string& hex) {
         std::string h = hex;
@@ -1777,12 +3283,16 @@ public:
     // Group objects (for grouping and layout)
     std::vector<GroupObject> groupObjects;
 
+    // Manim-style trackers (not rendered)
+    std::vector<ValueTrackerObject> valueTrackers;
+
     // Reference font size for atlas (texts scale from this)
     static constexpr float REFERENCE_FONT_SIZE = 128.0f;
 
     // Timeline state for wait() scheduling
     float currentTimeCursor = 0.0f;    // Advances with wait()
     double sceneStartTime = -1.0;      // Set when mainLoop() starts
+    float lastAnimationUpdateTime = -1.0f;  // Absolute glfw time of last updateAnimation() call
     float clearFadeDuration = 0.5f;    // Duration of fade-out before clear
 
     struct ClearEvent {
@@ -1857,7 +3367,20 @@ public:
 
     std::deque<ModeEvent> pending3DModeEvents;
 
-    enum class Camera3DEventType { SetPose, SetFov, Orbit, Reset };
+    enum class Camera3DEventType {
+        SetPose,
+        SetFov,
+        Orbit,
+        Reset,
+        MoveTarget,           // Move the camera target (and eye by same delta)
+        Shift,                // Shift both eye + target by a delta
+        SetDistance,          // Set eye-target distance (keep direction)
+        ScaleDistance,        // Scale eye-target distance (zoom in/out)
+        Rotate,               // Rotate camera around target by axis/angle
+        AmbientRotationStart, // Begin continuous orbit around target
+        AmbientRotationStop,  // Stop continuous orbit
+        Reorient              // Set theta/phi (degrees->radians in API), keeping current distance
+    };
 
     struct Camera3DEvent {
         float startTime = 0.0f;
@@ -1875,6 +3398,23 @@ public:
         float theta = 0.0f;
         float phi = 0.785398163f;
         float distance = 8.0f;
+
+        // Shift
+        float dx = 0.0f;
+        float dy = 0.0f;
+        float dz = 0.0f;
+
+        // Rotate
+        float axisX = 0.0f;
+        float axisY = 1.0f;
+        float axisZ = 0.0f;
+        float angle = 0.0f;  // Radians
+
+        // ScaleDistance
+        float scale = 1.0f;
+
+        // Ambient rotation
+        float rate = 0.0f;  // Radians per second
     };
 
     std::deque<Camera3DEvent> pendingCamera3DEvents;
@@ -1904,16 +3444,31 @@ public:
         float startEyeX = 0.0f, startEyeY = 2.0f, startEyeZ = 5.0f;
         float startTargetX = 0.0f, startTargetY = 0.0f, startTargetZ = 0.0f;
         float startFovY = 45.0f;
+        float startUpX = 0.0f, startUpY = 1.0f, startUpZ = 0.0f;
 
         // Animation target values (destination)
         float destEyeX = 0.0f, destEyeY = 2.0f, destEyeZ = 5.0f;
         float destTargetX = 0.0f, destTargetY = 0.0f, destTargetZ = 0.0f;
         float destFovY = 45.0f;
+        float destUpX = 0.0f, destUpY = 1.0f, destUpZ = 0.0f;
 
         // Orbit animation (spherical interpolation around current target)
         bool orbitAnimating = false;
         float orbitStartTheta = 0.0f, orbitStartPhi = 0.785398163f, orbitStartDistance = 8.0f;
         float orbitDestTheta = 0.0f, orbitDestPhi = 0.785398163f, orbitDestDistance = 8.0f;
+
+        // Rotation animation around target (arbitrary axis)
+        bool rotateAnimating = false;
+        float rotateAxisX = 0.0f, rotateAxisY = 1.0f, rotateAxisZ = 0.0f;
+        float rotateTotalAngle = 0.0f;  // Radians
+        float rotateStartRelX = 0.0f, rotateStartRelY = 0.0f, rotateStartRelZ = 0.0f;
+        float rotateStartUpX = 0.0f, rotateStartUpY = 1.0f, rotateStartUpZ = 0.0f;
+
+        // Ambient camera orbit (continuous rotation around current target)
+        bool ambientRotation = false;
+        float ambientRotationRate = 0.0f;  // Radians/sec
+        bool hasLastSceneTime = false;
+        float lastSceneTime = 0.0f;
 
         void reset() {
             eyeX = 0.0f; eyeY = 2.0f; eyeZ = 5.0f;
@@ -1926,6 +3481,11 @@ public:
             animDuration = 0.0f;
             animating = false;
             orbitAnimating = false;
+            rotateAnimating = false;
+            ambientRotation = false;
+            ambientRotationRate = 0.0f;
+            hasLastSceneTime = false;
+            lastSceneTime = 0.0f;
         }
     };
 
@@ -2016,6 +3576,9 @@ public:
     VkDeviceMemory cameraUBOMemory = VK_NULL_HANDLE;
     VkDescriptorSetLayout cameraDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorSet cameraDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer cameraUBOFixed = VK_NULL_HANDLE;
+    VkDeviceMemory cameraUBOFixedMemory = VK_NULL_HANDLE;
+    VkDescriptorSet cameraDescriptorSetFixed = VK_NULL_HANDLE;
 
     Impl(uint32_t w, uint32_t h) : width(w), height(h) {
         // Initialize font metrics early so under() can calculate text widths
@@ -2077,18 +3640,33 @@ public:
         return textObjects[index];
     }
 
-	    size_t addMath(const std::string& latex) {
-	        MathObject obj;
-	        obj.latex = latex;
-	        obj.scheduledStartTime = currentTimeCursor;
-	        obj.chainedStartTime = currentTimeCursor;
-	        mathObjects.push_back(obj);
-	        mathVertexBufferDirty = true;
-	        return mathObjects.size() - 1;
-	    }
+		    size_t addMath(const std::string& latex) {
+		        MathObject obj;
+		        obj.latexRaw = latex;
+		        obj.latex = latex;
+		        obj.texColorRules.clear();
+		        obj.scheduledStartTime = currentTimeCursor;
+		        obj.chainedStartTime = currentTimeCursor;
+		        mathObjects.push_back(obj);
+		        mathVertexBufferDirty = true;
+		        return mathObjects.size() - 1;
+		    }
 
     MathObject& getMathObject(size_t index) {
         return mathObjects[index];
+    }
+
+    size_t addValueTracker(float initialValue) {
+        ValueTrackerObject obj;
+        obj.value = initialValue;
+        obj.activeStartTime = currentTimeCursor;
+        obj.chainedStartTime = currentTimeCursor;
+        valueTrackers.push_back(std::move(obj));
+        return valueTrackers.size() - 1;
+    }
+
+    ValueTrackerObject& getValueTrackerObject(size_t index) {
+        return valueTrackers[index];
     }
 
 	    size_t addCircle(float radius) {
@@ -2468,6 +4046,85 @@ public:
         event.startTime = getCamera3DEventStartTime();
         event.duration = duration;
         event.type = Camera3DEventType::Reset;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void setCamera3DTarget(float targetX, float targetY, float targetZ, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::MoveTarget;
+        event.targetX = targetX;
+        event.targetY = targetY;
+        event.targetZ = targetZ;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void shiftCamera3D(float dx, float dy, float dz, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::Shift;
+        event.dx = dx;
+        event.dy = dy;
+        event.dz = dz;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void setCamera3DDistance(float distance, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::SetDistance;
+        event.distance = distance;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void scaleCamera3DDistance(float scale, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::ScaleDistance;
+        event.scale = scale;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void rotateCamera3D(float axisX, float axisY, float axisZ, float angleRadians, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::Rotate;
+        event.axisX = axisX;
+        event.axisY = axisY;
+        event.axisZ = axisZ;
+        event.angle = angleRadians;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void beginAmbientCameraRotation3D(float rateRadians) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = 0.0f;
+        event.type = Camera3DEventType::AmbientRotationStart;
+        event.rate = rateRadians;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void stopAmbientCameraRotation3D() {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = 0.0f;
+        event.type = Camera3DEventType::AmbientRotationStop;
+        enqueueCamera3DEvent(std::move(event));
+    }
+
+    void reorientCamera3D(float theta, float phi, float duration = 0.0f) {
+        Camera3DEvent event;
+        event.startTime = getCamera3DEventStartTime();
+        event.duration = duration;
+        event.type = Camera3DEventType::Reorient;
+        event.theta = theta;
+        event.phi = phi;
         enqueueCamera3DEvent(std::move(event));
     }
 
@@ -4353,6 +6010,13 @@ public:
         float sceneTime = elapsedTime;
 
         Camera3DState& cam = camera3D;
+        float dt = 0.0f;
+        if (cam.hasLastSceneTime) {
+            dt = sceneTime - cam.lastSceneTime;
+            if (dt < 0.0f) dt = 0.0f;
+        }
+        cam.lastSceneTime = sceneTime;
+        cam.hasLastSceneTime = true;
 
         auto cartesianToSpherical = [](float dx, float dy, float dz, float& outTheta, float& outPhi, float& outDistance) {
             outDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -4364,6 +6028,43 @@ public:
             float cosPhi = std::clamp(dy / outDistance, -1.0f, 1.0f);
             outPhi = std::acos(cosPhi);
             outTheta = std::atan2(dz, dx);
+        };
+
+        auto normalize3 = [](float& x, float& y, float& z) {
+            float len = std::sqrt(x * x + y * y + z * z);
+            if (len <= 1e-8f) return;
+            x /= len;
+            y /= len;
+            z /= len;
+        };
+
+        auto normalize3OrDefault = [](float& x, float& y, float& z) {
+            float len = std::sqrt(x * x + y * y + z * z);
+            if (len <= 1e-8f) {
+                x = 0.0f;
+                y = 0.0f;
+                z = 1.0f;
+                return;
+            }
+            x /= len;
+            y /= len;
+            z /= len;
+        };
+
+        auto rotateAroundAxis = [&](float vx, float vy, float vz,
+                                    float ax, float ay, float az,
+                                    float angle,
+                                    float& outX, float& outY, float& outZ) {
+            normalize3(ax, ay, az);
+            const float c = std::cos(angle);
+            const float s = std::sin(angle);
+            const float dot = vx * ax + vy * ay + vz * az;
+            const float crossX = ay * vz - az * vy;
+            const float crossY = az * vx - ax * vz;
+            const float crossZ = ax * vy - ay * vx;
+            outX = vx * c + crossX * s + ax * dot * (1.0f - c);
+            outY = vy * c + crossY * s + ay * dot * (1.0f - c);
+            outZ = vz * c + crossZ * s + az * dot * (1.0f - c);
         };
 
         // Advance 3D camera timeline: apply due events and step active animation.
@@ -4381,6 +6082,7 @@ public:
                         // Instant camera change.
                         cam.animating = false;
                         cam.orbitAnimating = false;
+                        cam.rotateAnimating = false;
                         cam.animStartTime = -1.0f;
                         cam.animDuration = 0.0f;
 
@@ -4405,6 +6107,89 @@ public:
                                 cam.eyeZ = cam.targetZ + z;
                                 break;
                             }
+                            case Camera3DEventType::MoveTarget: {
+                                float deltaX = ev.targetX - cam.targetX;
+                                float deltaY = ev.targetY - cam.targetY;
+                                float deltaZ = ev.targetZ - cam.targetZ;
+                                cam.targetX = ev.targetX;
+                                cam.targetY = ev.targetY;
+                                cam.targetZ = ev.targetZ;
+                                cam.eyeX += deltaX;
+                                cam.eyeY += deltaY;
+                                cam.eyeZ += deltaZ;
+                                break;
+                            }
+                            case Camera3DEventType::Shift:
+                                cam.eyeX += ev.dx;
+                                cam.eyeY += ev.dy;
+                                cam.eyeZ += ev.dz;
+                                cam.targetX += ev.dx;
+                                cam.targetY += ev.dy;
+                                cam.targetZ += ev.dz;
+                                break;
+                            case Camera3DEventType::SetDistance: {
+                                float relX = cam.eyeX - cam.targetX;
+                                float relY = cam.eyeY - cam.targetY;
+                                float relZ = cam.eyeZ - cam.targetZ;
+                                normalize3OrDefault(relX, relY, relZ);
+                                float distance = std::max(ev.distance, 0.0001f);
+                                cam.eyeX = cam.targetX + relX * distance;
+                                cam.eyeY = cam.targetY + relY * distance;
+                                cam.eyeZ = cam.targetZ + relZ * distance;
+                                break;
+                            }
+                            case Camera3DEventType::ScaleDistance: {
+                                float relX = cam.eyeX - cam.targetX;
+                                float relY = cam.eyeY - cam.targetY;
+                                float relZ = cam.eyeZ - cam.targetZ;
+                                float currentDistance = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+                                normalize3OrDefault(relX, relY, relZ);
+                                float distance = std::max(currentDistance * ev.scale, 0.0001f);
+                                cam.eyeX = cam.targetX + relX * distance;
+                                cam.eyeY = cam.targetY + relY * distance;
+                                cam.eyeZ = cam.targetZ + relZ * distance;
+                                break;
+                            }
+                            case Camera3DEventType::Rotate: {
+                                float relX = cam.eyeX - cam.targetX;
+                                float relY = cam.eyeY - cam.targetY;
+                                float relZ = cam.eyeZ - cam.targetZ;
+                                float newRelX, newRelY, newRelZ;
+                                rotateAroundAxis(relX, relY, relZ, ev.axisX, ev.axisY, ev.axisZ, ev.angle, newRelX, newRelY, newRelZ);
+                                cam.eyeX = cam.targetX + newRelX;
+                                cam.eyeY = cam.targetY + newRelY;
+                                cam.eyeZ = cam.targetZ + newRelZ;
+
+                                float newUpX, newUpY, newUpZ;
+                                rotateAroundAxis(cam.upX, cam.upY, cam.upZ, ev.axisX, ev.axisY, ev.axisZ, ev.angle, newUpX, newUpY, newUpZ);
+                                cam.upX = newUpX;
+                                cam.upY = newUpY;
+                                cam.upZ = newUpZ;
+                                normalize3(cam.upX, cam.upY, cam.upZ);
+                                break;
+                            }
+                            case Camera3DEventType::AmbientRotationStart:
+                                cam.ambientRotation = true;
+                                cam.ambientRotationRate = ev.rate;
+                                break;
+                            case Camera3DEventType::AmbientRotationStop:
+                                cam.ambientRotation = false;
+                                cam.ambientRotationRate = 0.0f;
+                                break;
+                            case Camera3DEventType::Reorient: {
+                                float relX = cam.eyeX - cam.targetX;
+                                float relY = cam.eyeY - cam.targetY;
+                                float relZ = cam.eyeZ - cam.targetZ;
+                                float distance = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+                                if (distance < 0.0001f) distance = 0.0001f;
+                                float x = distance * std::sin(ev.phi) * std::cos(ev.theta);
+                                float y = distance * std::cos(ev.phi);
+                                float z = distance * std::sin(ev.phi) * std::sin(ev.theta);
+                                cam.eyeX = cam.targetX + x;
+                                cam.eyeY = cam.targetY + y;
+                                cam.eyeZ = cam.targetZ + z;
+                                break;
+                            }
                             case Camera3DEventType::Reset:
                                 cam.eyeX = 0.0f;
                                 cam.eyeY = 2.0f;
@@ -4413,6 +6198,9 @@ public:
                                 cam.targetY = 0.0f;
                                 cam.targetZ = 0.0f;
                                 cam.fovY = 45.0f;
+                                cam.upX = 0.0f;
+                                cam.upY = 1.0f;
+                                cam.upZ = 0.0f;
                                 break;
                         }
 
@@ -4428,11 +6216,18 @@ public:
                     cam.startTargetY = cam.targetY;
                     cam.startTargetZ = cam.targetZ;
                     cam.startFovY = cam.fovY;
+                    cam.startUpX = cam.upX;
+                    cam.startUpY = cam.upY;
+                    cam.startUpZ = cam.upZ;
 
                     cam.animStartTime = sceneTime;
                     cam.animDuration = ev.duration;
                     cam.animating = true;
                     cam.orbitAnimating = false;
+                    cam.rotateAnimating = false;
+                    cam.destUpX = cam.upX;
+                    cam.destUpY = cam.upY;
+                    cam.destUpZ = cam.upZ;
 
                     switch (ev.type) {
                         case Camera3DEventType::SetPose:
@@ -4461,6 +6256,9 @@ public:
                             cam.destTargetY = 0.0f;
                             cam.destTargetZ = 0.0f;
                             cam.destFovY = 45.0f;
+                            cam.destUpX = 0.0f;
+                            cam.destUpY = 1.0f;
+                            cam.destUpZ = 0.0f;
                             break;
                         case Camera3DEventType::Orbit: {
                             float dx = cam.eyeX - cam.targetX;
@@ -4474,6 +6272,125 @@ public:
                             cam.orbitAnimating = true;
                             break;
                         }
+                        case Camera3DEventType::MoveTarget: {
+                            float deltaX = ev.targetX - cam.targetX;
+                            float deltaY = ev.targetY - cam.targetY;
+                            float deltaZ = ev.targetZ - cam.targetZ;
+                            cam.destTargetX = ev.targetX;
+                            cam.destTargetY = ev.targetY;
+                            cam.destTargetZ = ev.targetZ;
+                            cam.destEyeX = cam.eyeX + deltaX;
+                            cam.destEyeY = cam.eyeY + deltaY;
+                            cam.destEyeZ = cam.eyeZ + deltaZ;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        }
+                        case Camera3DEventType::Shift:
+                            cam.destTargetX = cam.targetX + ev.dx;
+                            cam.destTargetY = cam.targetY + ev.dy;
+                            cam.destTargetZ = cam.targetZ + ev.dz;
+                            cam.destEyeX = cam.eyeX + ev.dx;
+                            cam.destEyeY = cam.eyeY + ev.dy;
+                            cam.destEyeZ = cam.eyeZ + ev.dz;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        case Camera3DEventType::SetDistance: {
+                            float relX = cam.eyeX - cam.targetX;
+                            float relY = cam.eyeY - cam.targetY;
+                            float relZ = cam.eyeZ - cam.targetZ;
+                            normalize3OrDefault(relX, relY, relZ);
+                            float distance = std::max(ev.distance, 0.0001f);
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destEyeX = cam.targetX + relX * distance;
+                            cam.destEyeY = cam.targetY + relY * distance;
+                            cam.destEyeZ = cam.targetZ + relZ * distance;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        }
+                        case Camera3DEventType::ScaleDistance: {
+                            float relX = cam.eyeX - cam.targetX;
+                            float relY = cam.eyeY - cam.targetY;
+                            float relZ = cam.eyeZ - cam.targetZ;
+                            float currentDistance = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+                            normalize3OrDefault(relX, relY, relZ);
+                            float distance = std::max(currentDistance * ev.scale, 0.0001f);
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destEyeX = cam.targetX + relX * distance;
+                            cam.destEyeY = cam.targetY + relY * distance;
+                            cam.destEyeZ = cam.targetZ + relZ * distance;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        }
+                        case Camera3DEventType::Rotate:
+                            cam.rotateAnimating = true;
+                            cam.rotateAxisX = ev.axisX;
+                            cam.rotateAxisY = ev.axisY;
+                            cam.rotateAxisZ = ev.axisZ;
+                            cam.rotateTotalAngle = ev.angle;
+                            cam.rotateStartRelX = cam.eyeX - cam.targetX;
+                            cam.rotateStartRelY = cam.eyeY - cam.targetY;
+                            cam.rotateStartRelZ = cam.eyeZ - cam.targetZ;
+                            cam.rotateStartUpX = cam.upX;
+                            cam.rotateStartUpY = cam.upY;
+                            cam.rotateStartUpZ = cam.upZ;
+                            cam.destEyeX = cam.eyeX;
+                            cam.destEyeY = cam.eyeY;
+                            cam.destEyeZ = cam.eyeZ;
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destFovY = cam.fovY;
+                            break;
+                        case Camera3DEventType::AmbientRotationStart:
+                            cam.ambientRotation = true;
+                            cam.ambientRotationRate = ev.rate;
+                            cam.destEyeX = cam.eyeX;
+                            cam.destEyeY = cam.eyeY;
+                            cam.destEyeZ = cam.eyeZ;
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destFovY = cam.fovY;
+                            cam.animating = false;
+                            cam.animStartTime = -1.0f;
+                            cam.animDuration = 0.0f;
+                            progressed = true;
+                            break;
+                        case Camera3DEventType::AmbientRotationStop:
+                            cam.ambientRotation = false;
+                            cam.ambientRotationRate = 0.0f;
+                            cam.destEyeX = cam.eyeX;
+                            cam.destEyeY = cam.eyeY;
+                            cam.destEyeZ = cam.eyeZ;
+                            cam.destTargetX = cam.targetX;
+                            cam.destTargetY = cam.targetY;
+                            cam.destTargetZ = cam.targetZ;
+                            cam.destFovY = cam.fovY;
+                            cam.animating = false;
+                            cam.animStartTime = -1.0f;
+                            cam.animDuration = 0.0f;
+                            progressed = true;
+                            break;
+                        case Camera3DEventType::Reorient: {
+                            float dx = cam.eyeX - cam.targetX;
+                            float dy = cam.eyeY - cam.targetY;
+                            float dz = cam.eyeZ - cam.targetZ;
+                            cartesianToSpherical(dx, dy, dz, cam.orbitStartTheta, cam.orbitStartPhi, cam.orbitStartDistance);
+                            cam.orbitDestTheta = ev.theta;
+                            cam.orbitDestPhi = ev.phi;
+                            cam.orbitDestDistance = cam.orbitStartDistance;
+                            cam.orbitAnimating = true;
+                            break;
+                        }
+                    }
+
+                    if (!cam.animating) {
+                        progressed = true;
+                        break;
                     }
 
                     break;  // Started an animation; update it below.
@@ -4502,6 +6419,26 @@ public:
                 cam.eyeX = cam.targetX + x;
                 cam.eyeY = cam.targetY + y;
                 cam.eyeZ = cam.targetZ + z;
+            } else if (cam.rotateAnimating) {
+                float angle = cam.rotateTotalAngle * eased;
+                float newRelX, newRelY, newRelZ;
+                rotateAroundAxis(cam.rotateStartRelX, cam.rotateStartRelY, cam.rotateStartRelZ,
+                                 cam.rotateAxisX, cam.rotateAxisY, cam.rotateAxisZ,
+                                 angle,
+                                 newRelX, newRelY, newRelZ);
+                cam.eyeX = cam.targetX + newRelX;
+                cam.eyeY = cam.targetY + newRelY;
+                cam.eyeZ = cam.targetZ + newRelZ;
+
+                float newUpX, newUpY, newUpZ;
+                rotateAroundAxis(cam.rotateStartUpX, cam.rotateStartUpY, cam.rotateStartUpZ,
+                                 cam.rotateAxisX, cam.rotateAxisY, cam.rotateAxisZ,
+                                 angle,
+                                 newUpX, newUpY, newUpZ);
+                cam.upX = newUpX;
+                cam.upY = newUpY;
+                cam.upZ = newUpZ;
+                normalize3(cam.upX, cam.upY, cam.upZ);
             } else {
                 // Interpolate eye position
                 cam.eyeX = cam.startEyeX + (cam.destEyeX - cam.startEyeX) * eased;
@@ -4515,13 +6452,40 @@ public:
 
                 // Interpolate FOV
                 cam.fovY = cam.startFovY + (cam.destFovY - cam.startFovY) * eased;
+
+                // Interpolate up vector (for reset / roll changes)
+                cam.upX = cam.startUpX + (cam.destUpX - cam.startUpX) * eased;
+                cam.upY = cam.startUpY + (cam.destUpY - cam.startUpY) * eased;
+                cam.upZ = cam.startUpZ + (cam.destUpZ - cam.startUpZ) * eased;
+                normalize3(cam.upX, cam.upY, cam.upZ);
             }
 
             // Animation complete
             if (t >= 1.0f) {
                 cam.animating = false;
                 cam.orbitAnimating = false;
+                cam.rotateAnimating = false;
             }
+        }
+
+        // Ambient rotation step (continuous orbit around world up)
+        if (cam.ambientRotation && !cam.animating && dt > 0.0f) {
+            const float angle = cam.ambientRotationRate * dt;
+            float relX = cam.eyeX - cam.targetX;
+            float relY = cam.eyeY - cam.targetY;
+            float relZ = cam.eyeZ - cam.targetZ;
+            float newRelX, newRelY, newRelZ;
+            rotateAroundAxis(relX, relY, relZ, 0.0f, 1.0f, 0.0f, angle, newRelX, newRelY, newRelZ);
+            cam.eyeX = cam.targetX + newRelX;
+            cam.eyeY = cam.targetY + newRelY;
+            cam.eyeZ = cam.targetZ + newRelZ;
+
+            float newUpX, newUpY, newUpZ;
+            rotateAroundAxis(cam.upX, cam.upY, cam.upZ, 0.0f, 1.0f, 0.0f, angle, newUpX, newUpY, newUpZ);
+            cam.upX = newUpX;
+            cam.upY = newUpY;
+            cam.upZ = newUpZ;
+            normalize3(cam.upX, cam.upY, cam.upZ);
         }
 
         // Build view matrix (LookAt)
@@ -4860,18 +6824,77 @@ public:
 	    }
 
     // Helper functions for Group operations
+    void ensureTextLayout(TextObject& obj) {
+        float fontScale = obj.fontSize / REFERENCE_FONT_SIZE;
+        obj.lines = splitTextIntoLines(obj.text, obj.maxWidth, fontScale);
+        std::vector<float> lineWidths;
+        calculateMultilineBounds(obj, fontScale, obj.totalWidth, obj.totalHeight, lineWidths);
+    }
+
+    void ensureMathLayout(MathObject& obj) {
+        if (!obj.layoutDirty && obj.layoutTextureWidth > 0 && obj.layoutTextureHeight > 0) return;
+
+        initMicroTeX();
+        if (!microTexInitialized) return;
+
+        // Parse LaTeX and read the layout size (no Vulkan texture creation).
+        std::wstring latexW = utf8ToWide(obj.latex);
+        tex::TeXRender* render = tex::LaTeX::parse(
+            latexW,
+            static_cast<int>(width),  // max width
+            obj.fontSize,
+            obj.fontSize / 3.0f,  // line space
+            0xFFFFFFFF  // opaque white (size is color-independent)
+        );
+
+        if (!render) {
+            obj.layoutTextureWidth = 0;
+            obj.layoutTextureHeight = 0;
+            obj.layoutDirty = false;
+            return;
+        }
+
+        int texWidth = render->getWidth();
+        int texHeight = render->getHeight();
+        delete render;
+
+        if (texWidth <= 0 || texHeight <= 0) {
+            obj.layoutTextureWidth = 0;
+            obj.layoutTextureHeight = 0;
+            obj.layoutDirty = false;
+            return;
+        }
+
+        // Match renderLatexToTexture(): add padding around the render.
+        const int padding = 4;
+        texWidth += padding * 2;
+        texHeight += padding * 2;
+
+        obj.layoutTextureWidth = static_cast<uint32_t>(texWidth);
+        obj.layoutTextureHeight = static_cast<uint32_t>(texHeight);
+        obj.layoutDirty = false;
+    }
+
     void getElementSize(const ElementRef& ref, float& width, float& height) {
         switch (ref.type) {
             case ElementType::Text: {
                 auto& obj = textObjects[ref.index];
+                ensureTextLayout(obj);
                 width = obj.totalWidth;
                 height = obj.totalHeight;
                 break;
             }
             case ElementType::Math: {
                 auto& obj = mathObjects[ref.index];
-                width = static_cast<float>(obj.textureWidth);
-                height = static_cast<float>(obj.textureHeight);
+                ensureMathLayout(obj);
+                const float baseSize = 64.0f;
+                const float scale = obj.fontSize / baseSize;
+                const float rawW =
+                    obj.textureWidth > 0 ? static_cast<float>(obj.textureWidth) : static_cast<float>(obj.layoutTextureWidth);
+                const float rawH =
+                    obj.textureHeight > 0 ? static_cast<float>(obj.textureHeight) : static_cast<float>(obj.layoutTextureHeight);
+                width = rawW * scale;
+                height = rawH * scale;
                 break;
             }
             case ElementType::Shape: {
@@ -4891,17 +6914,22 @@ public:
                         height = obj.height;
                         break;
                     case ShapeType::Triangle:
+                        width = obj.size;
+                        height = obj.size * 0.866f;  // sqrt(3)/2 for equilateral triangle height
+                        break;
                     case ShapeType::RegularPolygon:
+                        width = height = obj.circumradius * 2.0f;
+                        break;
                     case ShapeType::Star:
-                        width = height = obj.size;
+                        width = height = obj.outerRadius * 2.0f;
                         break;
                     case ShapeType::Line:
                     case ShapeType::Arrow:
                     case ShapeType::DoubleArrow:
                         width = std::abs(obj.x2 - obj.x1);
                         height = std::abs(obj.y2 - obj.y1);
-                        if (width < 10.0f) width = 10.0f;  // Minimum for thin lines
-                        if (height < 10.0f) height = 10.0f;
+                        width = std::max(width, std::max(10.0f, obj.lineThickness));
+                        height = std::max(height, std::max(10.0f, obj.lineThickness));
                         break;
                     case ShapeType::Arc:
                         width = height = obj.radius * 2.0f;
@@ -4910,6 +6938,76 @@ public:
                         width = obj.braceWidth;
                         height = obj.braceHeight;
                         break;
+                    case ShapeType::Polygon: {
+                        if (obj.polygonVerticesX.empty() || obj.polygonVerticesY.empty() ||
+                            obj.polygonVerticesX.size() != obj.polygonVerticesY.size()) {
+                            width = height = 0.0f;
+                            break;
+                        }
+                        float minX = obj.polygonVerticesX[0], maxX = obj.polygonVerticesX[0];
+                        float minY = obj.polygonVerticesY[0], maxY = obj.polygonVerticesY[0];
+                        for (size_t i = 1; i < obj.polygonVerticesX.size(); ++i) {
+                            minX = std::min(minX, obj.polygonVerticesX[i]);
+                            maxX = std::max(maxX, obj.polygonVerticesX[i]);
+                            minY = std::min(minY, obj.polygonVerticesY[i]);
+                            maxY = std::max(maxY, obj.polygonVerticesY[i]);
+                        }
+                        width = std::max(0.0f, maxX - minX);
+                        height = std::max(0.0f, maxY - minY);
+                        break;
+                    }
+                    case ShapeType::CubicBezier: {
+                        float minX = std::min(std::min(obj.bezierP0X, obj.bezierP1X), std::min(obj.bezierP2X, obj.bezierP3X));
+                        float maxX = std::max(std::max(obj.bezierP0X, obj.bezierP1X), std::max(obj.bezierP2X, obj.bezierP3X));
+                        float minY = std::min(std::min(obj.bezierP0Y, obj.bezierP1Y), std::min(obj.bezierP2Y, obj.bezierP3Y));
+                        float maxY = std::max(std::max(obj.bezierP0Y, obj.bezierP1Y), std::max(obj.bezierP2Y, obj.bezierP3Y));
+                        width = std::max(0.0f, maxX - minX);
+                        height = std::max(0.0f, maxY - minY);
+                        width = std::max(width, std::max(10.0f, obj.lineThickness));
+                        height = std::max(height, std::max(10.0f, obj.lineThickness));
+                        break;
+                    }
+                    case ShapeType::CustomPath: {
+                        bool hasAny = false;
+                        float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
+                        for (const auto& cmd : obj.pathCommands) {
+                            auto includePoint = [&](float px, float py) {
+                                if (!hasAny) {
+                                    minX = maxX = px;
+                                    minY = maxY = py;
+                                    hasAny = true;
+                                    return;
+                                }
+                                minX = std::min(minX, px);
+                                maxX = std::max(maxX, px);
+                                minY = std::min(minY, py);
+                                maxY = std::max(maxY, py);
+                            };
+
+                            switch (cmd.type) {
+                                case PathCommandType::MoveTo:
+                                case PathCommandType::LineTo:
+                                    includePoint(cmd.x, cmd.y);
+                                    break;
+                                case PathCommandType::CurveTo:
+                                    includePoint(cmd.cx1, cmd.cy1);
+                                    includePoint(cmd.cx2, cmd.cy2);
+                                    includePoint(cmd.x, cmd.y);
+                                    break;
+                                case PathCommandType::Close:
+                                    break;
+                            }
+                        }
+                        if (!hasAny) {
+                            width = height = 0.0f;
+                            break;
+                        }
+                        width = std::max(0.0f, maxX - minX);
+                        height = std::max(0.0f, maxY - minY);
+                        width = std::max(width, std::max(10.0f, obj.lineThickness));
+                        height = std::max(height, std::max(10.0f, obj.lineThickness));
+                        break;
+                    }
                     default:
                         width = height = 100.0f;
                         break;
@@ -4944,26 +7042,315 @@ public:
         switch (ref.type) {
             case ElementType::Text: {
                 auto& obj = textObjects[ref.index];
-                x = obj.posX;
-                y = obj.posY;
+                ensureTextLayout(obj);
+                float topLeftX = 0.0f;
+                float topLeftY = 0.0f;
+
+                if (obj.usePixelPosition) {
+                    topLeftX = std::max(0.0f, std::min(obj.posX, (float)width - obj.totalWidth));
+                    topLeftY = std::max(0.0f, std::min(obj.posY, (float)height - obj.totalHeight));
+                } else {
+                    float scaleX = 2.0f / width;
+                    float scaleY = 2.0f / height;
+                    float totalWidthNDC = obj.totalWidth * scaleX;
+                    float totalHeightNDC = obj.totalHeight * scaleY;
+                    float fontHeightNDC = obj.fontSize * scaleY;
+                    float margin = 0.02f;
+
+                    float blockStartX = 0.0f;
+                    float blockStartY = 0.0f;
+
+                    switch (obj.anchor) {
+                        case Position::CENTER:
+                            blockStartX = -totalWidthNDC / 2.0f;
+                            blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                            break;
+                        case Position::TOP:
+                            blockStartX = -totalWidthNDC / 2.0f;
+                            blockStartY = -1.0f + margin + fontHeightNDC;
+                            break;
+                        case Position::BOTTOM:
+                            blockStartX = -totalWidthNDC / 2.0f;
+                            blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;
+                            break;
+                        case Position::LEFT:
+                            blockStartX = -1.0f + margin;
+                            blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                            break;
+                        case Position::RIGHT:
+                            blockStartX = 1.0f - margin - totalWidthNDC;
+                            blockStartY = totalHeightNDC / 2.0f - fontHeightNDC;
+                            break;
+                        case Position::TLEFT:
+                            blockStartX = -1.0f + margin;
+                            blockStartY = -1.0f + margin + fontHeightNDC;
+                            break;
+                        case Position::TRIGHT:
+                            blockStartX = 1.0f - margin - totalWidthNDC;
+                            blockStartY = -1.0f + margin + fontHeightNDC;
+                            break;
+                        case Position::BLEFT:
+                            blockStartX = -1.0f + margin;
+                            blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;
+                            break;
+                        case Position::BRIGHT:
+                            blockStartX = 1.0f - margin - totalWidthNDC;
+                            blockStartY = 1.0f - margin - totalHeightNDC + fontHeightNDC;
+                            break;
+                    }
+
+                    topLeftX = (blockStartX + 1.0f) * 0.5f * width;
+
+                    float offset = obj.fontSize * scaleY / 2.0f;
+                    topLeftY = height * (1.0f - blockStartY - offset) / 2.0f;
+                }
+
+                x = topLeftX + obj.totalWidth / 2.0f;
+                y = topLeftY + obj.totalHeight / 2.0f;
                 break;
             }
             case ElementType::Math: {
                 auto& obj = mathObjects[ref.index];
-                x = obj.posX;
-                y = obj.posY;
+                ensureMathLayout(obj);
+
+                const float baseSize = 64.0f;
+                const float scale = obj.fontSize / baseSize;
+                const float rawW =
+                    obj.textureWidth > 0 ? static_cast<float>(obj.textureWidth) : static_cast<float>(obj.layoutTextureWidth);
+                const float rawH =
+                    obj.textureHeight > 0 ? static_cast<float>(obj.textureHeight) : static_cast<float>(obj.layoutTextureHeight);
+                const float quadWidth = rawW * scale;
+                const float quadHeight = rawH * scale;
+
+                float topLeftX = 0.0f;
+                float topLeftY = 0.0f;
+
+                if (obj.usePixelPosition) {
+                    topLeftX = std::max(0.0f, std::min(obj.posX, (float)width - quadWidth));
+                    topLeftY = std::max(0.0f, std::min(obj.posY, (float)height - quadHeight));
+                } else {
+                    float scaleX = 2.0f / width;
+                    float scaleY = 2.0f / height;
+                    float quadWidthNDC = quadWidth * scaleX;
+                    float quadHeightNDC = quadHeight * scaleY;
+                    float margin = 0.02f;
+
+                    float quadTopLeftX = 0.0f;
+                    float quadTopLeftY = 0.0f;
+
+                    switch (obj.anchor) {
+                        case Position::CENTER:
+                            quadTopLeftX = -quadWidthNDC / 2.0f;
+                            quadTopLeftY = quadHeightNDC / 2.0f;
+                            break;
+                        case Position::TOP:
+                            quadTopLeftX = -quadWidthNDC / 2.0f;
+                            quadTopLeftY = -1.0f + margin + quadHeightNDC;
+                            break;
+                        case Position::BOTTOM:
+                            quadTopLeftX = -quadWidthNDC / 2.0f;
+                            quadTopLeftY = 1.0f - margin;
+                            break;
+                        case Position::LEFT:
+                            quadTopLeftX = -1.0f + margin;
+                            quadTopLeftY = quadHeightNDC / 2.0f;
+                            break;
+                        case Position::RIGHT:
+                            quadTopLeftX = 1.0f - margin - quadWidthNDC;
+                            quadTopLeftY = quadHeightNDC / 2.0f;
+                            break;
+                        case Position::TLEFT:
+                            quadTopLeftX = -1.0f + margin;
+                            quadTopLeftY = -1.0f + margin + quadHeightNDC;
+                            break;
+                        case Position::TRIGHT:
+                            quadTopLeftX = 1.0f - margin - quadWidthNDC;
+                            quadTopLeftY = -1.0f + margin + quadHeightNDC;
+                            break;
+                        case Position::BLEFT:
+                            quadTopLeftX = -1.0f + margin;
+                            quadTopLeftY = 1.0f - margin;
+                            break;
+                        case Position::BRIGHT:
+                            quadTopLeftX = 1.0f - margin - quadWidthNDC;
+                            quadTopLeftY = 1.0f - margin;
+                            break;
+                    }
+
+                    topLeftX = (quadTopLeftX + 1.0f) * 0.5f * width;
+
+                    float offset = quadHeight * scaleY / 2.0f;
+                    topLeftY = height * (1.0f - quadTopLeftY - offset) / 2.0f;
+                }
+
+                x = topLeftX + quadWidth / 2.0f;
+                y = topLeftY + quadHeight / 2.0f;
                 break;
             }
             case ElementType::Shape: {
                 auto& obj = shapeObjects[ref.index];
-                x = obj.posX;
-                y = obj.posY;
+                switch (obj.type) {
+                    case ShapeType::Line:
+                    case ShapeType::Arrow:
+                    case ShapeType::DoubleArrow:
+                        x = (obj.x1 + obj.x2) / 2.0f;
+                        y = (obj.y1 + obj.y2) / 2.0f;
+                        break;
+                    case ShapeType::CubicBezier: {
+                        float minX = std::min(std::min(obj.bezierP0X, obj.bezierP1X), std::min(obj.bezierP2X, obj.bezierP3X));
+                        float maxX = std::max(std::max(obj.bezierP0X, obj.bezierP1X), std::max(obj.bezierP2X, obj.bezierP3X));
+                        float minY = std::min(std::min(obj.bezierP0Y, obj.bezierP1Y), std::min(obj.bezierP2Y, obj.bezierP3Y));
+                        float maxY = std::max(std::max(obj.bezierP0Y, obj.bezierP1Y), std::max(obj.bezierP2Y, obj.bezierP3Y));
+                        x = (minX + maxX) / 2.0f;
+                        y = (minY + maxY) / 2.0f;
+                        break;
+                    }
+                    case ShapeType::CustomPath: {
+                        bool hasAny = false;
+                        float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
+                        for (const auto& cmd : obj.pathCommands) {
+                            auto includePoint = [&](float px, float py) {
+                                if (!hasAny) {
+                                    minX = maxX = px;
+                                    minY = maxY = py;
+                                    hasAny = true;
+                                    return;
+                                }
+                                minX = std::min(minX, px);
+                                maxX = std::max(maxX, px);
+                                minY = std::min(minY, py);
+                                maxY = std::max(maxY, py);
+                            };
+
+                            switch (cmd.type) {
+                                case PathCommandType::MoveTo:
+                                case PathCommandType::LineTo:
+                                    includePoint(cmd.x, cmd.y);
+                                    break;
+                                case PathCommandType::CurveTo:
+                                    includePoint(cmd.cx1, cmd.cy1);
+                                    includePoint(cmd.cx2, cmd.cy2);
+                                    includePoint(cmd.x, cmd.y);
+                                    break;
+                                case PathCommandType::Close:
+                                    break;
+                            }
+                        }
+                        if (!hasAny) {
+                            x = y = 0.0f;
+                            break;
+                        }
+                        x = (minX + maxX) / 2.0f;
+                        y = (minY + maxY) / 2.0f;
+                        break;
+                    }
+                    default: {
+                        if (obj.usePixelPosition) {
+                            x = obj.posX;
+                            y = obj.posY;
+                            break;
+                        }
+
+                        float w = 0.0f;
+                        float h = 0.0f;
+                        getElementSize(ref, w, h);
+
+                        switch (obj.anchor) {
+                            case Position::CENTER:
+                                x = static_cast<float>(width) / 2.0f;
+                                y = static_cast<float>(height) / 2.0f;
+                                break;
+                            case Position::TOP:
+                                x = static_cast<float>(width) / 2.0f;
+                                y = h / 2.0f;
+                                break;
+                            case Position::BOTTOM:
+                                x = static_cast<float>(width) / 2.0f;
+                                y = static_cast<float>(height) - h / 2.0f;
+                                break;
+                            case Position::LEFT:
+                                x = w / 2.0f;
+                                y = static_cast<float>(height) / 2.0f;
+                                break;
+                            case Position::RIGHT:
+                                x = static_cast<float>(width) - w / 2.0f;
+                                y = static_cast<float>(height) / 2.0f;
+                                break;
+                            case Position::TLEFT:
+                                x = w / 2.0f;
+                                y = h / 2.0f;
+                                break;
+                            case Position::TRIGHT:
+                                x = static_cast<float>(width) - w / 2.0f;
+                                y = h / 2.0f;
+                                break;
+                            case Position::BLEFT:
+                                x = w / 2.0f;
+                                y = static_cast<float>(height) - h / 2.0f;
+                                break;
+                            case Position::BRIGHT:
+                                x = static_cast<float>(width) - w / 2.0f;
+                                y = static_cast<float>(height) - h / 2.0f;
+                                break;
+                        }
+                        break;
+                    }
+                }
                 break;
             }
             case ElementType::Image: {
                 auto& obj = imageObjects[ref.index];
-                x = obj.posX;
-                y = obj.posY;
+                if (obj.usePixelPosition) {
+                    x = obj.posX;
+                    y = obj.posY;
+                    break;
+                }
+
+                float margin = 0.02f;
+                float marginX = margin * static_cast<float>(width) / 2.0f;
+                float marginY = margin * static_cast<float>(height) / 2.0f;
+
+                float w = obj.displayWidth;
+                float h = obj.displayHeight;
+
+                switch (obj.anchor) {
+                    case Position::CENTER:
+                        x = static_cast<float>(width) / 2.0f;
+                        y = static_cast<float>(height) / 2.0f;
+                        break;
+                    case Position::TOP:
+                        x = static_cast<float>(width) / 2.0f;
+                        y = marginY + h / 2.0f;
+                        break;
+                    case Position::BOTTOM:
+                        x = static_cast<float>(width) / 2.0f;
+                        y = static_cast<float>(height) - marginY - h / 2.0f;
+                        break;
+                    case Position::LEFT:
+                        x = marginX + w / 2.0f;
+                        y = static_cast<float>(height) / 2.0f;
+                        break;
+                    case Position::RIGHT:
+                        x = static_cast<float>(width) - marginX - w / 2.0f;
+                        y = static_cast<float>(height) / 2.0f;
+                        break;
+                    case Position::TLEFT:
+                        x = marginX + w / 2.0f;
+                        y = marginY + h / 2.0f;
+                        break;
+                    case Position::TRIGHT:
+                        x = static_cast<float>(width) - marginX - w / 2.0f;
+                        y = marginY + h / 2.0f;
+                        break;
+                    case Position::BLEFT:
+                        x = marginX + w / 2.0f;
+                        y = static_cast<float>(height) - marginY - h / 2.0f;
+                        break;
+                    case Position::BRIGHT:
+                        x = static_cast<float>(width) - marginX - w / 2.0f;
+                        y = static_cast<float>(height) - marginY - h / 2.0f;
+                        break;
+                }
                 break;
             }
             case ElementType::Graph: {
@@ -4989,25 +7376,91 @@ public:
         switch (ref.type) {
             case ElementType::Text: {
                 auto& obj = textObjects[ref.index];
-                obj.posX = x;
-                obj.posY = y;
+                ensureTextLayout(obj);
+                obj.posX = x - obj.totalWidth / 2.0f;
+                obj.posY = y - obj.totalHeight / 2.0f;
                 obj.usePixelPosition = true;
                 vertexBufferDirty = true;
                 break;
             }
             case ElementType::Math: {
                 auto& obj = mathObjects[ref.index];
-                obj.posX = x;
-                obj.posY = y;
+                ensureMathLayout(obj);
+                const float baseSize = 64.0f;
+                const float scale = obj.fontSize / baseSize;
+                const float rawW =
+                    obj.textureWidth > 0 ? static_cast<float>(obj.textureWidth) : static_cast<float>(obj.layoutTextureWidth);
+                const float rawH =
+                    obj.textureHeight > 0 ? static_cast<float>(obj.textureHeight) : static_cast<float>(obj.layoutTextureHeight);
+                const float quadWidth = rawW * scale;
+                const float quadHeight = rawH * scale;
+
+                obj.posX = x - quadWidth / 2.0f;
+                obj.posY = y - quadHeight / 2.0f;
                 obj.usePixelPosition = true;
                 mathVertexBufferDirty = true;
                 break;
             }
             case ElementType::Shape: {
                 auto& obj = shapeObjects[ref.index];
-                obj.posX = x;
-                obj.posY = y;
                 obj.usePixelPosition = true;
+                float currentX = 0.0f;
+                float currentY = 0.0f;
+                getElementPosition(ref, currentX, currentY);
+                float dx = x - currentX;
+                float dy = y - currentY;
+
+                switch (obj.type) {
+                    case ShapeType::Line:
+                    case ShapeType::Arrow:
+                    case ShapeType::DoubleArrow:
+                        obj.x1 += dx;
+                        obj.y1 += dy;
+                        obj.x2 += dx;
+                        obj.y2 += dy;
+                        obj.posX = x;
+                        obj.posY = y;
+                        break;
+                    case ShapeType::CubicBezier:
+                        obj.bezierP0X += dx;
+                        obj.bezierP0Y += dy;
+                        obj.bezierP1X += dx;
+                        obj.bezierP1Y += dy;
+                        obj.bezierP2X += dx;
+                        obj.bezierP2Y += dy;
+                        obj.bezierP3X += dx;
+                        obj.bezierP3Y += dy;
+                        obj.posX = x;
+                        obj.posY = y;
+                        break;
+                    case ShapeType::CustomPath:
+                        for (auto& cmd : obj.pathCommands) {
+                            switch (cmd.type) {
+                                case PathCommandType::MoveTo:
+                                case PathCommandType::LineTo:
+                                    cmd.x += dx;
+                                    cmd.y += dy;
+                                    break;
+                                case PathCommandType::CurveTo:
+                                    cmd.cx1 += dx;
+                                    cmd.cy1 += dy;
+                                    cmd.cx2 += dx;
+                                    cmd.cy2 += dy;
+                                    cmd.x += dx;
+                                    cmd.y += dy;
+                                    break;
+                                case PathCommandType::Close:
+                                    break;
+                            }
+                        }
+                        obj.posX = x;
+                        obj.posY = y;
+                        break;
+                    default:
+                        obj.posX = x;
+                        obj.posY = y;
+                        break;
+                }
                 shapeVertexBufferDirty = true;
                 break;
             }
@@ -5387,6 +7840,10 @@ private:
         if (cameraUBO != VK_NULL_HANDLE) {
             vkDestroyBuffer(device, cameraUBO, nullptr);
             vkFreeMemory(device, cameraUBOMemory, nullptr);
+        }
+        if (cameraUBOFixed != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, cameraUBOFixed, nullptr);
+            vkFreeMemory(device, cameraUBOFixedMemory, nullptr);
         }
         if (cameraDescriptorSetLayout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, cameraDescriptorSetLayout, nullptr);
@@ -6923,6 +9380,12 @@ private:
     }
 
     void initMicroTeX() {
+        if (microTexInitialized) return;
+
+        if (basePath.empty()) {
+            basePath = getResourceBasePath();
+        }
+
         // Initialize Pango for font handling
         Pango::init();
 
@@ -8584,97 +11047,310 @@ private:
         std::vector<ShapeVertex> vertices;
         if (obj.pathCommands.empty()) return vertices;
 
-        // First pass: generate curve points from path commands
-        std::vector<std::pair<float, float>> pathPoints;
-        float currentX = 0.0f, currentY = 0.0f;
-        float startX = 0.0f, startY = 0.0f;  // For close command
+        // Compute bounds and animation base position
+        bool hasAny = false;
+        float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
+        auto includePoint = [&](float px, float py) {
+            if (!hasAny) {
+                minX = maxX = px;
+                minY = maxY = py;
+                hasAny = true;
+                return;
+            }
+            minX = std::min(minX, px);
+            maxX = std::max(maxX, px);
+            minY = std::min(minY, py);
+            maxY = std::max(maxY, py);
+        };
 
         for (const auto& cmd : obj.pathCommands) {
             switch (cmd.type) {
                 case PathCommandType::MoveTo:
-                    currentX = cmd.x;
-                    currentY = cmd.y;
-                    startX = currentX;
-                    startY = currentY;
-                    {
-                        float ndcX = (currentX / width) * 2.0f - 1.0f;
-                        float ndcY = (currentY / height) * 2.0f - 1.0f;
-                        pathPoints.push_back({ndcX, ndcY});
-                    }
-                    break;
-
                 case PathCommandType::LineTo:
-                    currentX = cmd.x;
-                    currentY = cmd.y;
-                    {
-                        float ndcX = (currentX / width) * 2.0f - 1.0f;
-                        float ndcY = (currentY / height) * 2.0f - 1.0f;
-                        pathPoints.push_back({ndcX, ndcY});
-                    }
+                    includePoint(cmd.x, cmd.y);
                     break;
-
-                case PathCommandType::CurveTo: {
-                    // Generate bezier curve points
-                    const int segments = 32;
-                    for (int i = 1; i <= segments; i++) {
-                        float t = i / (float)segments;
-                        float u = 1.0f - t;
-
-                        // Cubic bezier: P0=current, P1=ctrl1, P2=ctrl2, P3=target
-                        float x = u*u*u*currentX + 3.0f*u*u*t*cmd.cx1 +
-                                  3.0f*u*t*t*cmd.cx2 + t*t*t*cmd.x;
-                        float y = u*u*u*currentY + 3.0f*u*u*t*cmd.cy1 +
-                                  3.0f*u*t*t*cmd.cy2 + t*t*t*cmd.y;
-
-                        float ndcX = (x / width) * 2.0f - 1.0f;
-                        float ndcY = (y / height) * 2.0f - 1.0f;
-                        pathPoints.push_back({ndcX, ndcY});
-                    }
-                    currentX = cmd.x;
-                    currentY = cmd.y;
+                case PathCommandType::CurveTo:
+                    includePoint(cmd.cx1, cmd.cy1);
+                    includePoint(cmd.cx2, cmd.cy2);
+                    includePoint(cmd.x, cmd.y);
                     break;
-                }
-
                 case PathCommandType::Close:
-                    if (std::abs(currentX - startX) > 0.001f || std::abs(currentY - startY) > 0.001f) {
-                        float ndcX = (startX / width) * 2.0f - 1.0f;
-                        float ndcY = (startY / height) * 2.0f - 1.0f;
-                        pathPoints.push_back({ndcX, ndcY});
-                    }
-                    currentX = startX;
-                    currentY = startY;
                     break;
             }
         }
 
-        if (pathPoints.size() < 2) return vertices;
+        if (hasAny) {
+            float cx = (minX + maxX) / 2.0f;
+            float cy = (minY + maxY) / 2.0f;
+            obj.baseNdcX = (cx / width) * 2.0f - 1.0f;
+            obj.baseNdcY = -((cy / height) * 2.0f - 1.0f);
+        } else {
+            obj.baseNdcX = 0.0f;
+            obj.baseNdcY = 0.0f;
+        }
 
-        // Second pass: convert path to thick line strip
-        float thickness = obj.lineThickness > 0 ? obj.lineThickness : 2.0f;
-        float halfThick = (thickness / width);
+        auto pxToNdcX = [&](float x) { return (x / width) * 2.0f - 1.0f; };
+        auto pxToNdcY = [&](float y) { return -((y / height) * 2.0f - 1.0f); };
 
-        for (size_t i = 0; i < pathPoints.size() - 1; i++) {
-            float x1 = pathPoints[i].first;
-            float y1 = pathPoints[i].second;
-            float x2 = pathPoints[i + 1].first;
-            float y2 = pathPoints[i + 1].second;
+        const int curveSegments = (obj.customPathMode == CustomPathMode::Fill) ? 24 : 16;
 
-            float dx = x2 - x1;
-            float dy = y2 - y1;
-            float len = std::sqrt(dx * dx + dy * dy);
-            if (len < 0.0001f) continue;
+        if (obj.customPathMode == CustomPathMode::Stroke) {
+            std::vector<std::vector<Vec2f>> polylines;
+            std::vector<Vec2f> current;
+            Vec2f subStart{};
+            bool hasStart = false;
+            Vec2f currentPos{};
+            bool hasCurrent = false;
 
-            float nx = -dy / len * halfThick;
-            float ny = dx / len * halfThick;
+            auto flush = [&]() {
+                if (current.size() >= 2) {
+                    polylines.push_back(current);
+                }
+                current.clear();
+                hasStart = false;
+                hasCurrent = false;
+            };
 
-            // Two triangles forming a quad for this segment
-            vertices.push_back({{x1 - nx, y1 - ny}});
-            vertices.push_back({{x1 + nx, y1 + ny}});
-            vertices.push_back({{x2 + nx, y2 + ny}});
+            for (const auto& cmd : obj.pathCommands) {
+                switch (cmd.type) {
+                    case PathCommandType::MoveTo:
+                        flush();
+                        current.push_back({cmd.x, cmd.y});
+                        subStart = {cmd.x, cmd.y};
+                        hasStart = true;
+                        hasCurrent = true;
+                        currentPos = subStart;
+                        break;
+                    case PathCommandType::LineTo: {
+                        Vec2f p{cmd.x, cmd.y};
+                        if (!hasCurrent) {
+                            current.push_back(p);
+                            subStart = p;
+                            hasStart = true;
+                            hasCurrent = true;
+                            currentPos = p;
+                            break;
+                        }
+                        current.push_back(p);
+                        currentPos = p;
+                        break;
+                    }
+                    case PathCommandType::CurveTo: {
+                        Vec2f end{cmd.x, cmd.y};
+                        if (!hasCurrent) {
+                            current.push_back(end);
+                            subStart = end;
+                            hasStart = true;
+                            hasCurrent = true;
+                            currentPos = end;
+                            break;
+                        }
+                        CubicBezier2D curve{currentPos, {cmd.cx1, cmd.cy1}, {cmd.cx2, cmd.cy2}, end};
+                        for (int i = 1; i <= curveSegments; ++i) {
+                            float t = static_cast<float>(i) / static_cast<float>(curveSegments);
+                            current.push_back(cubicPoint(curve, t));
+                        }
+                        currentPos = end;
+                        break;
+                    }
+                    case PathCommandType::Close:
+                        if (hasStart && !current.empty() && !nearlyEqual(current.back(), subStart, 1e-3f)) {
+                            current.push_back(subStart);
+                        }
+                        flush();
+                        break;
+                }
+            }
 
-            vertices.push_back({{x1 - nx, y1 - ny}});
-            vertices.push_back({{x2 + nx, y2 + ny}});
-            vertices.push_back({{x2 - nx, y2 - ny}});
+            if (!current.empty()) {
+                if (current.size() >= 2) {
+                    polylines.push_back(current);
+                }
+            }
+
+            const float thickness = obj.lineThickness > 0 ? obj.lineThickness : 2.0f;
+            const float halfThickX = thickness / width;
+            const float halfThickY = thickness / height;
+
+            for (const auto& poly : polylines) {
+                for (size_t i = 0; i + 1 < poly.size(); ++i) {
+                    float x1 = pxToNdcX(poly[i].x);
+                    float y1 = pxToNdcY(poly[i].y);
+                    float x2 = pxToNdcX(poly[i + 1].x);
+                    float y2 = pxToNdcY(poly[i + 1].y);
+
+                    float dx = x2 - x1;
+                    float dy = y2 - y1;
+                    float len = std::sqrt(dx * dx + dy * dy);
+                    if (len < 1e-6f) continue;
+
+                    float nx = -dy / len * halfThickX;
+                    float ny = dx / len * halfThickY;
+
+                    vertices.push_back({{x1 - nx, y1 - ny}});
+                    vertices.push_back({{x1 + nx, y1 + ny}});
+                    vertices.push_back({{x2 + nx, y2 + ny}});
+
+                    vertices.push_back({{x1 - nx, y1 - ny}});
+                    vertices.push_back({{x2 + nx, y2 + ny}});
+                    vertices.push_back({{x2 - nx, y2 - ny}});
+                }
+            }
+
+            return vertices;
+        }
+
+        // Fill mode: extract closed rings (subpaths)
+        std::vector<std::vector<Vec2f>> rings;
+        std::vector<Vec2f> ring;
+        Vec2f subStart{};
+        bool hasStart = false;
+        Vec2f currentPos{};
+        bool hasCurrent = false;
+
+        auto flushRing = [&](bool closed) {
+            if (closed && ring.size() >= 3) {
+                if (nearlyEqual(ring.front(), ring.back(), 1e-3f)) ring.pop_back();
+                cleanupRing(ring);
+                if (ring.size() >= 3) rings.push_back(ring);
+            }
+            ring.clear();
+            hasStart = false;
+            hasCurrent = false;
+        };
+
+        for (const auto& cmd : obj.pathCommands) {
+            switch (cmd.type) {
+                case PathCommandType::MoveTo:
+                    flushRing(false);
+                    ring.push_back({cmd.x, cmd.y});
+                    subStart = {cmd.x, cmd.y};
+                    hasStart = true;
+                    hasCurrent = true;
+                    currentPos = subStart;
+                    break;
+                case PathCommandType::LineTo: {
+                    Vec2f p{cmd.x, cmd.y};
+                    if (!hasCurrent) {
+                        ring.push_back(p);
+                        subStart = p;
+                        hasStart = true;
+                        hasCurrent = true;
+                        currentPos = p;
+                        break;
+                    }
+                    ring.push_back(p);
+                    currentPos = p;
+                    break;
+                }
+                case PathCommandType::CurveTo: {
+                    Vec2f end{cmd.x, cmd.y};
+                    if (!hasCurrent) {
+                        ring.push_back(end);
+                        subStart = end;
+                        hasStart = true;
+                        hasCurrent = true;
+                        currentPos = end;
+                        break;
+                    }
+                    CubicBezier2D curve{currentPos, {cmd.cx1, cmd.cy1}, {cmd.cx2, cmd.cy2}, end};
+                    for (int i = 1; i <= curveSegments; ++i) {
+                        float t = static_cast<float>(i) / static_cast<float>(curveSegments);
+                        ring.push_back(cubicPoint(curve, t));
+                    }
+                    currentPos = end;
+                    break;
+                }
+                case PathCommandType::Close:
+                    if (hasStart && !ring.empty() && !nearlyEqual(ring.back(), subStart, 1e-3f)) {
+                        ring.push_back(subStart);
+                    }
+                    flushRing(true);
+                    break;
+            }
+        }
+
+        // Implicit close if the last point matches the first.
+        if (hasStart && ring.size() >= 3 && nearlyEqual(ring.front(), ring.back(), 1e-3f)) {
+            flushRing(true);
+        }
+
+        if (rings.empty()) return vertices;
+
+        struct RingInfo {
+            std::vector<Vec2f> points;
+            float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+            int parent = -1;
+            int depth = 0;
+        };
+
+        std::vector<RingInfo> infos;
+        infos.reserve(rings.size());
+
+        for (auto& r : rings) {
+            float rMinX = r[0].x, rMaxX = r[0].x, rMinY = r[0].y, rMaxY = r[0].y;
+            for (const auto& p : r) {
+                rMinX = std::min(rMinX, p.x);
+                rMaxX = std::max(rMaxX, p.x);
+                rMinY = std::min(rMinY, p.y);
+                rMaxY = std::max(rMaxY, p.y);
+            }
+            RingInfo info;
+            info.points = std::move(r);
+            info.minX = rMinX;
+            info.maxX = rMaxX;
+            info.minY = rMinY;
+            info.maxY = rMaxY;
+            infos.push_back(std::move(info));
+        }
+
+        auto bboxContains = [](const RingInfo& r, Vec2f p) {
+            return p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY;
+        };
+
+        for (size_t i = 0; i < infos.size(); ++i) {
+            Vec2f testPoint = infos[i].points[0];
+            int bestParent = -1;
+            double bestArea = std::numeric_limits<double>::infinity();
+
+            for (size_t j = 0; j < infos.size(); ++j) {
+                if (i == j) continue;
+                if (!bboxContains(infos[j], testPoint)) continue;
+                if (!pointInPolygon(testPoint, infos[j].points)) continue;
+                double area = std::abs(ringSignedArea(infos[j].points));
+                if (area < bestArea) {
+                    bestArea = area;
+                    bestParent = static_cast<int>(j);
+                }
+            }
+
+            infos[i].parent = bestParent;
+        }
+
+        for (size_t i = 0; i < infos.size(); ++i) {
+            int depth = 0;
+            int p = infos[i].parent;
+            while (p != -1) {
+                depth++;
+                p = infos[static_cast<size_t>(p)].parent;
+            }
+            infos[i].depth = depth;
+        }
+
+        for (size_t i = 0; i < infos.size(); ++i) {
+            if ((infos[i].depth % 2) != 0) continue;  // Only outer rings.
+
+            std::vector<std::vector<Vec2f>> holes;
+            for (size_t j = 0; j < infos.size(); ++j) {
+                if (infos[j].parent == static_cast<int>(i) && (infos[j].depth % 2) == 1) {
+                    holes.push_back(infos[j].points);
+                }
+            }
+
+            auto tris = triangulatePolygonWithHoles(infos[i].points, std::move(holes));
+            for (const auto& pt : tris) {
+                vertices.push_back({{pxToNdcX(pt.x), pxToNdcY(pt.y)}});
+            }
         }
 
         return vertices;
@@ -9128,16 +11804,16 @@ private:
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         poolSizes[0].descriptorCount = 1001;  // 1 font + 1000 math formulas
 
-        // For uniform buffers (2D camera UBO + 3D camera UBO + lighting UBO)
+        // For uniform buffers (2D camera UBO + fixed camera UBO + 3D camera UBO + lighting UBO)
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[1].descriptorCount = 3;  // 2D camera + 3D camera + lighting
+        poolSizes[1].descriptorCount = 4;  // 2D camera + fixed 2D camera + 3D camera + lighting
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;  // Allow freeing individual sets
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
         poolInfo.pPoolSizes = poolSizes.data();
-        poolInfo.maxSets = 1004;  // 1 font + 1000 math formulas + 1 2D camera + 1 3D camera + 1 lighting
+        poolInfo.maxSets = 1005;  // 1 font + 1000 math formulas + 2 camera UBOs + 1 3D camera + 1 lighting
 
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create descriptor pool!");
@@ -9217,6 +11893,43 @@ private:
         cameraDescriptorWrite.pBufferInfo = &cameraBufferInfo;
 
         vkUpdateDescriptorSets(device, 1, &cameraDescriptorWrite, 0, nullptr);
+
+        // Fixed camera UBO descriptor set (set 1 alternative): identity matrix (ignores camera transforms)
+        createBuffer(cameraBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     cameraUBOFixed, cameraUBOFixedMemory);
+
+        void* fixedData = nullptr;
+        vkMapMemory(device, cameraUBOFixedMemory, 0, cameraBufferSize, 0, &fixedData);
+        memcpy(fixedData, identityMatrix, cameraBufferSize);
+        vkUnmapMemory(device, cameraUBOFixedMemory);
+
+        VkDescriptorSetAllocateInfo fixedCameraAllocInfo{};
+        fixedCameraAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        fixedCameraAllocInfo.descriptorPool = descriptorPool;
+        fixedCameraAllocInfo.descriptorSetCount = 1;
+        fixedCameraAllocInfo.pSetLayouts = &cameraDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &fixedCameraAllocInfo, &cameraDescriptorSetFixed) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate fixed camera descriptor set!");
+        }
+
+        VkDescriptorBufferInfo fixedCameraBufferInfo{};
+        fixedCameraBufferInfo.buffer = cameraUBOFixed;
+        fixedCameraBufferInfo.offset = 0;
+        fixedCameraBufferInfo.range = cameraBufferSize;
+
+        VkWriteDescriptorSet fixedCameraDescriptorWrite{};
+        fixedCameraDescriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        fixedCameraDescriptorWrite.dstSet = cameraDescriptorSetFixed;
+        fixedCameraDescriptorWrite.dstBinding = 0;
+        fixedCameraDescriptorWrite.dstArrayElement = 0;
+        fixedCameraDescriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        fixedCameraDescriptorWrite.descriptorCount = 1;
+        fixedCameraDescriptorWrite.pBufferInfo = &fixedCameraBufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &fixedCameraDescriptorWrite, 0, nullptr);
 
         // Create 3D camera UBO buffer (128 bytes for 2 mat4s: view + projection)
         VkDeviceSize camera3DBufferSize = sizeof(float) * 32;  // 2 * mat4 = 32 floats
@@ -9929,6 +12642,7 @@ private:
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
         // Bind camera descriptor set (set 1)
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+        VkDescriptorSet activeCameraDescriptorSet2D = cameraDescriptorSet;
 
         // Build z-sorted index arrays for each element type
         // Text objects sorted by zIndex
@@ -10001,6 +12715,13 @@ private:
             for (size_t idx : textRenderOrder) {
                 const auto& textObj = textObjects[idx];
 
+                VkDescriptorSet desiredCameraSet = textObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeCameraDescriptorSet2D) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeCameraDescriptorSet2D = desiredCameraSet;
+                }
+
                 // Push animation offset, scale, rotation (vertex) + opacity, color, stroke, gradient, char animation (fragment)
                 float pushConstants[20] = {
                     textObj.currentOffsetX,  // Vertex stage
@@ -10022,9 +12743,9 @@ private:
                     // Per-character animation fields
                     textObj.charRevealProgress,
                     static_cast<float>(textObj.totalCharCount),
-                    // Separate stroke/fill opacities (use currentOpacity if not using separate mode)
-                    textObj.useSeparateStrokeFill ? textObj.strokeOpacity : textObj.currentOpacity,
-                    textObj.useSeparateStrokeFill ? textObj.fillOpacity : textObj.currentOpacity
+                    // Stroke/fill opacity = base opacity * (optional animation multiplier)
+                    textObj.strokeOpacity * (textObj.useSeparateStrokeFill ? textObj.strokeOpacityMul : 1.0f),
+                    textObj.fillOpacity * (textObj.useSeparateStrokeFill ? textObj.fillOpacityMul : 1.0f)
                 };
                 vkCmdPushConstants(commandBuffer, pipelineLayout,
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -10043,6 +12764,13 @@ private:
 
             for (size_t idx : mathRenderOrder) {
                 const auto& mathObj = mathObjects[idx];
+
+                VkDescriptorSet desiredCameraSet = mathObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeCameraDescriptorSet2D) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeCameraDescriptorSet2D = desiredCameraSet;
+                }
 
                 // Bind this formula's texture descriptor set
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -10063,8 +12791,8 @@ private:
                     0.0f,              // Gradient angle (disabled)
                     1.0f,              // charRevealProgress = 1.0 (all visible)
                     0.0f,              // totalCharCount = 0 (not used)
-                    mathObj.currentOpacity,  // strokeOpacity
-                    mathObj.currentOpacity   // fillOpacity
+                    mathObj.opacity,         // strokeOpacity (unused when strokeWidth=0)
+                    mathObj.opacity          // fillOpacity
                 };
                 vkCmdPushConstants(commandBuffer, pipelineLayout,
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -10084,6 +12812,13 @@ private:
             for (size_t idx : imageRenderOrder) {
                 const auto& imgObj = imageObjects[idx];
 
+                VkDescriptorSet desiredCameraSet = imgObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeCameraDescriptorSet2D) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeCameraDescriptorSet2D = desiredCameraSet;
+                }
+
                 // Bind this image's texture descriptor set
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipelineLayout, 0, 1, &imgObj.descriptorSet, 0, nullptr);
@@ -10102,8 +12837,8 @@ private:
                     0.0f,                    // Gradient angle (disabled)
                     1.0f,                    // charRevealProgress = 1.0 (all visible)
                     0.0f,                    // totalCharCount = 0 (not used)
-                    imgObj.currentOpacity,   // strokeOpacity
-                    imgObj.currentOpacity    // fillOpacity
+                    imgObj.opacity,          // strokeOpacity (unused when strokeWidth=0)
+                    imgObj.opacity           // fillOpacity
                 };
                 vkCmdPushConstants(commandBuffer, pipelineLayout,
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -10120,6 +12855,7 @@ private:
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapeGraphicsPipeline);
             // Bind camera descriptor set (set 1)
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapePipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+            VkDescriptorSet activeShapeCameraDescriptorSet = cameraDescriptorSet;
 
             VkBuffer shapeBuffers[] = {shapeVertexBuffer};
             VkDeviceSize offsets[] = {0};
@@ -10128,13 +12864,20 @@ private:
             for (size_t idx : shapeRenderOrder) {
                 const auto& shapeObj = shapeObjects[idx];
 
+                VkDescriptorSet desiredCameraSet = shapeObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeShapeCameraDescriptorSet) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shapePipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeShapeCameraDescriptorSet = desiredCameraSet;
+                }
+
                 // Push constants: offsetXY + scale + rotation (vertex) + opacity + fillRGB + strokeWidth + strokeRGB (fragment)
                 float pushConstants[12] = {
                     shapeObj.currentOffsetX,   // Vertex stage
                     shapeObj.currentOffsetY,   // Vertex stage
                     shapeObj.currentScale,     // Vertex stage (scale)
                     shapeObj.currentRotation,  // Vertex stage (rotation in radians)
-                    shapeObj.currentOpacity,   // Fragment stage (offset=16)
+                    shapeObj.currentOpacity * shapeObj.fillOpacity,  // Fragment stage (offset=16)
                     shapeObj.fillR,
                     shapeObj.fillG,
                     shapeObj.fillB,
@@ -10167,12 +12910,20 @@ private:
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, morphGraphicsPipeline);
                 // Bind camera descriptor set (set 1)
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, morphPipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+                VkDescriptorSet activeMorphCameraDescriptorSet = cameraDescriptorSet;
 
                 for (const auto& shapeObj : shapeObjects) {
                     if (shapeObj.cleared) continue;
                     if (!shapeObj.morphState.active) continue;
                     if (shapeObj.morphState.morphVertexBuffer == VK_NULL_HANDLE) continue;
                     if (shapeObj.morphState.normalizedVertexCount == 0) continue;
+
+                    VkDescriptorSet desiredCameraSet = shapeObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                    if (desiredCameraSet != activeMorphCameraDescriptorSet) {
+                        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            morphPipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                        activeMorphCameraDescriptorSet = desiredCameraSet;
+                    }
 
                     // Bind morph vertex buffer
                     VkBuffer morphBuffers[] = {shapeObj.morphState.morphVertexBuffer};
@@ -10188,7 +12939,7 @@ private:
                         shapeObj.currentRotation,            // Vertex: rotation
                         shapeObj.currentOffsetX,             // Vertex: offset X
                         shapeObj.currentOffsetY,             // Vertex: offset Y
-                        shapeObj.currentOpacity,             // Fragment: opacity
+                        shapeObj.currentOpacity * shapeObj.fillOpacity,  // Fragment: opacity
                         shapeObj.morphState.sourceR,         // Fragment: source R
                         shapeObj.morphState.sourceG,         // Fragment: source G
                         shapeObj.morphState.sourceB,         // Fragment: source B
@@ -10209,6 +12960,11 @@ private:
 
         // Render graphs (using shape pipeline - same vertex format) in z-sorted order
         if (graphVertexCount > 0 && graphVertexBuffer != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapeGraphicsPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shapePipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+            VkDescriptorSet activeGraphCameraDescriptorSet = cameraDescriptorSet;
+
             VkBuffer graphBuffers[] = {graphVertexBuffer};
             VkDeviceSize graphOffsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, graphBuffers, graphOffsets);
@@ -10221,6 +12977,13 @@ private:
                 float sceneTime = static_cast<float>(glfwGetTime() - sceneStartTime);
                 if (sceneTime < graphObj.scheduledStartTime) {
                     continue;  // Not yet scheduled to appear
+                }
+
+                VkDescriptorSet desiredCameraSet = graphObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeGraphCameraDescriptorSet) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shapePipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeGraphCameraDescriptorSet = desiredCameraSet;
                 }
 
                 // Push constants for this graph
@@ -10246,6 +13009,11 @@ private:
 
         // Draw vectors (mathematical vector arrows) in z-sorted order
         if (vectorVertexCount > 0 && vectorVertexBuffer != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shapeGraphicsPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shapePipelineLayout, 1, 1, &cameraDescriptorSet, 0, nullptr);
+            VkDescriptorSet activeVectorCameraDescriptorSet = cameraDescriptorSet;
+
             VkBuffer vertexBuffers[] = {vectorVertexBuffer};
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
@@ -10257,6 +13025,13 @@ private:
                 float sceneTime = static_cast<float>(glfwGetTime() - sceneStartTime);
                 if (sceneTime < vecObj.scheduledStartTime) {
                     continue;  // Not yet scheduled to appear
+                }
+
+                VkDescriptorSet desiredCameraSet = vecObj.fixedInFrame ? cameraDescriptorSetFixed : cameraDescriptorSet;
+                if (desiredCameraSet != activeVectorCameraDescriptorSet) {
+                    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shapePipelineLayout, 1, 1, &desiredCameraSet, 0, nullptr);
+                    activeVectorCameraDescriptorSet = desiredCameraSet;
                 }
 
                 // Push constants for this vector
@@ -10787,15 +13562,15 @@ private:
 	                obj.currentOpacity = 0.0f;
 	                obj.charRevealProgress = 1.0f;
 	                obj.useSeparateStrokeFill = false;
-	                obj.strokeOpacity = 1.0f;
-	                obj.fillOpacity = 1.0f;
+	                obj.strokeOpacityMul = 1.0f;
+	                obj.fillOpacityMul = 1.0f;
 	                break;
 	            case AnimationType::FadeOut:
 	                obj.currentOpacity = 1.0f;
 	                obj.charRevealProgress = 1.0f;
 	                obj.useSeparateStrokeFill = false;
-	                obj.strokeOpacity = 1.0f;
-	                obj.fillOpacity = 1.0f;
+	                obj.strokeOpacityMul = 1.0f;
+	                obj.fillOpacityMul = 1.0f;
 	                break;
 	            case AnimationType::MoveTo: {
 	                obj.moveStartX = obj.currentOffsetX;
@@ -10839,8 +13614,8 @@ private:
 	                obj.currentOpacity = 1.0f;
 	                obj.charRevealProgress = 0.0f;
 	                obj.useSeparateStrokeFill = true;
-	                obj.strokeOpacity = 1.0f;
-	                obj.fillOpacity = 1.0f;
+	                obj.strokeOpacityMul = 1.0f;
+	                obj.fillOpacityMul = 1.0f;
 	                break;
 	            case AnimationType::LetterByLetter:
 	                obj.currentOpacity = 1.0f;
@@ -10851,8 +13626,8 @@ private:
 	                obj.currentOpacity = 1.0f;
 	                obj.charRevealProgress = 1.0f;
 	                obj.useSeparateStrokeFill = true;
-	                obj.strokeOpacity = 0.0f;
-	                obj.fillOpacity = 0.0f;
+	                obj.strokeOpacityMul = 0.0f;
+	                obj.fillOpacityMul = 0.0f;
 	                break;
 	            case AnimationType::Indicate:
 	                obj.originalColorR = obj.colorR;
@@ -11480,6 +14255,12 @@ private:
         void updateAnimation() {
             float currentTime = static_cast<float>(glfwGetTime());
             float sceneTime = currentTime - static_cast<float>(sceneStartTime);
+            float frameDt = 0.0f;
+            if (lastAnimationUpdateTime >= 0.0f) {
+                frameDt = currentTime - lastAnimationUpdateTime;
+                if (frameDt < 0.0f) frameDt = 0.0f;
+            }
+            lastAnimationUpdateTime = currentTime;
 
         // Check for scheduled clear (two-phase per event: fade out, then clear).
         if (!pendingClears.empty()) {
@@ -11574,8 +14355,8 @@ private:
                 textObj.currentOpacity = 1.0f;
                 textObj.charRevealProgress = easedProgress;
                 textObj.useSeparateStrokeFill = true;
-                textObj.strokeOpacity = 1.0f;
-                textObj.fillOpacity = 1.0f;
+                textObj.strokeOpacityMul = 1.0f;
+                textObj.fillOpacityMul = 1.0f;
                 // Handle directional offset
                 float offsetProgress = 1.0f - easedProgress;
                 calculateDirectionalOffset(textObj.animationDirection,
@@ -11605,13 +14386,13 @@ private:
                 float strokePhaseEnd = 0.5f;
                 if (easedProgress < strokePhaseEnd) {
                     float strokeProgress = easedProgress / strokePhaseEnd;
-                    textObj.strokeOpacity = strokeProgress;
-                    textObj.fillOpacity = 0.0f;
+                    textObj.strokeOpacityMul = strokeProgress;
+                    textObj.fillOpacityMul = 0.0f;
                 } else {
                     // Second half: fill animates in
                     float fillProgress = (easedProgress - strokePhaseEnd) / (1.0f - strokePhaseEnd);
-                    textObj.strokeOpacity = 1.0f;
-                    textObj.fillOpacity = fillProgress;
+                    textObj.strokeOpacityMul = 1.0f;
+                    textObj.fillOpacityMul = fillProgress;
                 }
             } else if (textObj.animationType == AnimationType::Pulse) {
                 // Pulse: scale up then back to original using ping-pong
@@ -11795,12 +14576,12 @@ private:
                     textObj.currentOffsetX = 0.0f;
                     textObj.currentOffsetY = 0.0f;
                     textObj.useSeparateStrokeFill = false;
-                    textObj.strokeOpacity = 1.0f;
-                    textObj.fillOpacity = 1.0f;
+                    textObj.strokeOpacityMul = 1.0f;
+                    textObj.fillOpacityMul = 1.0f;
                 } else if (textObj.animationType == AnimationType::DrawBorderThenFill) {
                     // DrawBorderThenFill complete: both stroke and fill fully visible
-                    textObj.strokeOpacity = 1.0f;
-                    textObj.fillOpacity = 1.0f;
+                    textObj.strokeOpacityMul = 1.0f;
+                    textObj.fillOpacityMul = 1.0f;
                     textObj.useSeparateStrokeFill = false;  // Return to normal rendering
                 } else if (textObj.animationType == AnimationType::Pulse ||
                            textObj.animationType == AnimationType::Indicate) {
@@ -12879,6 +15660,136 @@ private:
                 shape.animationType = AnimationType::None;
             }
         }
+
+        // Run per-frame updaters after all scheduled animations have been applied.
+        // ValueTrackers update first so dependent redraw callbacks see the latest value.
+        for (auto& tracker : valueTrackers) {
+            if (sceneTime < tracker.activeStartTime) continue;
+
+            // Start the next queued value animation if we're idle and it's time.
+            if (!tracker.animating && tracker.currentQueueIndex < tracker.animationQueue.size()) {
+                const auto& entry = tracker.animationQueue[tracker.currentQueueIndex];
+                if (sceneTime >= entry.startTime) {
+                    tracker.currentQueueIndex++;
+                    tracker.animating = true;
+                    tracker.animationSceneStartTime = entry.startTime;
+                    tracker.animationDuration = entry.duration;
+                    tracker.startValue = tracker.value;
+                    tracker.targetValue = entry.targetValue;
+                    tracker.activeEasing = entry.easing;
+                    tracker.animationStartTime = -1.0f;
+                }
+            }
+
+            if (tracker.animating) {
+                if (tracker.animationDuration <= 0.0f) {
+                    tracker.value = tracker.targetValue;
+                    tracker.animating = false;
+                    tracker.animationStartTime = -1.0f;
+                } else {
+                    if (tracker.animationStartTime < 0.0f) {
+                        tracker.animationStartTime =
+                            static_cast<float>(sceneStartTime) + tracker.animationSceneStartTime;
+                    }
+                    float elapsed = currentTime - tracker.animationStartTime;
+                    float progress = std::min(elapsed / tracker.animationDuration, 1.0f);
+                    float easedProgress = applyEasing(tracker.activeEasing, progress);
+                    tracker.value = tracker.startValue + (tracker.targetValue - tracker.startValue) * easedProgress;
+
+                    if (progress >= 1.0f) {
+                        tracker.value = tracker.targetValue;
+                        tracker.animating = false;
+                        tracker.animationStartTime = -1.0f;
+                    }
+                }
+            }
+
+            for (size_t u = 0; u < tracker.updaters.size(); ++u) {
+                auto fn = tracker.updaters[u];
+                fn(frameDt);
+            }
+        }
+
+        for (auto& textObj : textObjects) {
+            if (textObj.cleared) continue;
+            if (sceneTime < textObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < textObj.updaters.size(); ++u) {
+                auto fn = textObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& mathObj : mathObjects) {
+            if (mathObj.cleared) continue;
+            if (sceneTime < mathObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < mathObj.updaters.size(); ++u) {
+                auto fn = mathObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& shapeObj : shapeObjects) {
+            if (shapeObj.cleared) continue;
+            if (sceneTime < shapeObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < shapeObj.updaters.size(); ++u) {
+                auto fn = shapeObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& imgObj : imageObjects) {
+            if (imgObj.cleared) continue;
+            if (sceneTime < imgObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < imgObj.updaters.size(); ++u) {
+                auto fn = imgObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& graphObj : graphObjects) {
+            if (graphObj.cleared) continue;
+            if (sceneTime < graphObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < graphObj.updaters.size(); ++u) {
+                auto fn = graphObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& vecObj : vectorObjects) {
+            if (vecObj.cleared) continue;
+            if (sceneTime < vecObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < vecObj.updaters.size(); ++u) {
+                auto fn = vecObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& groupObj : groupObjects) {
+            if (groupObj.cleared) continue;
+            if (sceneTime < groupObj.scheduledStartTime) continue;
+            for (size_t u = 0; u < groupObj.updaters.size(); ++u) {
+                auto fn = groupObj.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& axes : axes3DObjects) {
+            if (axes.cleared) continue;
+            if (sceneTime < axes.scheduledStartTime) continue;
+            for (size_t u = 0; u < axes.updaters.size(); ++u) {
+                auto fn = axes.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& surf : surface3DObjects) {
+            if (surf.cleared) continue;
+            if (sceneTime < surf.scheduledStartTime) continue;
+            for (size_t u = 0; u < surf.updaters.size(); ++u) {
+                auto fn = surf.updaters[u];
+                fn(frameDt);
+            }
+        }
+        for (auto& shape : shape3DObjects) {
+            if (shape.cleared) continue;
+            if (sceneTime < shape.scheduledStartTime) continue;
+            for (size_t u = 0; u < shape.updaters.size(); ++u) {
+                auto fn = shape.updaters[u];
+                fn(frameDt);
+            }
+        }
     }
 
     void drawFrame() {
@@ -12936,6 +15847,29 @@ private:
 
         // Update animation state
         updateAnimation();
+
+        // Updaters may change geometry; rebuild buffers before recording draw commands.
+        if (vertexBufferDirty) {
+            rebuildVertexBuffer();
+        }
+        if (mathVertexBufferDirty) {
+            rebuildMathVertexBuffer();
+        }
+        if (shapeVertexBufferDirty) {
+            rebuildShapeVertexBuffer();
+        }
+        if (graphVertexBufferDirty) {
+            rebuildGraphVertexBuffer();
+        }
+        if (vectorVertexBufferDirty) {
+            rebuildVectorVertexBuffer();
+        }
+        if (imageVertexBufferDirty) {
+            rebuildImageVertexBuffer();
+        }
+        if (shape3DVertexBufferDirty) {
+            rebuild3DVertexBuffer();
+        }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
@@ -13534,6 +16468,12 @@ void TextElement::setSize(float points) {
     parent->pImpl->vertexBufferDirty = true;
 }
 
+void TextElement::setText(const std::string& text) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.text = text;
+    parent->pImpl->vertexBufferDirty = true;
+}
+
 void TextElement::setPosition(float x, float y) {
     auto& obj = parent->pImpl->getTextObject(textIndex);
     obj.posX = x;
@@ -13549,6 +16489,44 @@ void TextElement::setPosition(Position anchor) {
     parent->pImpl->vertexBufferDirty = true;
 }
 
+TextElement& TextElement::fix_in_frame() {
+    parent->pImpl->getTextObject(textIndex).fixedInFrame = true;
+    return *this;
+}
+
+TextElement& TextElement::unfix_from_frame() {
+    parent->pImpl->getTextObject(textIndex).fixedInFrame = false;
+    return *this;
+}
+
+void TextElement::shift(float dx, float dy) {
+    Submobject(*this).shift(dx, dy);
+}
+
+void TextElement::shift(Direction direction, float amount) {
+    Submobject(*this).shift(direction, amount);
+}
+
+void TextElement::move_to(float x, float y) {
+    Submobject(*this).move_to(x, y);
+}
+
+void TextElement::next_to(const Submobject& other, Direction direction, float buff) {
+    Submobject(*this).next_to(other, direction, buff);
+}
+
+void TextElement::to_edge(Direction direction, float buff) {
+    Submobject(*this).to_edge(direction, buff);
+}
+
+void TextElement::to_corner(Position corner, float buff) {
+    Submobject(*this).to_corner(corner, buff);
+}
+
+void TextElement::align_to(const Submobject& other, Direction direction) {
+    Submobject(*this).align_to(other, direction);
+}
+
 void TextElement::setColor(const std::string& hex) {
     parent->pImpl->getTextObject(textIndex).setColorHex(hex);
 }
@@ -13561,6 +16539,13 @@ void TextElement::setColor(float h, float s, float l) {
     parent->pImpl->getTextObject(textIndex).setColorHSL(h, s, l);
 }
 
+void TextElement::setOpacity(float opacity) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    float clamped = std::clamp(opacity, 0.0f, 1.0f);
+    obj.fillOpacity = clamped;
+    obj.strokeOpacity = clamped;
+}
+
 void TextElement::setStroke(float width) {
     parent->pImpl->getTextObject(textIndex).strokeWidth = width;
 }
@@ -13571,6 +16556,16 @@ void TextElement::setStrokeColor(const std::string& hex) {
 
 void TextElement::setStrokeColor(int r, int g, int b) {
     parent->pImpl->getTextObject(textIndex).setStrokeColorRGB(r, g, b);
+}
+
+void TextElement::setStrokeOpacity(float opacity) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.strokeOpacity = std::clamp(opacity, 0.0f, 1.0f);
+}
+
+void TextElement::setFillOpacity(float opacity) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.fillOpacity = std::clamp(opacity, 0.0f, 1.0f);
 }
 
 void TextElement::setGradient(const std::string& startHex, const std::string& endHex) {
@@ -13758,6 +16753,27 @@ void TextElement::setZIndex(int zIndex) {
 
 int TextElement::getZIndex() const {
     return parent->pImpl->getTextObject(textIndex).zIndex;
+}
+
+TextElement& TextElement::add_updater(std::function<void(TextElement&)> updater) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+TextElement& TextElement::add_updater(std::function<void(TextElement&, float)> updater) {
+    auto& obj = parent->pImpl->getTextObject(textIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+TextElement& TextElement::clear_updaters() {
+    parent->pImpl->getTextObject(textIndex).updaters.clear();
+    return *this;
 }
 
 // MathElement implementation
@@ -14115,7 +17131,113 @@ void MathElement::setSize(float points) {
     auto& obj = parent->pImpl->getMathObject(mathIndex);
     obj.fontSize = points;
     obj.textureDirty = true;  // Need to re-render at new size
+    obj.layoutDirty = true;
     parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setMath(const std::string& latex) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.latexRaw = latex;
+    obj.latex = latex;
+    obj.texColorRules.clear();
+    obj.textureDirty = true;
+    obj.layoutDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+}
+
+namespace {
+std::string normalizeMicroTexColorString(std::string color) {
+    // Trim whitespace
+    auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!color.empty() && isSpace(color.front())) color.erase(color.begin());
+    while (!color.empty() && isSpace(color.back())) color.pop_back();
+
+    // MicroTeX accepts "RRGGBB" (it prepends '#') or "#RRGGBB". Prefer no leading '#'.
+    if (!color.empty() && color.front() == '#') {
+        color.erase(color.begin());
+    }
+    return color;
+}
+
+std::string applyTexColorRules(
+    const std::string& raw,
+    const std::vector<std::pair<std::string, std::string>>& rules
+) {
+    struct Rule {
+        std::string tex;
+        std::string color;
+    };
+
+    std::vector<Rule> normalized;
+    normalized.reserve(rules.size());
+    for (const auto& [tex, color] : rules) {
+        if (tex.empty() || color.empty()) continue;
+        normalized.push_back(Rule{tex, normalizeMicroTexColorString(color)});
+    }
+    if (normalized.empty()) return raw;
+
+    std::string out;
+    out.reserve(raw.size() + normalized.size() * 16);
+
+    for (size_t i = 0; i < raw.size();) {
+        size_t bestLen = 0;
+        size_t bestRule = 0;
+        for (size_t r = 0; r < normalized.size(); ++r) {
+            const auto& tex = normalized[r].tex;
+            if (tex.size() <= bestLen) continue;
+            if (i + tex.size() <= raw.size() && raw.compare(i, tex.size(), tex) == 0) {
+                bestLen = tex.size();
+                bestRule = r;
+            }
+        }
+
+        if (bestLen > 0) {
+            out += "\\textcolor{";
+            out += normalized[bestRule].color;
+            out += "}{";
+            out.append(raw, i, bestLen);
+            out += "}";
+            i += bestLen;
+        } else {
+            out.push_back(raw[i]);
+            ++i;
+        }
+    }
+
+    return out;
+}
+}  // namespace
+
+MathElement& MathElement::set_color_by_tex(const std::string& tex, const std::string& color) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    if (obj.latexRaw.empty()) {
+        obj.latexRaw = obj.latex;
+    }
+
+    if (tex.empty() || color.empty()) {
+        return *this;
+    }
+
+    auto it = std::find_if(
+        obj.texColorRules.begin(),
+        obj.texColorRules.end(),
+        [&](const auto& rule) { return rule.first == tex; }
+    );
+    if (it != obj.texColorRules.end()) {
+        it->second = color;
+    } else {
+        obj.texColorRules.emplace_back(tex, color);
+    }
+
+    obj.latex = applyTexColorRules(obj.latexRaw, obj.texColorRules);
+    obj.textureDirty = true;  // Color is baked into texture
+    obj.layoutDirty = true;
+    parent->pImpl->mathVertexBufferDirty = true;
+    return *this;
+}
+
+MathElement& MathElement::set_color_by_tex(const std::string& tex, int r, int g, int b) {
+    return set_color_by_tex(tex, std::to_string(r) + "," + std::to_string(g) + "," + std::to_string(b));
 }
 
 void MathElement::setPosition(float x, float y) {
@@ -14131,6 +17253,44 @@ void MathElement::setPosition(Position anchor) {
     obj.anchor = anchor;
     obj.usePixelPosition = false;
     parent->pImpl->mathVertexBufferDirty = true;
+}
+
+MathElement& MathElement::fix_in_frame() {
+    parent->pImpl->getMathObject(mathIndex).fixedInFrame = true;
+    return *this;
+}
+
+MathElement& MathElement::unfix_from_frame() {
+    parent->pImpl->getMathObject(mathIndex).fixedInFrame = false;
+    return *this;
+}
+
+void MathElement::shift(float dx, float dy) {
+    Submobject(*this).shift(dx, dy);
+}
+
+void MathElement::shift(Direction direction, float amount) {
+    Submobject(*this).shift(direction, amount);
+}
+
+void MathElement::move_to(float x, float y) {
+    Submobject(*this).move_to(x, y);
+}
+
+void MathElement::next_to(const Submobject& other, Direction direction, float buff) {
+    Submobject(*this).next_to(other, direction, buff);
+}
+
+void MathElement::to_edge(Direction direction, float buff) {
+    Submobject(*this).to_edge(direction, buff);
+}
+
+void MathElement::to_corner(Position corner, float buff) {
+    Submobject(*this).to_corner(corner, buff);
+}
+
+void MathElement::align_to(const Submobject& other, Direction direction) {
+    Submobject(*this).align_to(other, direction);
 }
 
 void MathElement::setColor(const std::string& hex) {
@@ -14152,6 +17312,11 @@ void MathElement::setColor(float h, float s, float l) {
     obj.setColorHSL(h, s, l);
     obj.textureDirty = true;
     parent->pImpl->mathVertexBufferDirty = true;
+}
+
+void MathElement::setOpacity(float opacity) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.opacity = std::clamp(opacity, 0.0f, 1.0f);
 }
 
 void MathElement::under(TextElement& other, float padding) {
@@ -14300,6 +17465,27 @@ void MathElement::setZIndex(int zIndex) {
 
 int MathElement::getZIndex() const {
     return parent->pImpl->getMathObject(mathIndex).zIndex;
+}
+
+MathElement& MathElement::add_updater(std::function<void(MathElement&)> updater) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+MathElement& MathElement::add_updater(std::function<void(MathElement&, float)> updater) {
+    auto& obj = parent->pImpl->getMathObject(mathIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+MathElement& MathElement::clear_updaters() {
+    parent->pImpl->getMathObject(mathIndex).updaters.clear();
+    return *this;
 }
 
 // ShapeElement implementation
@@ -14620,6 +17806,44 @@ void ShapeElement::setPosition(Position anchor) {
     parent->pImpl->shapeVertexBufferDirty = true;
 }
 
+ShapeElement& ShapeElement::fix_in_frame() {
+    parent->pImpl->getShapeObject(shapeIndex).fixedInFrame = true;
+    return *this;
+}
+
+ShapeElement& ShapeElement::unfix_from_frame() {
+    parent->pImpl->getShapeObject(shapeIndex).fixedInFrame = false;
+    return *this;
+}
+
+void ShapeElement::shift(float dx, float dy) {
+    Submobject(*this).shift(dx, dy);
+}
+
+void ShapeElement::shift(Direction direction, float amount) {
+    Submobject(*this).shift(direction, amount);
+}
+
+void ShapeElement::move_to(float x, float y) {
+    Submobject(*this).move_to(x, y);
+}
+
+void ShapeElement::next_to(const Submobject& other, Direction direction, float buff) {
+    Submobject(*this).next_to(other, direction, buff);
+}
+
+void ShapeElement::to_edge(Direction direction, float buff) {
+    Submobject(*this).to_edge(direction, buff);
+}
+
+void ShapeElement::to_corner(Position corner, float buff) {
+    Submobject(*this).to_corner(corner, buff);
+}
+
+void ShapeElement::align_to(const Submobject& other, Direction direction) {
+    Submobject(*this).align_to(other, direction);
+}
+
 void ShapeElement::setFill(const std::string& hex) {
     auto& obj = parent->pImpl->getShapeObject(shapeIndex);
     obj.setFillHex(hex);
@@ -14630,19 +17854,98 @@ void ShapeElement::setFill(int r, int g, int b) {
     obj.setFillRGB(r, g, b);
 }
 
+void ShapeElement::setFillOpacity(float opacity) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.fillOpacity = std::clamp(opacity, 0.0f, 1.0f);
+}
+
 void ShapeElement::setStroke(float width) {
     auto& obj = parent->pImpl->getShapeObject(shapeIndex);
     obj.strokeWidth = width;
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow:
+        case ShapeType::Arc:
+        case ShapeType::CubicBezier:
+        case ShapeType::CustomPath:
+            obj.lineThickness = width;
+            parent->pImpl->shapeVertexBufferDirty = true;
+            break;
+        default:
+            break;
+    }
 }
 
 void ShapeElement::setStrokeColor(const std::string& hex) {
     auto& obj = parent->pImpl->getShapeObject(shapeIndex);
     obj.setStrokeColorHex(hex);
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow:
+        case ShapeType::Arc:
+        case ShapeType::CubicBezier:
+            obj.setFillHex(hex);
+            break;
+        case ShapeType::CustomPath:
+            if (obj.customPathMode == CustomPathMode::Stroke) {
+                obj.setFillHex(hex);
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 void ShapeElement::setStrokeColor(int r, int g, int b) {
     auto& obj = parent->pImpl->getShapeObject(shapeIndex);
     obj.setStrokeColorRGB(r, g, b);
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow:
+        case ShapeType::Arc:
+        case ShapeType::CubicBezier:
+            obj.setFillRGB(r, g, b);
+            break;
+        case ShapeType::CustomPath:
+            if (obj.customPathMode == CustomPathMode::Stroke) {
+                obj.setFillRGB(r, g, b);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ShapeElement::setStrokeOpacity(float opacity) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    float clamped = std::clamp(opacity, 0.0f, 1.0f);
+    obj.strokeOpacity = clamped;
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow:
+        case ShapeType::Arc:
+        case ShapeType::CubicBezier:
+            obj.fillOpacity = clamped;
+            break;
+        case ShapeType::CustomPath:
+            if (obj.customPathMode == CustomPathMode::Stroke) {
+                obj.fillOpacity = clamped;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ShapeElement::setOpacity(float opacity) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    float clamped = std::clamp(opacity, 0.0f, 1.0f);
+    obj.fillOpacity = clamped;
+    obj.strokeOpacity = clamped;
 }
 
 void ShapeElement::setZIndex(int zIndex) {
@@ -14651,6 +17954,235 @@ void ShapeElement::setZIndex(int zIndex) {
 
 int ShapeElement::getZIndex() const {
     return parent->pImpl->getShapeObject(shapeIndex).zIndex;
+}
+
+ShapeElement& ShapeElement::add_updater(std::function<void(ShapeElement&)> updater) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+ShapeElement& ShapeElement::add_updater(std::function<void(ShapeElement&, float)> updater) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+ShapeElement& ShapeElement::clear_updaters() {
+    parent->pImpl->getShapeObject(shapeIndex).updaters.clear();
+    return *this;
+}
+
+ShapeElement& ShapeElement::set_points_as_corners(const std::vector<std::pair<float, float>>& points) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.type = ShapeType::CustomPath;
+    obj.pathCommands.clear();
+    obj.customPathMode = CustomPathMode::Stroke;
+
+    if (!points.empty()) {
+        PathCommand move;
+        move.type = PathCommandType::MoveTo;
+        move.x = points[0].first;
+        move.y = points[0].second;
+        obj.pathCommands.push_back(move);
+
+        for (size_t i = 1; i < points.size(); ++i) {
+            PathCommand line;
+            line.type = PathCommandType::LineTo;
+            line.x = points[i].first;
+            line.y = points[i].second;
+            obj.pathCommands.push_back(line);
+        }
+    }
+
+    parent->pImpl->shapeVertexBufferDirty = true;
+    return *this;
+}
+
+ShapeElement& ShapeElement::set_points_smoothly(const std::vector<std::pair<float, float>>& points) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    obj.type = ShapeType::CustomPath;
+    obj.pathCommands.clear();
+    obj.customPathMode = CustomPathMode::Stroke;
+
+    if (points.size() < 2) {
+        parent->pImpl->shapeVertexBufferDirty = true;
+        return *this;
+    }
+
+    std::vector<Vec2f> pts;
+    pts.reserve(points.size());
+    for (const auto& p : points) {
+        pts.push_back({p.first, p.second});
+    }
+
+    std::vector<CubicBezier2D> curves;
+    curves.reserve(pts.size() - 1);
+
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        Vec2f p0 = pts[i];
+        Vec2f p3 = pts[i + 1];
+        Vec2f pm1 = (i > 0) ? pts[i - 1] : pts[i];
+        Vec2f p4 = (i + 2 < pts.size()) ? pts[i + 2] : pts[i + 1];
+
+        Vec2f p1 = p0 + (p3 - pm1) / 6.0f;
+        Vec2f p2 = p3 - (p4 - p0) / 6.0f;
+        curves.push_back({p0, p1, p2, p3});
+    }
+
+    setCustomPathFromCubics(obj, curves);
+    parent->pImpl->shapeVertexBufferDirty = true;
+    return *this;
+}
+
+std::pair<float, float> ShapeElement::get_start() const {
+    const auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto curves = shapeToCubics(obj);
+    if (curves.empty()) return {0.0f, 0.0f};
+    return {curves.front().p0.x, curves.front().p0.y};
+}
+
+std::pair<float, float> ShapeElement::get_end() const {
+    const auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto curves = shapeToCubics(obj);
+    if (curves.empty()) return {0.0f, 0.0f};
+    return {curves.back().p3.x, curves.back().p3.y};
+}
+
+std::pair<float, float> ShapeElement::point_from_proportion(float alpha) const {
+    const auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    auto curves = shapeToCubics(obj);
+    if (curves.empty()) return {0.0f, 0.0f};
+
+    auto [index, t] = curveIndexAndT(alpha, curves.size());
+    Vec2f p = cubicPoint(curves[index], t);
+    return {p.x, p.y};
+}
+
+ShapeElement ShapeElement::get_subcurve(float startAlpha, float endAlpha) const {
+    const auto& src = parent->pImpl->getShapeObject(shapeIndex);
+    auto curves = shapeToCubics(src);
+
+    float a = std::clamp(startAlpha, 0.0f, 1.0f);
+    float b = std::clamp(endAlpha, 0.0f, 1.0f);
+    if (b < a) std::swap(a, b);
+
+    std::vector<CubicBezier2D> out;
+    if (!curves.empty() && b > a) {
+        auto [aIndex, aT] = curveIndexAndT(a, curves.size());
+        auto [bIndex, bT] = curveIndexAndT(b, curves.size());
+
+        if (aIndex == bIndex) {
+            out.push_back(subCubic(curves[aIndex], aT, bT));
+        } else {
+            out.push_back(subCubic(curves[aIndex], aT, 1.0f));
+            for (size_t i = aIndex + 1; i < bIndex; ++i) {
+                out.push_back(curves[i]);
+            }
+            out.push_back(subCubic(curves[bIndex], 0.0f, bT));
+        }
+    }
+
+    const size_t idx = parent->pImpl->addCustomPath();
+    auto& dst = parent->pImpl->getShapeObject(idx);
+    dst.fillR = src.fillR;
+    dst.fillG = src.fillG;
+    dst.fillB = src.fillB;
+    dst.strokeWidth = src.strokeWidth;
+    dst.strokeR = src.strokeR;
+    dst.strokeG = src.strokeG;
+    dst.strokeB = src.strokeB;
+    dst.lineThickness = src.lineThickness;
+    dst.zIndex = src.zIndex;
+
+    setCustomPathFromCubics(dst, out);
+    parent->pImpl->shapeVertexBufferDirty = true;
+    return ShapeElement(parent, idx);
+}
+
+ShapeElement& ShapeElement::put_start_and_end_on(float startX, float startY, float endX, float endY) {
+    auto& obj = parent->pImpl->getShapeObject(shapeIndex);
+    Vec2f newStart{startX, startY};
+    Vec2f newEnd{endX, endY};
+
+    switch (obj.type) {
+        case ShapeType::Line:
+        case ShapeType::Arrow:
+        case ShapeType::DoubleArrow:
+            obj.x1 = startX;
+            obj.y1 = startY;
+            obj.x2 = endX;
+            obj.y2 = endY;
+            parent->pImpl->shapeVertexBufferDirty = true;
+            return *this;
+        case ShapeType::CubicBezier:
+        case ShapeType::CustomPath:
+            break;
+        default:
+            return *this;
+    }
+
+    auto curves = shapeToCubics(obj);
+    if (curves.empty()) return *this;
+
+    Vec2f oldStart = curves.front().p0;
+    Vec2f oldEnd = curves.back().p3;
+    Vec2f oldVec = oldEnd - oldStart;
+    Vec2f newVec = newEnd - newStart;
+    float oldLen = length(oldVec);
+    float newLen = length(newVec);
+
+    if (oldLen < 1e-6f) {
+        // Degenerate path; replace with a straight segment.
+        CubicBezier2D line = lineAsCubic(newStart, newEnd);
+        if (obj.type == ShapeType::CubicBezier) {
+            obj.bezierP0X = line.p0.x; obj.bezierP0Y = line.p0.y;
+            obj.bezierP1X = line.p1.x; obj.bezierP1Y = line.p1.y;
+            obj.bezierP2X = line.p2.x; obj.bezierP2Y = line.p2.y;
+            obj.bezierP3X = line.p3.x; obj.bezierP3Y = line.p3.y;
+        } else {
+            setCustomPathFromCubics(obj, {line});
+        }
+        parent->pImpl->shapeVertexBufferDirty = true;
+        return *this;
+    }
+
+    float scale = (newLen / oldLen);
+    float oldAng = std::atan2(oldVec.y, oldVec.x);
+    float newAng = std::atan2(newVec.y, newVec.x);
+    float rot = newAng - oldAng;
+    float c = std::cos(rot);
+    float s = std::sin(rot);
+
+    auto transformPoint = [&](Vec2f p) -> Vec2f {
+        Vec2f r = p - oldStart;
+        Vec2f rotated{r.x * c - r.y * s, r.x * s + r.y * c};
+        return newStart + rotated * scale;
+    };
+
+    for (auto& curve : curves) {
+        curve.p0 = transformPoint(curve.p0);
+        curve.p1 = transformPoint(curve.p1);
+        curve.p2 = transformPoint(curve.p2);
+        curve.p3 = transformPoint(curve.p3);
+    }
+
+    if (obj.type == ShapeType::CubicBezier && curves.size() == 1) {
+        const auto& curve = curves.front();
+        obj.bezierP0X = curve.p0.x; obj.bezierP0Y = curve.p0.y;
+        obj.bezierP1X = curve.p1.x; obj.bezierP1Y = curve.p1.y;
+        obj.bezierP2X = curve.p2.x; obj.bezierP2Y = curve.p2.y;
+        obj.bezierP3X = curve.p3.x; obj.bezierP3Y = curve.p3.y;
+    } else {
+        setCustomPathFromCubics(obj, curves);
+    }
+
+    parent->pImpl->shapeVertexBufferDirty = true;
+    return *this;
 }
 
 // AxesElement implementation
@@ -14741,6 +18273,32 @@ void AxesElement::hide(float duration) {
     }
 }
 
+AxesElement& AxesElement::fix_in_frame() {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    for (size_t idx : axes.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    for (size_t idx : axes.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+AxesElement& AxesElement::unfix_from_frame() {
+    auto& axes = parent->pImpl->getAxesObject(axesIndex);
+    for (size_t idx : axes.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    for (size_t idx : axes.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = false;
+    }
+    return *this;
+}
+
 float AxesElement::toPixelX(float dataX) {
     auto& axes = parent->pImpl->getAxesObject(axesIndex);
     return parent->pImpl->dataToPixelX(dataX, axes);
@@ -14822,6 +18380,27 @@ void Axes3DElement::hide(float duration) {
     parent->pImpl->enqueueAnimation(axes, std::move(entry));
 }
 
+Axes3DElement& Axes3DElement::add_updater(std::function<void(Axes3DElement&)> updater) {
+    auto& obj = parent->pImpl->getAxes3DObject(axes3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+Axes3DElement& Axes3DElement::add_updater(std::function<void(Axes3DElement&, float)> updater) {
+    auto& obj = parent->pImpl->getAxes3DObject(axes3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+Axes3DElement& Axes3DElement::clear_updaters() {
+    parent->pImpl->getAxes3DObject(axes3DIndex).updaters.clear();
+    return *this;
+}
+
 // Surface3DElement implementation
 Surface3DElement::Surface3DElement(Catalyst* p, size_t idx) : parent(p), surface3DIndex(idx) {}
 
@@ -14879,6 +18458,27 @@ void Surface3DElement::hide(float duration) {
     entry.startTime = parent->pImpl->currentTimeCursor;
     entry.duration = duration;
     parent->pImpl->enqueueAnimation(surf, std::move(entry));
+}
+
+Surface3DElement& Surface3DElement::add_updater(std::function<void(Surface3DElement&)> updater) {
+    auto& obj = parent->pImpl->getSurface3DObject(surface3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+Surface3DElement& Surface3DElement::add_updater(std::function<void(Surface3DElement&, float)> updater) {
+    auto& obj = parent->pImpl->getSurface3DObject(surface3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+Surface3DElement& Surface3DElement::clear_updaters() {
+    parent->pImpl->getSurface3DObject(surface3DIndex).updaters.clear();
+    return *this;
 }
 
 void AxesElement::setZIndex(int zIndex) {
@@ -15083,6 +18683,27 @@ int Shape3DElement::getZIndex() const {
     return parent->pImpl->getShape3DObject(shape3DIndex).zIndex;
 }
 
+Shape3DElement& Shape3DElement::add_updater(std::function<void(Shape3DElement&)> updater) {
+    auto& obj = parent->pImpl->getShape3DObject(shape3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::add_updater(std::function<void(Shape3DElement&, float)> updater) {
+    auto& obj = parent->pImpl->getShape3DObject(shape3DIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+Shape3DElement& Shape3DElement::clear_updaters() {
+    parent->pImpl->getShape3DObject(shape3DIndex).updaters.clear();
+    return *this;
+}
+
 // GraphElement implementation
 GraphElement::GraphElement(Catalyst* p, size_t idx) : parent(p), graphIndex(idx) {}
 
@@ -15117,6 +18738,16 @@ void GraphElement::setThickness(float pixels) {
     parent->pImpl->graphVertexBufferDirty = true;
 }
 
+GraphElement& GraphElement::fix_in_frame() {
+    parent->pImpl->getGraphObject(graphIndex).fixedInFrame = true;
+    return *this;
+}
+
+GraphElement& GraphElement::unfix_from_frame() {
+    parent->pImpl->getGraphObject(graphIndex).fixedInFrame = false;
+    return *this;
+}
+
 void GraphElement::show(float duration) {
     auto& graph = parent->pImpl->getGraphObject(graphIndex);
     AnimationQueueEntry entry;
@@ -15141,6 +18772,27 @@ void GraphElement::setZIndex(int zIndex) {
 
 int GraphElement::getZIndex() const {
     return parent->pImpl->getGraphObject(graphIndex).zIndex;
+}
+
+GraphElement& GraphElement::add_updater(std::function<void(GraphElement&)> updater) {
+    auto& obj = parent->pImpl->getGraphObject(graphIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+GraphElement& GraphElement::add_updater(std::function<void(GraphElement&, float)> updater) {
+    auto& obj = parent->pImpl->getGraphObject(graphIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+GraphElement& GraphElement::clear_updaters() {
+    parent->pImpl->getGraphObject(graphIndex).updaters.clear();
+    return *this;
 }
 
 // VectorElement implementation
@@ -15171,6 +18823,16 @@ void VectorElement::setOrigin(float x, float y) {
     parent->pImpl->vectorVertexBufferDirty = true;
 }
 
+VectorElement& VectorElement::fix_in_frame() {
+    parent->pImpl->getVectorObject(vectorIndex).fixedInFrame = true;
+    return *this;
+}
+
+VectorElement& VectorElement::unfix_from_frame() {
+    parent->pImpl->getVectorObject(vectorIndex).fixedInFrame = false;
+    return *this;
+}
+
 void VectorElement::show(float duration) {
     auto& vec = parent->pImpl->getVectorObject(vectorIndex);
     AnimationQueueEntry entry;
@@ -15195,6 +18857,27 @@ void VectorElement::setZIndex(int zIndex) {
 
 int VectorElement::getZIndex() const {
     return parent->pImpl->getVectorObject(vectorIndex).zIndex;
+}
+
+VectorElement& VectorElement::add_updater(std::function<void(VectorElement&)> updater) {
+    auto& obj = parent->pImpl->getVectorObject(vectorIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+VectorElement& VectorElement::add_updater(std::function<void(VectorElement&, float)> updater) {
+    auto& obj = parent->pImpl->getVectorObject(vectorIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+VectorElement& VectorElement::clear_updaters() {
+    parent->pImpl->getVectorObject(vectorIndex).updaters.clear();
+    return *this;
 }
 
 // NumberLineElement implementation
@@ -15273,6 +18956,32 @@ void NumberLineElement::setPosition(Position anchor) {
         case Position::BLEFT: numLine.posX = margin; numLine.posY = h - margin; break;
         case Position::BRIGHT: numLine.posX = w - margin; numLine.posY = h - margin; break;
     }
+}
+
+NumberLineElement& NumberLineElement::fix_in_frame() {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    for (size_t idx : numLine.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    for (size_t idx : numLine.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+NumberLineElement& NumberLineElement::unfix_from_frame() {
+    auto& numLine = parent->pImpl->getNumberLineObject(numberLineIndex);
+    for (size_t idx : numLine.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    for (size_t idx : numLine.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = false;
+    }
+    return *this;
 }
 
 void NumberLineElement::show(float duration) {
@@ -15395,6 +19104,32 @@ void BarChartElement::setPosition(Position anchor) {
     parent->pImpl->generateBarChartElements(barChartIndex);
 }
 
+BarChartElement& BarChartElement::fix_in_frame() {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    for (size_t idx : chart.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    for (size_t idx : chart.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+BarChartElement& BarChartElement::unfix_from_frame() {
+    auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
+    for (size_t idx : chart.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    for (size_t idx : chart.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = false;
+    }
+    return *this;
+}
+
 void BarChartElement::show(float duration) {
     auto& chart = parent->pImpl->getBarChartObject(barChartIndex);
     // Show all sub-elements
@@ -15502,6 +19237,32 @@ void PieChartElement::setPosition(Position anchor) {
     parent->pImpl->generatePieChartElements(pieChartIndex);
 }
 
+PieChartElement& PieChartElement::fix_in_frame() {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    for (size_t idx : chart.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    for (size_t idx : chart.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+PieChartElement& PieChartElement::unfix_from_frame() {
+    auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
+    for (size_t idx : chart.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    for (size_t idx : chart.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = false;
+    }
+    return *this;
+}
+
 void PieChartElement::show(float duration) {
     auto& chart = parent->pImpl->getPieChartObject(pieChartIndex);
     // Show all sub-elements
@@ -15566,6 +19327,24 @@ void VectorFieldElement::setColor(int r, int g, int b) {
         shape.fillG = field.colorG;
         shape.fillB = field.colorB;
     }
+}
+
+VectorFieldElement& VectorFieldElement::fix_in_frame() {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    for (size_t idx : field.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+VectorFieldElement& VectorFieldElement::unfix_from_frame() {
+    auto& field = parent->pImpl->getVectorFieldObject(vectorFieldIndex);
+    for (size_t idx : field.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    return *this;
 }
 
 void VectorFieldElement::show(float duration) {
@@ -15802,6 +19581,32 @@ void TableElement::setPosition(Position anchor) {
     parent->pImpl->generateTableElements(tableIndex);
 }
 
+TableElement& TableElement::fix_in_frame() {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    for (size_t idx : table.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = true;
+    }
+    for (size_t idx : table.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = true;
+    }
+    return *this;
+}
+
+TableElement& TableElement::unfix_from_frame() {
+    auto& table = parent->pImpl->getTableObject(tableIndex);
+    for (size_t idx : table.shapeIndices) {
+        if (idx >= parent->pImpl->shapeObjects.size()) continue;
+        parent->pImpl->getShapeObject(idx).fixedInFrame = false;
+    }
+    for (size_t idx : table.textIndices) {
+        if (idx >= parent->pImpl->textObjects.size()) continue;
+        parent->pImpl->getTextObject(idx).fixedInFrame = false;
+    }
+    return *this;
+}
+
 void TableElement::show(float duration) {
     auto& table = parent->pImpl->getTableObject(tableIndex);
 
@@ -15858,6 +19663,11 @@ void ImageElement::setSize(float width, float height) {
     img.displayWidth = width;
     img.displayHeight = height;
     parent->pImpl->imageVertexBufferDirty = true;
+}
+
+void ImageElement::setOpacity(float opacity) {
+    auto& img = parent->pImpl->getImageObject(imageIndex);
+    img.opacity = std::clamp(opacity, 0.0f, 1.0f);
 }
 
 void ImageElement::setPosition(float x, float y) {
@@ -15919,6 +19729,44 @@ void ImageElement::setPosition(Position anchor) {
     }
 
     parent->pImpl->imageVertexBufferDirty = true;
+}
+
+ImageElement& ImageElement::fix_in_frame() {
+    parent->pImpl->getImageObject(imageIndex).fixedInFrame = true;
+    return *this;
+}
+
+ImageElement& ImageElement::unfix_from_frame() {
+    parent->pImpl->getImageObject(imageIndex).fixedInFrame = false;
+    return *this;
+}
+
+void ImageElement::shift(float dx, float dy) {
+    Submobject(*this).shift(dx, dy);
+}
+
+void ImageElement::shift(Direction direction, float amount) {
+    Submobject(*this).shift(direction, amount);
+}
+
+void ImageElement::move_to(float x, float y) {
+    Submobject(*this).move_to(x, y);
+}
+
+void ImageElement::next_to(const Submobject& other, Direction direction, float buff) {
+    Submobject(*this).next_to(other, direction, buff);
+}
+
+void ImageElement::to_edge(Direction direction, float buff) {
+    Submobject(*this).to_edge(direction, buff);
+}
+
+void ImageElement::to_corner(Position corner, float buff) {
+    Submobject(*this).to_corner(corner, buff);
+}
+
+void ImageElement::align_to(const Submobject& other, Direction direction) {
+    Submobject(*this).align_to(other, direction);
 }
 
 ImageElement& ImageElement::setEasing(Easing easing) {
@@ -16109,6 +19957,122 @@ int ImageElement::getZIndex() const {
     return parent->pImpl->getImageObject(imageIndex).zIndex;
 }
 
+ImageElement& ImageElement::add_updater(std::function<void(ImageElement&)> updater) {
+    auto& obj = parent->pImpl->getImageObject(imageIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+ImageElement& ImageElement::add_updater(std::function<void(ImageElement&, float)> updater) {
+    auto& obj = parent->pImpl->getImageObject(imageIndex);
+    obj.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+ImageElement& ImageElement::clear_updaters() {
+    parent->pImpl->getImageObject(imageIndex).updaters.clear();
+    return *this;
+}
+
+// ValueTracker implementation
+ValueTracker& ValueTracker::setEasing(Easing easing) {
+    parent->pImpl->getValueTrackerObject(trackerIndex).easingFunction = easing;
+    return *this;
+}
+
+ValueTracker& ValueTracker::delay(float seconds) {
+    parent->pImpl->getValueTrackerObject(trackerIndex).elementDelay = seconds;
+    return *this;
+}
+
+ValueTracker& ValueTracker::then() {
+    parent->pImpl->getValueTrackerObject(trackerIndex).chainNextAnimation = true;
+    return *this;
+}
+
+float ValueTracker::get_value() const {
+    return parent->pImpl->getValueTrackerObject(trackerIndex).value;
+}
+
+void ValueTracker::set_value(float value) {
+    parent->pImpl->getValueTrackerObject(trackerIndex).value = value;
+}
+
+void ValueTracker::increment_value(float delta) {
+    parent->pImpl->getValueTrackerObject(trackerIndex).value += delta;
+}
+
+void ValueTracker::animate_to(float value, float duration) {
+    auto& tracker = parent->pImpl->getValueTrackerObject(trackerIndex);
+    ValueTrackerAnimation entry;
+    entry.duration = duration;
+    entry.targetValue = value;
+    entry.easing = tracker.easingFunction;
+
+    float baseStart = tracker.chainNextAnimation ? tracker.chainedStartTime : parent->pImpl->currentTimeCursor;
+    entry.startTime = baseStart + tracker.elementDelay;
+
+    // Consume one-shot timing modifiers
+    tracker.chainedStartTime = entry.startTime + duration;
+    tracker.elementDelay = 0.0f;
+    tracker.chainNextAnimation = false;
+
+    const size_t insertPos = std::min(tracker.currentQueueIndex, tracker.animationQueue.size());
+    auto begin = tracker.animationQueue.begin() + static_cast<std::ptrdiff_t>(insertPos);
+    auto it = std::upper_bound(
+        begin, tracker.animationQueue.end(), entry.startTime,
+        [](float startTime, const ValueTrackerAnimation& e) { return startTime < e.startTime; });
+    tracker.animationQueue.insert(it, std::move(entry));
+}
+
+void ValueTracker::animate_to(float value, float duration, Easing easing) {
+    auto& tracker = parent->pImpl->getValueTrackerObject(trackerIndex);
+    ValueTrackerAnimation entry;
+    entry.duration = duration;
+    entry.targetValue = value;
+    entry.easing = easing;
+
+    float baseStart = tracker.chainNextAnimation ? tracker.chainedStartTime : parent->pImpl->currentTimeCursor;
+    entry.startTime = baseStart + tracker.elementDelay;
+
+    // Consume one-shot timing modifiers
+    tracker.chainedStartTime = entry.startTime + duration;
+    tracker.elementDelay = 0.0f;
+    tracker.chainNextAnimation = false;
+
+    const size_t insertPos = std::min(tracker.currentQueueIndex, tracker.animationQueue.size());
+    auto begin = tracker.animationQueue.begin() + static_cast<std::ptrdiff_t>(insertPos);
+    auto it = std::upper_bound(
+        begin, tracker.animationQueue.end(), entry.startTime,
+        [](float startTime, const ValueTrackerAnimation& e) { return startTime < e.startTime; });
+    tracker.animationQueue.insert(it, std::move(entry));
+}
+
+ValueTracker& ValueTracker::add_updater(std::function<void(ValueTracker&)> updater) {
+    auto& tracker = parent->pImpl->getValueTrackerObject(trackerIndex);
+    tracker.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+ValueTracker& ValueTracker::add_updater(std::function<void(ValueTracker&, float)> updater) {
+    auto& tracker = parent->pImpl->getValueTrackerObject(trackerIndex);
+    tracker.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+ValueTracker& ValueTracker::clear_updaters() {
+    parent->pImpl->getValueTrackerObject(trackerIndex).updaters.clear();
+    return *this;
+}
+
 // PathBuilder implementation
 PathBuilder::PathBuilder(Catalyst* p, size_t idx) : parent(p), shapeIndex(idx) {}
 
@@ -16176,6 +20140,15 @@ TextElement Catalyst::setText(const std::string& text) {
 MathElement Catalyst::setMath(const std::string& latex) {
     size_t idx = pImpl->addMath(latex);
     return MathElement(this, idx);
+}
+
+MathElement Catalyst::setMath(const std::string& latex,
+                              std::initializer_list<std::pair<std::string, std::string>> t2c) {
+    auto element = setMath(latex);
+    for (const auto& [tex, color] : t2c) {
+        element.set_color_by_tex(tex, color);
+    }
+    return element;
 }
 
 ShapeElement Catalyst::setCircle(float radius) {
@@ -16292,7 +20265,23 @@ GraphElement Catalyst::setGraph(AxesElement& axes, std::function<float(float)> f
 VectorElement Catalyst::setVector(AxesElement& axes, const std::vector<float>& components) {
     float vx = components.size() > 0 ? components[0] : 0.0f;
     float vy = components.size() > 1 ? components[1] : 0.0f;
+    return setVector(axes, vx, vy);
+}
+
+VectorElement Catalyst::setVector(AxesElement& axes, float vx, float vy) {
     size_t idx = pImpl->addVector(axes.axesIndex, vx, vy);
+    return VectorElement(this, idx);
+}
+
+VectorElement Catalyst::setVector(GraphElement& graph, const std::vector<float>& components) {
+    float vx = components.size() > 0 ? components[0] : 0.0f;
+    float vy = components.size() > 1 ? components[1] : 0.0f;
+    return setVector(graph, vx, vy);
+}
+
+VectorElement Catalyst::setVector(GraphElement& graph, float vx, float vy) {
+    const auto& graphObj = pImpl->getGraphObject(graph.graphIndex);
+    size_t idx = pImpl->addVector(graphObj.axesIndex, vx, vy);
     return VectorElement(this, idx);
 }
 
@@ -16346,6 +20335,119 @@ ImageElement Catalyst::setImage(const std::string& path) {
 ImageElement Catalyst::setImage(const std::string& path, float width, float height) {
     size_t idx = pImpl->addImage(path, width, height);
     return ImageElement(this, idx);
+}
+
+Group Catalyst::SVGMobject(const std::string& path) {
+    return SVGMobject(path, 0.0f);
+}
+
+Group Catalyst::SVGMobject(const std::string& path, float targetHeightPx) {
+    std::string resolved = path;
+    if (!fileExists(resolved)) {
+        if (resolved.size() < 4 || resolved.substr(resolved.size() - 4) != ".svg") {
+            std::string alt = resolved + ".svg";
+            if (fileExists(alt)) resolved = std::move(alt);
+        }
+    }
+
+    std::ifstream file(resolved);
+    if (!file) {
+        throw std::runtime_error("SVGMobject: Failed to open SVG file: " + resolved);
+    }
+    std::string svgText((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    std::vector<SvgShapeDescriptor> shapes = parseSvgToShapes(svgText);
+    if (shapes.empty()) {
+        return createGroup();
+    }
+
+    if (targetHeightPx > 0.0f) {
+        bool hasBounds = false;
+        float minY = 0.0f, maxY = 0.0f;
+        for (const auto& shape : shapes) {
+            for (const auto& cmd : shape.commands) {
+                auto include = [&](float y) {
+                    if (!hasBounds) {
+                        minY = maxY = y;
+                        hasBounds = true;
+                        return;
+                    }
+                    minY = std::min(minY, y);
+                    maxY = std::max(maxY, y);
+                };
+
+                switch (cmd.type) {
+                    case PathCommandType::MoveTo:
+                    case PathCommandType::LineTo:
+                        include(cmd.y);
+                        break;
+                    case PathCommandType::CurveTo:
+                        include(cmd.cy1);
+                        include(cmd.cy2);
+                        include(cmd.y);
+                        break;
+                    case PathCommandType::Close:
+                        break;
+                }
+            }
+        }
+
+        const float currentHeight = hasBounds ? (maxY - minY) : 0.0f;
+        if (currentHeight > 1e-6f) {
+            const float s = targetHeightPx / currentHeight;
+            for (auto& shape : shapes) {
+                for (auto& cmd : shape.commands) {
+                    switch (cmd.type) {
+                        case PathCommandType::MoveTo:
+                        case PathCommandType::LineTo:
+                            cmd.x *= s;
+                            cmd.y *= s;
+                            break;
+                        case PathCommandType::CurveTo:
+                            cmd.cx1 *= s;
+                            cmd.cy1 *= s;
+                            cmd.cx2 *= s;
+                            cmd.cy2 *= s;
+                            cmd.x *= s;
+                            cmd.y *= s;
+                            break;
+                        case PathCommandType::Close:
+                            break;
+                    }
+                }
+                shape.thickness *= s;
+            }
+        }
+    }
+
+    Group group = createGroup();
+    for (const auto& shape : shapes) {
+        const size_t idx = pImpl->addCustomPath();
+        auto& obj = pImpl->getShapeObject(idx);
+        obj.type = ShapeType::CustomPath;
+        obj.pathCommands = shape.commands;
+        obj.customPathMode = shape.mode;
+        obj.fillR = shape.r;
+        obj.fillG = shape.g;
+        obj.fillB = shape.b;
+        obj.fillOpacity = std::clamp(shape.opacity, 0.0f, 1.0f);
+        obj.strokeR = shape.r;
+        obj.strokeG = shape.g;
+        obj.strokeB = shape.b;
+        obj.strokeOpacity = obj.fillOpacity;
+
+        if (shape.mode == CustomPathMode::Stroke) {
+            obj.lineThickness = std::max(0.0f, shape.thickness);
+            obj.strokeWidth = obj.lineThickness;
+        }
+
+        pImpl->shapeVertexBufferDirty = true;
+        ShapeElement element(this, idx);
+        group.add(element);
+    }
+
+    group.move_to(static_cast<float>(pImpl->width) / 2.0f, static_cast<float>(pImpl->height) / 2.0f);
+    return group;
 }
 
 // ========== 3D Element Factory Methods ==========
@@ -16460,6 +20562,11 @@ Shape3DElement Catalyst::setArrow3D(float x1, float y1, float z1, float x2, floa
     return Shape3DElement(this, idx);
 }
 
+Shape3DElement Catalyst::setVector(Axes3DElement& axes, float vx, float vy, float vz) {
+    (void)axes;
+    return setArrow3D(0.0f, 0.0f, 0.0f, vx, vy, vz);
+}
+
 void Catalyst::setCamera3D(float eyeX, float eyeY, float eyeZ,
                            float targetX, float targetY, float targetZ) {
     pImpl->setCamera3D(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f);
@@ -16492,6 +20599,64 @@ void Catalyst::resetCamera3D() {
 
 void Catalyst::resetCamera3D(float duration) {
     pImpl->resetCamera3D(duration);
+}
+
+void Catalyst::setCamera3DTarget(float targetX, float targetY, float targetZ) {
+    pImpl->setCamera3DTarget(targetX, targetY, targetZ, 0.0f);
+}
+
+void Catalyst::setCamera3DTarget(float targetX, float targetY, float targetZ, float duration) {
+    pImpl->setCamera3DTarget(targetX, targetY, targetZ, duration);
+}
+
+void Catalyst::shiftCamera3D(float dx, float dy, float dz) {
+    pImpl->shiftCamera3D(dx, dy, dz, 0.0f);
+}
+
+void Catalyst::shiftCamera3D(float dx, float dy, float dz, float duration) {
+    pImpl->shiftCamera3D(dx, dy, dz, duration);
+}
+
+void Catalyst::setCamera3DDistance(float distance) {
+    pImpl->setCamera3DDistance(distance, 0.0f);
+}
+
+void Catalyst::setCamera3DDistance(float distance, float duration) {
+    pImpl->setCamera3DDistance(distance, duration);
+}
+
+void Catalyst::scaleCamera3DDistance(float scale) {
+    pImpl->scaleCamera3DDistance(scale, 0.0f);
+}
+
+void Catalyst::scaleCamera3DDistance(float scale, float duration) {
+    pImpl->scaleCamera3DDistance(scale, duration);
+}
+
+void Catalyst::rotateCamera3D(float axisX, float axisY, float axisZ, float angleRadians) {
+    pImpl->rotateCamera3D(axisX, axisY, axisZ, angleRadians, 0.0f);
+}
+
+void Catalyst::rotateCamera3D(float axisX, float axisY, float axisZ, float angleRadians, float duration) {
+    pImpl->rotateCamera3D(axisX, axisY, axisZ, angleRadians, duration);
+}
+
+void Catalyst::beginAmbientCameraRotation(float rateRadians) {
+    pImpl->beginAmbientCameraRotation3D(rateRadians);
+}
+
+void Catalyst::stopAmbientCameraRotation() {
+    pImpl->stopAmbientCameraRotation3D();
+}
+
+void Catalyst::reorientCamera(float thetaDegrees, float phiDegrees) {
+    reorientCamera(thetaDegrees, phiDegrees, 0.0f);
+}
+
+void Catalyst::reorientCamera(float thetaDegrees, float phiDegrees, float duration) {
+    float theta = thetaDegrees * 3.14159265f / 180.0f;
+    float phi = phiDegrees * 3.14159265f / 180.0f;
+    pImpl->reorientCamera3D(theta, phi, duration);
 }
 
 void Catalyst::wait(float seconds) {
@@ -16588,6 +20753,11 @@ AnimationGroup Catalyst::createSequence() {
 Group Catalyst::createGroup() {
     pImpl->groupObjects.push_back(GroupObject{});
     return Group(this, pImpl->groupObjects.size() - 1);
+}
+
+ValueTracker Catalyst::createValueTracker(float initialValue) {
+    const size_t idx = pImpl->addValueTracker(initialValue);
+    return ValueTracker(this, idx);
 }
 
 // ============== Group class implementation ==============
@@ -16790,6 +20960,623 @@ bool Group::empty() const {
     return parent->pImpl->groupObjects[groupIndex].members.empty();
 }
 
+// Submobject-style indexing/slicing
+Submobject Group::operator[](int index) const {
+    const auto& group = parent->pImpl->groupObjects[groupIndex];
+    const int n = static_cast<int>(group.members.size());
+    if (n <= 0) {
+        return Submobject();
+    }
+
+    int resolved = index;
+    if (resolved < 0) {
+        resolved += n;
+    }
+    if (resolved < 0 || resolved >= n) {
+        return Submobject();
+    }
+
+    const ElementRef& ref = group.members[static_cast<size_t>(resolved)];
+    if (!ref.valid) {
+        return Submobject();
+    }
+
+    const auto mapType = [](ElementType type) -> SubmobjectType {
+        switch (type) {
+            case ElementType::Text: return SubmobjectType::Text;
+            case ElementType::Math: return SubmobjectType::Math;
+            case ElementType::Shape: return SubmobjectType::Shape;
+            case ElementType::Image: return SubmobjectType::Image;
+            case ElementType::Graph: return SubmobjectType::Graph;
+            case ElementType::Axes: return SubmobjectType::Axes;
+            case ElementType::NumberLine: return SubmobjectType::NumberLine;
+            case ElementType::BarChart: return SubmobjectType::BarChart;
+            case ElementType::PieChart: return SubmobjectType::PieChart;
+            case ElementType::VectorField: return SubmobjectType::VectorField;
+            case ElementType::Table: return SubmobjectType::Table;
+            case ElementType::Vector: return SubmobjectType::Vector;
+            case ElementType::Shape3D: return SubmobjectType::Shape3D;
+            case ElementType::Axes3D: return SubmobjectType::Axes3D;
+            case ElementType::Surface3D: return SubmobjectType::Surface3D;
+            case ElementType::Group: return SubmobjectType::Group;
+            default: return SubmobjectType::Invalid;
+        }
+    };
+
+    return Submobject(parent, mapType(ref.type), ref.index);
+}
+
+Group Group::operator[](Slice slice) const {
+    const auto& group = parent->pImpl->groupObjects[groupIndex];
+    const int n = static_cast<int>(group.members.size());
+    const int step = (slice.step == 0) ? 1 : slice.step;
+
+    int start = slice.start;
+    int stop = slice.stop;
+
+    const bool startMissing = (start == Slice::kNone);
+    const bool stopMissing = (stop == Slice::kNone);
+
+    if (startMissing) start = (step > 0) ? 0 : (n - 1);
+    if (stopMissing) stop = (step > 0) ? n : -1;
+
+    if (start < 0) start += n;
+    if (!stopMissing && stop < 0) stop += n;
+
+    if (step > 0) {
+        start = std::clamp(start, 0, n);
+        stop = std::clamp(stop, 0, n);
+    } else {
+        start = std::clamp(start, -1, n - 1);
+        stop = std::clamp(stop, -1, n - 1);
+    }
+
+    parent->pImpl->groupObjects.push_back(GroupObject{});
+    const size_t newIndex = parent->pImpl->groupObjects.size() - 1;
+    auto& out = parent->pImpl->groupObjects[newIndex];
+    out.members.clear();
+
+    if (n > 0) {
+        if (step > 0) {
+            for (int i = start; i < stop; i += step) {
+                out.members.push_back(group.members[static_cast<size_t>(i)]);
+            }
+        } else {
+            for (int i = start; i > stop; i += step) {  // step is negative
+                out.members.push_back(group.members[static_cast<size_t>(i)]);
+            }
+        }
+    }
+
+    out.boundsDirty = true;
+    return Group(parent, newIndex);
+}
+
+bool Submobject::valid() const {
+    return parent != nullptr && subType != SubmobjectType::Invalid;
+}
+
+Submobject::Submobject(const TextElement& element) {
+    parent = element.parent;
+    elementIndex = element.textIndex;
+    subType = parent != nullptr ? SubmobjectType::Text : SubmobjectType::Invalid;
+}
+
+Submobject::Submobject(const MathElement& element) {
+    parent = element.parent;
+    elementIndex = element.mathIndex;
+    subType = parent != nullptr ? SubmobjectType::Math : SubmobjectType::Invalid;
+}
+
+Submobject::Submobject(const ShapeElement& element) {
+    parent = element.parent;
+    elementIndex = element.shapeIndex;
+    subType = parent != nullptr ? SubmobjectType::Shape : SubmobjectType::Invalid;
+}
+
+Submobject::Submobject(const ImageElement& element) {
+    parent = element.parent;
+    elementIndex = element.imageIndex;
+    subType = parent != nullptr ? SubmobjectType::Image : SubmobjectType::Invalid;
+}
+
+Submobject::Submobject(const Group& group) {
+    parent = group.parent;
+    elementIndex = group.groupIndex;
+    subType = parent != nullptr ? SubmobjectType::Group : SubmobjectType::Invalid;
+}
+
+SubmobjectType Submobject::type() const {
+    return subType;
+}
+
+Submobject Submobject::operator[](int index) const {
+    if (subType != SubmobjectType::Group || parent == nullptr) {
+        return Submobject();
+    }
+    return Group(parent, elementIndex)[index];
+}
+
+Group Submobject::operator[](Slice slice) const {
+    if (subType != SubmobjectType::Group || parent == nullptr) {
+        if (parent == nullptr) {
+            return Group(nullptr, 0);
+        }
+        return parent->createGroup();
+    }
+    return Group(parent, elementIndex)[slice];
+}
+
+void Submobject::show(float duration) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Axes: AxesElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::BarChart: BarChartElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::PieChart: PieChartElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Table: TableElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Axes3D: Axes3DElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Surface3D: Surface3DElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Shape3D: Shape3DElement(parent, elementIndex).show(duration); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).show(duration); break;
+        default: break;
+    }
+}
+
+void Submobject::hide(float duration) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Axes: AxesElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::BarChart: BarChartElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::PieChart: PieChartElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Table: TableElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Axes3D: Axes3DElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Surface3D: Surface3DElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Shape3D: Shape3DElement(parent, elementIndex).hide(duration); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).hide(duration); break;
+        default: break;
+    }
+}
+
+void Submobject::MoveTo(float duration, float x, float y) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).MoveTo(duration, x, y); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).MoveTo(duration, x, y); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).MoveTo(duration, x, y); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).MoveTo(duration, x, y); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).MoveTo(duration, x, y); break;
+        default: break;
+    }
+}
+
+void Submobject::Scale(float duration, float targetScale) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).Scale(duration, targetScale); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).Scale(duration, targetScale); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).Scale(duration, targetScale); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).Scale(duration, targetScale); break;
+        case SubmobjectType::Shape3D: Shape3DElement(parent, elementIndex).ScaleTo(duration, targetScale); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).Scale(duration, targetScale); break;
+        default: break;
+    }
+}
+
+void Submobject::Rotate(float duration, float degrees) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).Rotate(duration, degrees); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).Rotate(duration, degrees); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).Rotate(duration, degrees); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).Rotate(duration, degrees); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).Rotate(duration, degrees); break;
+        default: break;
+    }
+}
+
+void Submobject::setColor(const std::string& hex) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Shape: {
+            ShapeElement shape(parent, elementIndex);
+            shape.setFill(hex);
+            shape.setStrokeColor(hex);
+            break;
+        }
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Axes: AxesElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Axes3D: Axes3DElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Surface3D: Surface3DElement(parent, elementIndex).setColor(hex); break;
+        case SubmobjectType::Shape3D: Shape3DElement(parent, elementIndex).setColor(hex); break;
+        default: break;
+    }
+}
+
+void Submobject::setColor(int r, int g, int b) {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Shape: {
+            ShapeElement shape(parent, elementIndex);
+            shape.setFill(r, g, b);
+            shape.setStrokeColor(r, g, b);
+            break;
+        }
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Axes: {
+            char hex[7 + 1] = {};
+            std::snprintf(
+                hex,
+                sizeof(hex),
+                "%02X%02X%02X",
+                std::clamp(r, 0, 255),
+                std::clamp(g, 0, 255),
+                std::clamp(b, 0, 255)
+            );
+            AxesElement(parent, elementIndex).setColor(std::string(hex));
+            break;
+        }
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Axes3D: Axes3DElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Surface3D: Surface3DElement(parent, elementIndex).setColor(r, g, b); break;
+        case SubmobjectType::Shape3D: Shape3DElement(parent, elementIndex).setColor(r, g, b); break;
+        default: break;
+    }
+}
+
+void Submobject::fix_in_frame() {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Axes: AxesElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::BarChart: BarChartElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::PieChart: PieChartElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Table: TableElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).fix_in_frame(); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).fix_in_frame(); break;
+        default:
+            break;
+    }
+}
+
+void Submobject::unfix_from_frame() {
+    if (parent == nullptr) return;
+    switch (subType) {
+        case SubmobjectType::Text: TextElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Math: MathElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Shape: ShapeElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Image: ImageElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Graph: GraphElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Axes: AxesElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::NumberLine: NumberLineElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::BarChart: BarChartElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::PieChart: PieChartElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::VectorField: VectorFieldElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Table: TableElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Vector: VectorElement(parent, elementIndex).unfix_from_frame(); break;
+        case SubmobjectType::Group: Group(parent, elementIndex).unfix_from_frame(); break;
+        default:
+            break;
+    }
+}
+
+void Submobject::shift(float dx, float dy) {
+    if (parent == nullptr) return;
+
+    ElementRef ref;
+    switch (subType) {
+        case SubmobjectType::Text: ref = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: ref = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: ref = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: ref = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: ref = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    float x = 0.0f;
+    float y = 0.0f;
+    parent->pImpl->getElementPosition(ref, x, y);
+    parent->pImpl->setElementPosition(ref, x + dx, y + dy);
+}
+
+void Submobject::shift(Direction direction, float amount) {
+    switch (direction) {
+        case Direction::UP: shift(0.0f, -amount); break;
+        case Direction::DOWN: shift(0.0f, amount); break;
+        case Direction::LEFT: shift(-amount, 0.0f); break;
+        case Direction::RIGHT: shift(amount, 0.0f); break;
+        case Direction::NONE: default: break;
+    }
+}
+
+void Submobject::move_to(float x, float y) {
+    if (parent == nullptr) return;
+
+    ElementRef ref;
+    switch (subType) {
+        case SubmobjectType::Text: ref = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: ref = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: ref = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: ref = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: ref = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    parent->pImpl->setElementPosition(ref, x, y);
+}
+
+void Submobject::next_to(const Submobject& other, Direction direction, float buff) {
+    if (parent == nullptr || other.parent == nullptr) return;
+    if (parent != other.parent) return;
+
+    ElementRef selfRef;
+    switch (subType) {
+        case SubmobjectType::Text: selfRef = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: selfRef = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: selfRef = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: selfRef = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: selfRef = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    ElementRef otherRef;
+    switch (other.subType) {
+        case SubmobjectType::Text: otherRef = {ElementType::Text, other.elementIndex, true}; break;
+        case SubmobjectType::Math: otherRef = {ElementType::Math, other.elementIndex, true}; break;
+        case SubmobjectType::Shape: otherRef = {ElementType::Shape, other.elementIndex, true}; break;
+        case SubmobjectType::Image: otherRef = {ElementType::Image, other.elementIndex, true}; break;
+        case SubmobjectType::Group: otherRef = {ElementType::Group, other.elementIndex, true}; break;
+        default: return;
+    }
+
+    auto boundsFor = [&](const ElementRef& ref, float& minX, float& minY, float& maxX, float& maxY) {
+        float cx = 0.0f, cy = 0.0f, w = 0.0f, h = 0.0f;
+        parent->pImpl->getElementPosition(ref, cx, cy);
+        parent->pImpl->getElementSize(ref, w, h);
+        minX = cx - w / 2.0f;
+        maxX = cx + w / 2.0f;
+        minY = cy - h / 2.0f;
+        maxY = cy + h / 2.0f;
+    };
+
+    float otherMinX = 0.0f, otherMinY = 0.0f, otherMaxX = 0.0f, otherMaxY = 0.0f;
+    boundsFor(otherRef, otherMinX, otherMinY, otherMaxX, otherMaxY);
+    float otherCenterX = (otherMinX + otherMaxX) / 2.0f;
+    float otherCenterY = (otherMinY + otherMaxY) / 2.0f;
+
+    float selfW = 0.0f, selfH = 0.0f;
+    parent->pImpl->getElementSize(selfRef, selfW, selfH);
+
+    float targetX = otherCenterX;
+    float targetY = otherCenterY;
+
+    switch (direction) {
+        case Direction::RIGHT:
+            targetX = otherMaxX + buff + selfW / 2.0f;
+            break;
+        case Direction::LEFT:
+            targetX = otherMinX - buff - selfW / 2.0f;
+            break;
+        case Direction::DOWN:
+            targetY = otherMaxY + buff + selfH / 2.0f;
+            break;
+        case Direction::UP:
+            targetY = otherMinY - buff - selfH / 2.0f;
+            break;
+        case Direction::NONE:
+        default:
+            break;
+    }
+
+    parent->pImpl->setElementPosition(selfRef, targetX, targetY);
+}
+
+void Submobject::to_edge(Direction direction, float buff) {
+    if (parent == nullptr) return;
+
+    ElementRef ref;
+    switch (subType) {
+        case SubmobjectType::Text: ref = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: ref = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: ref = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: ref = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: ref = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    float currentX = 0.0f;
+    float currentY = 0.0f;
+    parent->pImpl->getElementPosition(ref, currentX, currentY);
+
+    float w = 0.0f;
+    float h = 0.0f;
+    parent->pImpl->getElementSize(ref, w, h);
+
+    float screenW = static_cast<float>(parent->pImpl->width);
+    float screenH = static_cast<float>(parent->pImpl->height);
+
+    float targetX = currentX;
+    float targetY = currentY;
+
+    switch (direction) {
+        case Direction::LEFT:
+            targetX = buff + w / 2.0f;
+            break;
+        case Direction::RIGHT:
+            targetX = screenW - buff - w / 2.0f;
+            break;
+        case Direction::UP:
+            targetY = buff + h / 2.0f;
+            break;
+        case Direction::DOWN:
+            targetY = screenH - buff - h / 2.0f;
+            break;
+        case Direction::NONE:
+        default:
+            break;
+    }
+
+    parent->pImpl->setElementPosition(ref, targetX, targetY);
+}
+
+void Submobject::to_corner(Position corner, float buff) {
+    if (parent == nullptr) return;
+
+    ElementRef ref;
+    switch (subType) {
+        case SubmobjectType::Text: ref = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: ref = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: ref = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: ref = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: ref = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    float w = 0.0f;
+    float h = 0.0f;
+    parent->pImpl->getElementSize(ref, w, h);
+
+    float screenW = static_cast<float>(parent->pImpl->width);
+    float screenH = static_cast<float>(parent->pImpl->height);
+
+    float targetX = screenW / 2.0f;
+    float targetY = screenH / 2.0f;
+
+    switch (corner) {
+        case Position::TLEFT:
+            targetX = buff + w / 2.0f;
+            targetY = buff + h / 2.0f;
+            break;
+        case Position::TRIGHT:
+            targetX = screenW - buff - w / 2.0f;
+            targetY = buff + h / 2.0f;
+            break;
+        case Position::BLEFT:
+            targetX = buff + w / 2.0f;
+            targetY = screenH - buff - h / 2.0f;
+            break;
+        case Position::BRIGHT:
+            targetX = screenW - buff - w / 2.0f;
+            targetY = screenH - buff - h / 2.0f;
+            break;
+        case Position::TOP:
+            to_edge(Direction::UP, buff);
+            return;
+        case Position::BOTTOM:
+            to_edge(Direction::DOWN, buff);
+            return;
+        case Position::LEFT:
+            to_edge(Direction::LEFT, buff);
+            return;
+        case Position::RIGHT:
+            to_edge(Direction::RIGHT, buff);
+            return;
+        case Position::CENTER:
+        default:
+            break;
+    }
+
+    parent->pImpl->setElementPosition(ref, targetX, targetY);
+}
+
+void Submobject::align_to(const Submobject& other, Direction direction) {
+    if (parent == nullptr || other.parent == nullptr) return;
+    if (parent != other.parent) return;
+
+    ElementRef selfRef;
+    switch (subType) {
+        case SubmobjectType::Text: selfRef = {ElementType::Text, elementIndex, true}; break;
+        case SubmobjectType::Math: selfRef = {ElementType::Math, elementIndex, true}; break;
+        case SubmobjectType::Shape: selfRef = {ElementType::Shape, elementIndex, true}; break;
+        case SubmobjectType::Image: selfRef = {ElementType::Image, elementIndex, true}; break;
+        case SubmobjectType::Group: selfRef = {ElementType::Group, elementIndex, true}; break;
+        default: return;
+    }
+
+    ElementRef otherRef;
+    switch (other.subType) {
+        case SubmobjectType::Text: otherRef = {ElementType::Text, other.elementIndex, true}; break;
+        case SubmobjectType::Math: otherRef = {ElementType::Math, other.elementIndex, true}; break;
+        case SubmobjectType::Shape: otherRef = {ElementType::Shape, other.elementIndex, true}; break;
+        case SubmobjectType::Image: otherRef = {ElementType::Image, other.elementIndex, true}; break;
+        case SubmobjectType::Group: otherRef = {ElementType::Group, other.elementIndex, true}; break;
+        default: return;
+    }
+
+    float selfX = 0.0f;
+    float selfY = 0.0f;
+    parent->pImpl->getElementPosition(selfRef, selfX, selfY);
+
+    float selfW = 0.0f;
+    float selfH = 0.0f;
+    parent->pImpl->getElementSize(selfRef, selfW, selfH);
+
+    float otherX = 0.0f;
+    float otherY = 0.0f;
+    float otherW = 0.0f;
+    float otherH = 0.0f;
+    parent->pImpl->getElementPosition(otherRef, otherX, otherY);
+    parent->pImpl->getElementSize(otherRef, otherW, otherH);
+
+    float otherMinX = otherX - otherW / 2.0f;
+    float otherMaxX = otherX + otherW / 2.0f;
+    float otherMinY = otherY - otherH / 2.0f;
+    float otherMaxY = otherY + otherH / 2.0f;
+
+    float targetX = selfX;
+    float targetY = selfY;
+
+    switch (direction) {
+        case Direction::LEFT:
+            targetX = otherMinX + selfW / 2.0f;
+            break;
+        case Direction::RIGHT:
+            targetX = otherMaxX - selfW / 2.0f;
+            break;
+        case Direction::UP:
+            targetY = otherMinY + selfH / 2.0f;
+            break;
+        case Direction::DOWN:
+            targetY = otherMaxY - selfH / 2.0f;
+            break;
+        case Direction::NONE:
+        default:
+            break;
+    }
+
+    parent->pImpl->setElementPosition(selfRef, targetX, targetY);
+}
+
 // Positioning
 void Group::setPosition(float x, float y) {
     auto& group = parent->pImpl->groupObjects[groupIndex];
@@ -16873,6 +21660,352 @@ void Group::setPosition(Position anchor) {
     setPosition(targetX, targetY);
     group.anchor = anchor;
     group.usePixelPosition = false;
+}
+
+void Group::shift(float dx, float dy) {
+    Submobject(*this).shift(dx, dy);
+}
+
+void Group::shift(Direction direction, float amount) {
+    Submobject(*this).shift(direction, amount);
+}
+
+void Group::move_to(float x, float y) {
+    Submobject(*this).move_to(x, y);
+}
+
+void Group::next_to(const Submobject& other, Direction direction, float buff) {
+    Submobject(*this).next_to(other, direction, buff);
+}
+
+void Group::to_edge(Direction direction, float buff) {
+    Submobject(*this).to_edge(direction, buff);
+}
+
+void Group::to_corner(Position corner, float buff) {
+    Submobject(*this).to_corner(corner, buff);
+}
+
+void Group::align_to(const Submobject& other, Direction direction) {
+    Submobject(*this).align_to(other, direction);
+}
+
+Group& Group::fix_in_frame() {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                TextElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Math:
+                MathElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Image:
+                ImageElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Graph:
+                GraphElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Axes:
+                AxesElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::NumberLine:
+                NumberLineElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::BarChart:
+                BarChartElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::PieChart:
+                PieChartElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::VectorField:
+                VectorFieldElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Table:
+                TableElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Vector:
+                VectorElement(parent, ref.index).fix_in_frame();
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).fix_in_frame();
+                break;
+            default:
+                break;
+        }
+    }
+    return *this;
+}
+
+Group& Group::unfix_from_frame() {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                TextElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Math:
+                MathElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Image:
+                ImageElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Graph:
+                GraphElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Axes:
+                AxesElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::NumberLine:
+                NumberLineElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::BarChart:
+                BarChartElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::PieChart:
+                PieChartElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::VectorField:
+                VectorFieldElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Table:
+                TableElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Vector:
+                VectorElement(parent, ref.index).unfix_from_frame();
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).unfix_from_frame();
+                break;
+            default:
+                break;
+        }
+    }
+    return *this;
+}
+
+void Group::setColor(const std::string& hex) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                TextElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Math:
+                MathElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Shape: {
+                ShapeElement shape(parent, ref.index);
+                shape.setFill(hex);
+                shape.setStrokeColor(hex);
+                break;
+            }
+            case ElementType::Graph:
+                GraphElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Axes:
+                AxesElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Vector:
+                VectorElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Shape3D:
+                Shape3DElement(parent, ref.index).setColor(hex);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setColor(hex);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setColor(int r, int g, int b) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                TextElement(parent, ref.index).setColor(r, g, b);
+                break;
+            case ElementType::Math:
+                MathElement(parent, ref.index).setColor(r, g, b);
+                break;
+            case ElementType::Shape: {
+                ShapeElement shape(parent, ref.index);
+                shape.setFill(r, g, b);
+                shape.setStrokeColor(r, g, b);
+                break;
+            }
+            case ElementType::Graph:
+                GraphElement(parent, ref.index).setColor(r, g, b);
+                break;
+            case ElementType::Axes: {
+                char hex[8] = {};
+                std::snprintf(hex, sizeof(hex), "%02X%02X%02X",
+                              std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
+                AxesElement(parent, ref.index).setColor(std::string(hex));
+                break;
+            }
+            case ElementType::Vector:
+                VectorElement(parent, ref.index).setColor(r, g, b);
+                break;
+            case ElementType::Shape3D:
+                Shape3DElement(parent, ref.index).setColor(r, g, b);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setColor(r, g, b);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setOpacity(float opacity) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Text:
+                TextElement(parent, ref.index).setOpacity(opacity);
+                break;
+            case ElementType::Math:
+                MathElement(parent, ref.index).setOpacity(opacity);
+                break;
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setOpacity(opacity);
+                break;
+            case ElementType::Image:
+                ImageElement(parent, ref.index).setOpacity(opacity);
+                break;
+            case ElementType::Shape3D:
+                Shape3DElement(parent, ref.index).setOpacity(opacity);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setOpacity(opacity);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setFill(const std::string& hex) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setFill(hex);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setFill(hex);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setFill(int r, int g, int b) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setFill(r, g, b);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setFill(r, g, b);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setFillOpacity(float opacity) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setFillOpacity(opacity);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setFillOpacity(opacity);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setStroke(float width) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setStroke(width);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setStroke(width);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setStrokeColor(const std::string& hex) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setStrokeColor(hex);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setStrokeColor(hex);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setStrokeColor(int r, int g, int b) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setStrokeColor(r, g, b);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setStrokeColor(r, g, b);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void Group::setStrokeOpacity(float opacity) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    for (auto& ref : group.members) {
+        switch (ref.type) {
+            case ElementType::Shape:
+                ShapeElement(parent, ref.index).setStrokeOpacity(opacity);
+                break;
+            case ElementType::Group:
+                Group(parent, ref.index).setStrokeOpacity(opacity);
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 // Layout: arrange in row (RIGHT) or column (DOWN)
@@ -17061,6 +22194,27 @@ Group& Group::delay(float seconds) {
 Group& Group::then() {
     auto& group = parent->pImpl->groupObjects[groupIndex];
     group.chainNextAnimation = true;
+    return *this;
+}
+
+Group& Group::add_updater(std::function<void(Group&)> updater) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.updaters.emplace_back([self = *this, updater = std::move(updater)](float) mutable {
+        updater(self);
+    });
+    return *this;
+}
+
+Group& Group::add_updater(std::function<void(Group&, float)> updater) {
+    auto& group = parent->pImpl->groupObjects[groupIndex];
+    group.updaters.emplace_back([self = *this, updater = std::move(updater)](float dt) mutable {
+        updater(self, dt);
+    });
+    return *this;
+}
+
+Group& Group::clear_updaters() {
+    parent->pImpl->groupObjects[groupIndex].updaters.clear();
     return *this;
 }
 
@@ -17446,6 +22600,13 @@ MathElement Scene::setMath(const std::string& latex) {
     return element;
 }
 
+MathElement Scene::setMath(const std::string& latex,
+                           std::initializer_list<std::pair<std::string, std::string>> t2c) {
+    auto element = parent->setMath(latex, t2c);
+    parent->pImpl->addElementToScene(element.mathIndex, "math");
+    return element;
+}
+
 ShapeElement Scene::setCircle(float radius) {
     auto element = parent->setCircle(radius);
     parent->pImpl->addElementToScene(element.shapeIndex, "shape");
@@ -17474,6 +22635,25 @@ ShapeElement Scene::setArrow(float x1, float y1, float x2, float y2) {
     auto element = parent->setArrow(x1, y1, x2, y2);
     parent->pImpl->addElementToScene(element.shapeIndex, "shape");
     return element;
+}
+
+Group Scene::SVGMobject(const std::string& path) {
+    return SVGMobject(path, 0.0f);
+}
+
+Group Scene::SVGMobject(const std::string& path, float targetHeightPx) {
+    Group group = parent->SVGMobject(path, targetHeightPx);
+    auto& grp = parent->pImpl->groupObjects[group.groupIndex];
+    for (const auto& ref : grp.members) {
+        if (ref.type == ElementType::Shape) {
+            parent->pImpl->addElementToScene(ref.index, "shape");
+        }
+    }
+    return group;
+}
+
+ValueTracker Scene::createValueTracker(float initialValue) {
+    return parent->createValueTracker(initialValue);
 }
 
 void Scene::setBackground(const std::string& hex) {
