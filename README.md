@@ -204,7 +204,7 @@ See [`examples/consumer/`](examples/consumer/) for a complete example.
 
 ### Full API Documentation
 
-See [`CLAUDE.md`](CLAUDE.md) for the complete API reference with all methods and examples.
+See [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) for the complete API reference with all methods and examples.
 
 ---
 
@@ -244,7 +244,7 @@ Catalyst/
 ├── main.cpp                 # Vulkan implementation (19,375 lines)
 ├── CMakeLists.txt           # Build configuration
 ├── build.sh                 # Build automation script
-├── CLAUDE.md                # Full API documentation
+├── docs/DOCUMENTATION.md    # Full API documentation
 ├── animations/
 │   ├── TD1.cpp              # Comprehensive feature demo (83 features)
 │   └── simple_test.cpp      # Basic hello world example
@@ -278,6 +278,66 @@ Example:
 export CATALYST_RESOURCE_PATH=/opt/catalyst/resources
 ./myapp
 ```
+
+---
+
+## GPU Video Export (Zero-Copy Vulkan → NVENC)
+
+Catalyst supports GPU-accelerated video export using Vulkan-CUDA interop with NVENC encoding. Frames stay on the GPU—no CPU readback required.
+
+### Build with GPU Export Support
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCATALYST_ENABLE_FFMPEG=ON \
+  -DCATALYST_ENABLE_CUDA=ON
+cmake --build build -j
+sudo cmake --install build
+```
+
+### Export-Aware Main Entry
+
+```cpp
+int main(int argc, char** argv) {
+    const auto opts = Catalyst::parseOutputArgs(argc, argv, 1280, 720, 0.0f);
+    Catalyst window(opts.width, opts.height);
+
+    // build scene...
+
+    if (opts.exportVideo) {
+        window.exportVideo(opts.outputPath, opts.fps, opts.previewWhileExporting);
+    } else if (opts.fps > 0.0f) {
+        window.run(opts.fps);
+    } else {
+        window.run();
+    }
+    return 0;
+}
+```
+
+### Run Zero-Copy GPU Export
+
+```bash
+CATALYST_EXPORT_ZEROCOPY=1 \
+CATALYST_VIDEO_CODEC=h264_nvenc \
+./build/anim_my_scene export out.mp4 --fps 60
+```
+
+**Environment Variables:**
+| Variable | Description |
+|----------|-------------|
+| `CATALYST_EXPORT_ZEROCOPY` | Set to `1` to enable GPU zero-copy export |
+| `CATALYST_VIDEO_CODEC` | Codec selection: `h264_nvenc`, `hevc_nvenc`, or `auto` |
+| `CATALYST_EXPORT_QUEUE` | Buffer pool depth (default: 8, increase for high fps) |
+
+**Requirements for GPU Export:**
+- NVIDIA GPU + driver
+- Vulkan with `VK_KHR_external_memory_fd` and timeline semaphores
+- FFmpeg built with NVENC (`h264_nvenc` available)
+- CUDA Toolkit (driver API)
+
+If zero-copy is not supported, Catalyst falls back to the CPU path automatically.
 
 ---
 
