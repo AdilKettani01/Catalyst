@@ -13,12 +13,17 @@
 #include <cstdlib>
 #include <vector>
 #include <deque>
+#include <mutex>
+#include <condition_variable>
 #include <cstring>
 #include <optional>
 #include <set>
 #include <limits>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
+#include <chrono>
+#include <thread>
 #include <algorithm>
 #include <array>
 #include <numeric>
@@ -30,6 +35,24 @@
 #include <unistd.h>
 #include <linux/limits.h>
 #include "catalyst.h"
+
+#if defined(CATALYST_ENABLE_FFMPEG)
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
+#include <libavutil/opt.h>
+}
+#endif
+
+#if defined(CATALYST_ENABLE_CUDA)
+#include <cuda.h>
+#define CATALYST_HAS_CUDA 1
+#else
+#define CATALYST_HAS_CUDA 0
+#endif
 
 // MicroTeX for LaTeX rendering
 #include "latex.h"
@@ -7529,11 +7552,1170 @@ public:
     }
 
     void run() {
+        run(0.0f);
+    }
+
+    void run(float targetFps) {
         basePath = getResourceBasePath();  // Get path to resources (with fallback)
         std::cout << "Using resource basePath: " << basePath << std::endl;
-        initWindow();
+        initWindow(true);
         initVulkan();
-        mainLoop();
+        mainLoop(targetFps);
+        cleanup();
+    }
+
+    void exportVideo(const std::string& outputPath, float fps, bool previewWhileExporting) {
+        if (fps <= 0.0f) {
+            throw std::runtime_error("exportVideo: fps must be > 0");
+        }
+
+        const auto formatHMS = [](double seconds) -> std::string {
+            if (!(seconds >= 0.0) || !std::isfinite(seconds)) return "??:??";
+            const int total = static_cast<int>(seconds + 0.5);
+            const int h = total / 3600;
+            const int m = (total % 3600) / 60;
+            const int s = total % 60;
+            char buf[16];
+            if (h > 0) {
+                std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%02d:%02d", m, s);
+            }
+            return std::string(buf);
+        };
+
+        const auto renderProgress = [&](uint32_t done, uint32_t total,
+                                        std::chrono::steady_clock::time_point startedAt) {
+            using clock = std::chrono::steady_clock;
+            const auto now = clock::now();
+            const double elapsedSec = std::chrono::duration<double>(now - startedAt).count();
+            const double rate = (elapsedSec > 0.0) ? (static_cast<double>(done) / elapsedSec) : 0.0;
+            const double remainingSec = (rate > 0.0) ? (static_cast<double>(total - done) / rate) : 0.0;
+
+            constexpr int kBarWidth = 10;
+            const int percent = (total > 0) ? static_cast<int>((100.0 * done) / total + 0.5) : 100;
+            const int filled = (total > 0)
+                ? std::min(kBarWidth, static_cast<int>((static_cast<double>(kBarWidth) * done) / total + 0.5))
+                : kBarWidth;
+
+            static constexpr const char* kBlock = "\xE2\x96\x88";  // UTF-8 full block
+            std::string bar;
+            bar.reserve(kBarWidth * 3);
+            for (int i = 0; i < filled; ++i) bar += kBlock;
+            for (int i = filled; i < kBarWidth; ++i) bar.push_back(' ');
+
+            const int width = static_cast<int>(std::to_string(total).size());
+            std::fprintf(stderr,
+                         "\r%3d%%|%s| %*u/%u [%s<%s, %5.2fit/s]",
+                         percent, bar.c_str(),
+                         width, done, total,
+                         formatHMS(elapsedSec).c_str(),
+                         formatHMS(remainingSec).c_str(),
+                         rate);
+            std::fflush(stderr);
+        };
+
+        const auto parseEnvU32 = [](const char* key) -> std::optional<uint32_t> {
+            const char* value = std::getenv(key);
+            if (!value || !*value) return std::nullopt;
+            char* end = nullptr;
+            const long out = std::strtol(value, &end, 10);
+            if (!end || end == value || *end != '\0') return std::nullopt;
+            if (out <= 0) return std::nullopt;
+            return static_cast<uint32_t>(out);
+        };
+
+        const auto parseEnvBool = [](const char* key) -> std::optional<bool> {
+            const char* value = std::getenv(key);
+            if (!value || !*value) return std::nullopt;
+            std::string text(value);
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (text == "1" || text == "true" || text == "yes" || text == "on") return true;
+            if (text == "0" || text == "false" || text == "no" || text == "off") return false;
+            return std::nullopt;
+        };
+
+        const std::string requestedCodec = [] {
+            const char* env = std::getenv("CATALYST_VIDEO_CODEC");
+            if (!env || !*env) return std::string("auto");
+            return std::string(env);
+        }();
+
+        const uint32_t queueDepth = std::clamp<uint32_t>(parseEnvU32("CATALYST_EXPORT_QUEUE").value_or(8u), 2u, 64u);
+        const bool zeroCopyRequested = parseEnvBool("CATALYST_EXPORT_ZEROCOPY").value_or(false);
+
+        enableSwapchainCapture = true;
+        if (zeroCopyRequested) {
+            enableExternalMemoryFd = true;
+            enableTimelineSemaphores = true;
+        }
+
+        basePath = getResourceBasePath();  // Get path to resources (with fallback)
+        std::cout << "Using resource basePath: " << basePath << std::endl;
+        initWindow(previewWhileExporting);
+        initVulkan();
+
+        bool zeroCopyActive = zeroCopyRequested;
+        if (zeroCopyActive) {
+            if (!enableExternalMemoryFd) {
+                std::fprintf(stderr,
+                             "[export] VK_KHR_external_memory_fd not supported; zero-copy disabled.\n");
+                zeroCopyActive = false;
+            }
+            if (!enableTimelineSemaphores) {
+                std::fprintf(stderr,
+                             "[export] timeline semaphores not supported; zero-copy disabled.\n");
+                zeroCopyActive = false;
+            }
+        }
+
+        const auto resetCaptureBuffers = [&]() {
+            for (VkBuffer buffer : frameCaptureBuffers) {
+                if (buffer == VK_NULL_HANDLE) continue;
+                vkDestroyBuffer(device, buffer, nullptr);
+            }
+            for (VkDeviceMemory memory : frameCaptureBufferMemories) {
+                if (memory == VK_NULL_HANDLE) continue;
+                vkFreeMemory(device, memory, nullptr);
+            }
+            frameCaptureBuffers.clear();
+            frameCaptureBufferMemories.clear();
+            frameCaptureBufferIndices.clear();
+            frameCaptureBufferSize = 0;
+        };
+
+#if defined(CATALYST_ENABLE_FFMPEG) && CATALYST_HAS_CUDA
+        auto tryZeroCopy = [&]() -> bool {
+            if (requestedCodec != "auto" && requestedCodec != "h264_nvenc") {
+                std::fprintf(stderr,
+                             "[export] zero-copy requires h264_nvenc (CATALYST_VIDEO_CODEC=h264_nvenc); falling back.\n");
+                return false;
+            }
+
+            AVPixelFormat swPixFmt = AV_PIX_FMT_NONE;
+            const char* swPixFmtName = nullptr;
+            switch (swapChainImageFormat) {
+                case VK_FORMAT_B8G8R8A8_SRGB:
+                case VK_FORMAT_B8G8R8A8_UNORM:
+                    swPixFmt = AV_PIX_FMT_BGRA;
+                    swPixFmtName = "bgra";
+                    break;
+                case VK_FORMAT_R8G8B8A8_SRGB:
+                case VK_FORMAT_R8G8B8A8_UNORM:
+                    swPixFmt = AV_PIX_FMT_RGBA;
+                    swPixFmtName = "rgba";
+                    break;
+                default:
+                    break;
+            }
+
+            if (!swPixFmtName) {
+                std::fprintf(stderr,
+                             "[export] unsupported swapchain format for zero-copy export; falling back.\n");
+                return false;
+            }
+
+            VkPhysicalDeviceExternalBufferInfo externalInfo{};
+            externalInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+            externalInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+            externalInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+            VkExternalBufferProperties externalProps{};
+            externalProps.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+            vkGetPhysicalDeviceExternalBufferProperties(physicalDevice, &externalInfo, &externalProps);
+
+            VkExternalMemoryFeatureFlags externalFeatures =
+                externalProps.externalMemoryProperties.externalMemoryFeatures;
+            if (!(externalFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)) {
+                std::fprintf(stderr,
+                             "[export] external memory export not supported; falling back.\n");
+                return false;
+            }
+
+            const bool dedicatedOnly =
+                (externalFeatures & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
+
+            auto vkGetMemoryFdKHRFn = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+                vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
+            if (!vkGetMemoryFdKHRFn) {
+                std::fprintf(stderr,
+                             "[export] vkGetMemoryFdKHR unavailable; falling back.\n");
+                return false;
+            }
+
+            const auto cuErrToString = [](CUresult res) -> std::string {
+                const char* name = nullptr;
+                const char* desc = nullptr;
+                cuGetErrorName(res, &name);
+                cuGetErrorString(res, &desc);
+                std::string out = name ? name : "CUDA_ERROR";
+                if (desc && *desc) {
+                    out += ": ";
+                    out += desc;
+                }
+                return out;
+            };
+
+            CUresult cuRes = cuInit(0);
+            if (cuRes != CUDA_SUCCESS) {
+                std::fprintf(stderr,
+                             "[export] CUDA init failed: %s; falling back.\n",
+                             cuErrToString(cuRes).c_str());
+                return false;
+            }
+
+            int cudaDeviceCount = 0;
+            cuRes = cuDeviceGetCount(&cudaDeviceCount);
+            if (cuRes != CUDA_SUCCESS || cudaDeviceCount <= 0) {
+                std::fprintf(stderr,
+                             "[export] CUDA device query failed; falling back.\n");
+                return false;
+            }
+
+            VkPhysicalDeviceIDProperties idProps{};
+            idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &idProps;
+            vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+            int cudaDeviceIndex = -1;
+            for (int i = 0; i < cudaDeviceCount; ++i) {
+                CUdevice cudaDevice = 0;
+                if (cuDeviceGet(&cudaDevice, i) != CUDA_SUCCESS) continue;
+                CUuuid cudaUuid{};
+                if (cuDeviceGetUuid(&cudaUuid, cudaDevice) != CUDA_SUCCESS) continue;
+                if (std::memcmp(cudaUuid.bytes, idProps.deviceUUID, VK_UUID_SIZE) == 0) {
+                    cudaDeviceIndex = i;
+                    break;
+                }
+            }
+
+            if (cudaDeviceIndex < 0) {
+                std::fprintf(stderr,
+                             "[export] no CUDA device matches the Vulkan GPU; falling back.\n");
+                return false;
+            }
+
+            const AVCodec* encoder = avcodec_find_encoder_by_name("h264_nvenc");
+            if (!encoder) {
+                std::fprintf(stderr,
+                             "[export] FFmpeg h264_nvenc encoder not available; falling back.\n");
+                return false;
+            }
+
+            bool cudaHwConfig = false;
+            for (int i = 0;; ++i) {
+                const AVCodecHWConfig* config = avcodec_get_hw_config(encoder, i);
+                if (!config) break;
+                if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+                    config->device_type == AV_HWDEVICE_TYPE_CUDA) {
+                    cudaHwConfig = true;
+                    break;
+                }
+            }
+            if (!cudaHwConfig) {
+                std::fprintf(stderr,
+                             "[export] h264_nvenc does not expose CUDA hw frames; falling back.\n");
+                return false;
+            }
+
+            const auto avErrToString = [](int err) -> std::string {
+                char buf[AV_ERROR_MAX_STRING_SIZE] = {};
+                av_strerror(err, buf, sizeof(buf));
+                return std::string(buf);
+            };
+
+            AVFormatContext* fmt_ctx = nullptr;
+            AVCodecContext* codec_ctx = nullptr;
+            AVBufferRef* hw_device_ctx = nullptr;
+            AVBufferRef* hw_frames_ctx = nullptr;
+            AVPacket* packet = nullptr;
+            AVStream* stream = nullptr;
+            bool headerWritten = false;
+
+            const auto cleanupFfmpeg = [&]() {
+                if (packet) {
+                    av_packet_free(&packet);
+                }
+                if (hw_frames_ctx) {
+                    av_buffer_unref(&hw_frames_ctx);
+                }
+                if (hw_device_ctx) {
+                    av_buffer_unref(&hw_device_ctx);
+                }
+                if (codec_ctx) {
+                    avcodec_free_context(&codec_ctx);
+                }
+                if (fmt_ctx) {
+                    if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE) && fmt_ctx->pb) {
+                        avio_closep(&fmt_ctx->pb);
+                    }
+                    avformat_free_context(fmt_ctx);
+                    fmt_ctx = nullptr;
+                }
+            };
+
+            int err = avformat_alloc_output_context2(&fmt_ctx, nullptr, nullptr, outputPath.c_str());
+            if (err < 0 || !fmt_ctx) {
+                throw std::runtime_error("exportVideo: failed to create FFmpeg output context");
+            }
+
+            codec_ctx = avcodec_alloc_context3(encoder);
+            if (!codec_ctx) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to allocate codec context");
+            }
+
+            AVRational fps_q = av_d2q(fps, 100000);
+            codec_ctx->width = static_cast<int>(swapChainExtent.width);
+            codec_ctx->height = static_cast<int>(swapChainExtent.height);
+            codec_ctx->time_base = av_inv_q(fps_q);
+            codec_ctx->framerate = fps_q;
+            codec_ctx->pix_fmt = AV_PIX_FMT_CUDA;
+            if (fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
+                codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            }
+
+            av_opt_set(codec_ctx->priv_data, "preset", "p1", 0);
+            av_opt_set(codec_ctx->priv_data, "cq", "19", 0);
+
+            std::string cudaDeviceStr = std::to_string(cudaDeviceIndex);
+            err = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA,
+                                         cudaDeviceStr.c_str(), nullptr, 0);
+            if (err < 0) {
+                std::fprintf(stderr,
+                             "[export] CUDA hw device init failed: %s; falling back.\n",
+                             avErrToString(err).c_str());
+                cleanupFfmpeg();
+                return false;
+            }
+
+            hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
+            if (!hw_frames_ctx) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to allocate hw frames context");
+            }
+
+            AVHWFramesContext* frames_ctx =
+                reinterpret_cast<AVHWFramesContext*>(hw_frames_ctx->data);
+            frames_ctx->format = AV_PIX_FMT_CUDA;
+            frames_ctx->sw_format = swPixFmt;
+            frames_ctx->width = codec_ctx->width;
+            frames_ctx->height = codec_ctx->height;
+            frames_ctx->initial_pool_size = static_cast<int>(queueDepth) + 4;
+            err = av_hwframe_ctx_init(hw_frames_ctx);
+            if (err < 0) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to init CUDA frames context");
+            }
+
+            codec_ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+            if (!codec_ctx->hw_frames_ctx) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to attach CUDA frames context");
+            }
+
+            err = avcodec_open2(codec_ctx, encoder, nullptr);
+            if (err < 0) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to open h264_nvenc encoder");
+            }
+
+            stream = avformat_new_stream(fmt_ctx, nullptr);
+            if (!stream) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to create output stream");
+            }
+            stream->time_base = codec_ctx->time_base;
+            err = avcodec_parameters_from_context(stream->codecpar, codec_ctx);
+            if (err < 0) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to copy codec parameters");
+            }
+
+            if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+                err = avio_open(&fmt_ctx->pb, outputPath.c_str(), AVIO_FLAG_WRITE);
+                if (err < 0) {
+                    cleanupFfmpeg();
+                    throw std::runtime_error("exportVideo: failed to open output file");
+                }
+            }
+
+            err = avformat_write_header(fmt_ctx, nullptr);
+            if (err < 0) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to write header");
+            }
+            headerWritten = true;
+
+            packet = av_packet_alloc();
+            if (!packet) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to allocate packet");
+            }
+
+            frameCaptureBufferSize = static_cast<VkDeviceSize>(swapChainExtent.width) *
+                                     static_cast<VkDeviceSize>(swapChainExtent.height) * 4;
+            const size_t frameBytes = static_cast<size_t>(frameCaptureBufferSize);
+            const uint32_t bufferCount =
+                std::max(queueDepth, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT));
+            frameCaptureBuffers.assign(bufferCount, VK_NULL_HANDLE);
+            frameCaptureBufferMemories.assign(bufferCount, VK_NULL_HANDLE);
+            frameCaptureBufferIndices.assign(MAX_FRAMES_IN_FLIGHT, std::numeric_limits<uint32_t>::max());
+
+            std::vector<VkDeviceSize> captureAllocSizes(bufferCount, 0);
+            std::vector<CUexternalMemory> cudaExternalMemories(bufferCount, nullptr);
+            std::vector<CUdeviceptr> cudaPointers(bufferCount, 0);
+
+            AVHWDeviceContext* hwdev = reinterpret_cast<AVHWDeviceContext*>(hw_device_ctx->data);
+            AVCUDADeviceContext* cudaDeviceCtx =
+                reinterpret_cast<AVCUDADeviceContext*>(hwdev->hwctx);
+            CUcontext cudaContext = cudaDeviceCtx->cuda_ctx;
+            cuRes = cuCtxSetCurrent(cudaContext);
+            if (cuRes != CUDA_SUCCESS) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to set CUDA context");
+            }
+
+            auto createCaptureBuffer = [&](uint32_t index) {
+                VkExternalMemoryBufferCreateInfo externalInfo{};
+                externalInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+                externalInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+                VkBufferCreateInfo bufferInfo{};
+                bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bufferInfo.size = frameCaptureBufferSize;
+                bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                bufferInfo.pNext = &externalInfo;
+
+                if (vkCreateBuffer(device, &bufferInfo, nullptr, &frameCaptureBuffers[index]) != VK_SUCCESS) {
+                    throw std::runtime_error("exportVideo: failed to create export capture buffer");
+                }
+
+                VkMemoryRequirements memRequirements;
+                vkGetBufferMemoryRequirements(device, frameCaptureBuffers[index], &memRequirements);
+                captureAllocSizes[index] = memRequirements.size;
+
+                VkMemoryDedicatedAllocateInfo dedicatedInfo{};
+                VkExportMemoryAllocateInfo exportInfo{};
+                exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+                exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                if (dedicatedOnly) {
+                    dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+                    dedicatedInfo.buffer = frameCaptureBuffers[index];
+                    exportInfo.pNext = &dedicatedInfo;
+                }
+
+                VkMemoryAllocateInfo allocInfo{};
+                allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                allocInfo.allocationSize = memRequirements.size;
+                allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+                                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                allocInfo.pNext = &exportInfo;
+
+                if (vkAllocateMemory(device, &allocInfo, nullptr, &frameCaptureBufferMemories[index]) != VK_SUCCESS) {
+                    throw std::runtime_error("exportVideo: failed to allocate export capture memory");
+                }
+
+                vkBindBufferMemory(device, frameCaptureBuffers[index], frameCaptureBufferMemories[index], 0);
+
+                VkMemoryGetFdInfoKHR fdInfo{};
+                fdInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+                fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                fdInfo.memory = frameCaptureBufferMemories[index];
+                int fd = -1;
+                VkResult fdResult = vkGetMemoryFdKHRFn(device, &fdInfo, &fd);
+                if (fdResult != VK_SUCCESS || fd < 0) {
+                    throw std::runtime_error("exportVideo: failed to export capture memory FD");
+                }
+
+                CUDA_EXTERNAL_MEMORY_HANDLE_DESC extDesc{};
+                extDesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
+                extDesc.handle.fd = fd;
+                extDesc.size = captureAllocSizes[index];
+                CUexternalMemory extMem = nullptr;
+                cuRes = cuImportExternalMemory(&extMem, &extDesc);
+                close(fd);
+                if (cuRes != CUDA_SUCCESS) {
+                    throw std::runtime_error("exportVideo: CUDA external memory import failed");
+                }
+
+                CUDA_EXTERNAL_MEMORY_BUFFER_DESC bufDesc{};
+                bufDesc.offset = 0;
+                bufDesc.size = frameCaptureBufferSize;
+                CUdeviceptr devPtr = 0;
+                cuRes = cuExternalMemoryGetMappedBuffer(&devPtr, extMem, &bufDesc);
+                if (cuRes != CUDA_SUCCESS) {
+                    cuDestroyExternalMemory(extMem);
+                    throw std::runtime_error("exportVideo: CUDA external memory mapping failed");
+                }
+
+                cudaExternalMemories[index] = extMem;
+                cudaPointers[index] = devPtr;
+            };
+
+            for (uint32_t i = 0; i < bufferCount; ++i) {
+                createCaptureBuffer(i);
+            }
+
+            createExportTimelineSemaphore();
+            if (exportTimelineSemaphore == VK_NULL_HANDLE) {
+                cleanupFfmpeg();
+                throw std::runtime_error("exportVideo: failed to create export timeline semaphore");
+            }
+
+            sceneStartTime = 0.0;
+            lastAnimationUpdateTime = -1.0f;
+            glfwSetTime(0.0);
+
+            const float timelineEnd = getTimelineEndTime();
+            const uint32_t totalFrames = std::max(1u, static_cast<uint32_t>(std::ceil(timelineEnd * fps)));
+
+            std::fprintf(stderr, "Exporting %u frames @ %.2f FPS (%ux%u, h264_nvenc zero-copy) -> %s\n",
+                         totalFrames, fps,
+                         swapChainExtent.width, swapChainExtent.height,
+                         outputPath.c_str());
+
+            std::chrono::steady_clock::time_point realtimeStart;
+            if (previewWhileExporting) {
+                realtimeStart = std::chrono::steady_clock::now();
+            }
+
+            struct ZeroCopyFrame {
+                uint32_t index = 0;
+                uint32_t bufferIndex = 0;
+                uint64_t timelineValue = 0;
+            };
+
+            struct ZeroCopyQueue {
+                std::mutex mutex;
+                std::condition_variable cvReady;
+                std::condition_variable cvFree;
+                std::deque<ZeroCopyFrame> ready;
+                std::deque<uint32_t> free;
+                bool closed = false;
+                bool aborted = false;
+                std::string abortMessage;
+            } exportQueue;
+
+            for (uint32_t i = 0; i < bufferCount; ++i) {
+                exportQueue.free.push_back(i);
+            }
+
+            const auto abortExport = [&](std::string message) {
+                std::lock_guard lock(exportQueue.mutex);
+                exportQueue.aborted = true;
+                exportQueue.abortMessage = std::move(message);
+                exportQueue.cvReady.notify_all();
+                exportQueue.cvFree.notify_all();
+            };
+
+            const auto wallStart = std::chrono::steady_clock::now();
+            std::thread encoderThread([&] {
+                if (cuCtxSetCurrent(cudaContext) != CUDA_SUCCESS) {
+                    abortExport("exportVideo: failed to set CUDA context in encoder thread");
+                    return;
+                }
+
+                auto lastProgressAt = wallStart;
+                uint32_t encodedFrames = 0;
+
+                const auto writePacket = [&](AVPacket* pkt) -> bool {
+                    av_packet_rescale_ts(pkt, codec_ctx->time_base, stream->time_base);
+                    pkt->stream_index = stream->index;
+                    if (av_interleaved_write_frame(fmt_ctx, pkt) < 0) {
+                        return false;
+                    }
+                    av_packet_unref(pkt);
+                    return true;
+                };
+
+                const auto drainPackets = [&]() -> bool {
+                    while (true) {
+                        int recvErr = avcodec_receive_packet(codec_ctx, packet);
+                        if (recvErr == AVERROR(EAGAIN) || recvErr == AVERROR_EOF) {
+                            return true;
+                        }
+                        if (recvErr < 0) {
+                            return false;
+                        }
+                        if (!writePacket(packet)) {
+                            return false;
+                        }
+                    }
+                };
+
+                const auto encodeFrame = [&](const ZeroCopyFrame& item) -> bool {
+                    AVFrame* frame = av_frame_alloc();
+                    if (!frame) return false;
+                    frame->format = AV_PIX_FMT_CUDA;
+                    frame->width = codec_ctx->width;
+                    frame->height = codec_ctx->height;
+                    frame->pts = static_cast<int64_t>(item.index);
+
+                    int frameErr = av_hwframe_get_buffer(codec_ctx->hw_frames_ctx, frame, 0);
+                    if (frameErr < 0) {
+                        av_frame_free(&frame);
+                        return false;
+                    }
+
+                    CUdeviceptr src = cudaPointers[item.bufferIndex];
+                    CUdeviceptr dst = reinterpret_cast<CUdeviceptr>(frame->data[0]);
+                    const size_t srcPitch = static_cast<size_t>(codec_ctx->width) * 4;
+                    const size_t dstPitch = static_cast<size_t>(frame->linesize[0]);
+
+                    CUresult copyRes = CUDA_SUCCESS;
+                    if (dstPitch == srcPitch) {
+                        copyRes = cuMemcpyDtoD(dst, src, frameBytes);
+                    } else {
+                        CUDA_MEMCPY2D copy{};
+                        copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+                        copy.srcDevice = src;
+                        copy.srcPitch = srcPitch;
+                        copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+                        copy.dstDevice = dst;
+                        copy.dstPitch = dstPitch;
+                        copy.WidthInBytes = srcPitch;
+                        copy.Height = codec_ctx->height;
+                        copyRes = cuMemcpy2D(&copy);
+                    }
+
+                    if (copyRes != CUDA_SUCCESS) {
+                        av_frame_free(&frame);
+                        return false;
+                    }
+
+                    int sendErr = avcodec_send_frame(codec_ctx, frame);
+                    if (sendErr == AVERROR(EAGAIN)) {
+                        if (!drainPackets()) {
+                            av_frame_free(&frame);
+                            return false;
+                        }
+                        sendErr = avcodec_send_frame(codec_ctx, frame);
+                    }
+                    av_frame_free(&frame);
+                    if (sendErr < 0) {
+                        return false;
+                    }
+
+                    return drainPackets();
+                };
+
+                const auto flushEncoder = [&]() -> bool {
+                    int sendErr = avcodec_send_frame(codec_ctx, nullptr);
+                    if (sendErr < 0) {
+                        return false;
+                    }
+                    return drainPackets();
+                };
+
+                while (true) {
+                    ZeroCopyFrame item;
+                    {
+                        std::unique_lock lock(exportQueue.mutex);
+                        exportQueue.cvReady.wait(lock, [&] {
+                            return exportQueue.aborted || exportQueue.closed || !exportQueue.ready.empty();
+                        });
+                        if (exportQueue.aborted) return;
+                        if (exportQueue.ready.empty()) {
+                            if (exportQueue.closed) break;
+                            continue;
+                        }
+                        item = exportQueue.ready.front();
+                        exportQueue.ready.pop_front();
+                    }
+
+                    VkSemaphoreWaitInfo waitInfo{};
+                    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                    waitInfo.semaphoreCount = 1;
+                    VkSemaphore waitSemaphore = exportTimelineSemaphore;
+                    waitInfo.pSemaphores = &waitSemaphore;
+                    waitInfo.pValues = &item.timelineValue;
+                    if (vkWaitSemaphores(device, &waitInfo, UINT64_MAX) != VK_SUCCESS) {
+                        abortExport("exportVideo: failed waiting on timeline semaphore");
+                        return;
+                    }
+
+                    if (!encodeFrame(item)) {
+                        abortExport("exportVideo: failed encoding CUDA frame");
+                        return;
+                    }
+
+                    ++encodedFrames;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastProgressAt >= std::chrono::milliseconds(200) || encodedFrames == totalFrames) {
+                        renderProgress(encodedFrames, totalFrames, wallStart);
+                        lastProgressAt = now;
+                    }
+
+                    {
+                        std::lock_guard lock(exportQueue.mutex);
+                        exportQueue.free.push_back(item.bufferIndex);
+                    }
+                    exportQueue.cvFree.notify_one();
+                }
+
+                if (!exportQueue.aborted) {
+                    if (!flushEncoder()) {
+                        abortExport("exportVideo: failed flushing encoder");
+                        return;
+                    }
+                    if (headerWritten) {
+                        const int trailerErr = av_write_trailer(fmt_ctx);
+                        if (trailerErr < 0) {
+                            abortExport("exportVideo: failed writing trailer");
+                        }
+                    }
+                }
+            });
+
+            for (uint32_t frame = 0; frame < totalFrames; ++frame) {
+                const double t = static_cast<double>(frame) / static_cast<double>(fps);
+
+                if (previewWhileExporting) {
+                    const auto target = realtimeStart + std::chrono::duration<double>(t);
+                    std::this_thread::sleep_until(target);
+                    glfwPollEvents();
+                    if (glfwWindowShouldClose(window)) {
+                        break;
+                    }
+                }
+
+                {
+                    std::lock_guard lock(exportQueue.mutex);
+                    if (exportQueue.aborted) break;
+                }
+
+                uint32_t bufferIndex = 0;
+                {
+                    std::unique_lock lock(exportQueue.mutex);
+                    exportQueue.cvFree.wait(lock, [&] {
+                        return exportQueue.aborted || !exportQueue.free.empty();
+                    });
+                    if (exportQueue.aborted) break;
+                    bufferIndex = exportQueue.free.front();
+                    exportQueue.free.pop_front();
+                }
+
+                const uint32_t slotIndex = currentFrame;
+                frameCaptureBufferIndices[slotIndex] = bufferIndex;
+
+                glfwSetTime(t);
+                drawFrame();
+
+                const uint64_t timelineValue = exportTimelineValueForFrame[slotIndex];
+                if (timelineValue == 0) {
+                    abortExport("exportVideo: missing timeline value for captured frame");
+                    break;
+                }
+
+                {
+                    std::lock_guard lock(exportQueue.mutex);
+                    if (exportQueue.aborted) {
+                        exportQueue.free.push_front(bufferIndex);
+                        exportQueue.cvFree.notify_one();
+                        break;
+                    }
+                    exportQueue.ready.push_back(ZeroCopyFrame{frame, bufferIndex, timelineValue});
+                }
+                exportQueue.cvReady.notify_one();
+            }
+
+            {
+                std::lock_guard lock(exportQueue.mutex);
+                exportQueue.closed = true;
+            }
+            exportQueue.cvReady.notify_all();
+            encoderThread.join();
+
+            {
+                std::lock_guard lock(exportQueue.mutex);
+                if (exportQueue.aborted) {
+                    cleanupFfmpeg();
+                    throw std::runtime_error(exportQueue.abortMessage.empty()
+                                                 ? "exportVideo: export aborted"
+                                                 : exportQueue.abortMessage);
+                }
+            }
+
+            vkDeviceWaitIdle(device);
+
+            if (cuCtxSetCurrent(cudaContext) == CUDA_SUCCESS) {
+                for (CUexternalMemory extMem : cudaExternalMemories) {
+                    if (extMem) {
+                        cuDestroyExternalMemory(extMem);
+                    }
+                }
+            }
+
+            cleanupFfmpeg();
+            return true;
+        };
+#else
+        auto tryZeroCopy = [&]() -> bool {
+            (void)outputPath;
+            (void)fps;
+            (void)previewWhileExporting;
+            (void)requestedCodec;
+            std::fprintf(stderr,
+                         "[export] CATALYST_EXPORT_ZEROCOPY=1 but Catalyst was built without FFmpeg/CUDA support; falling back.\n");
+            return false;
+        };
+#endif
+
+        if (zeroCopyActive) {
+            if (tryZeroCopy()) {
+                std::fprintf(stderr, "\n");
+                cleanup();
+                return;
+            }
+            resetCaptureBuffers();
+        }
+
+        frameCaptureBufferIndices.clear();
+
+        // Ensure ffmpeg exists (used for MP4 output).
+        if (std::system("command -v ffmpeg >/dev/null 2>&1") != 0) {
+            throw std::runtime_error("exportVideo: ffmpeg not found in PATH");
+        }
+
+        // Allocate host-visible buffers for swapchain readback (one per frame-in-flight).
+        frameCaptureBufferSize = static_cast<VkDeviceSize>(swapChainExtent.width) *
+                                 static_cast<VkDeviceSize>(swapChainExtent.height) * 4;
+        frameCaptureBuffers.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        frameCaptureBufferMemories.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            createBuffer(frameCaptureBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         frameCaptureBuffers[i], frameCaptureBufferMemories[i]);
+        }
+
+        const char* ffmpegPixFmt = nullptr;
+        switch (swapChainImageFormat) {
+            case VK_FORMAT_B8G8R8A8_SRGB:
+            case VK_FORMAT_B8G8R8A8_UNORM:
+                ffmpegPixFmt = "bgra";
+                break;
+            case VK_FORMAT_R8G8B8A8_SRGB:
+            case VK_FORMAT_R8G8B8A8_UNORM:
+                ffmpegPixFmt = "rgba";
+                break;
+            default:
+                throw std::runtime_error("exportVideo: unsupported swapchain format for raw export");
+        }
+
+        const auto shellQuote = [](const std::string& s) {
+            std::string out;
+            out.reserve(s.size() + 2);
+            out.push_back('\'');
+            for (char c : s) {
+                if (c == '\'') {
+                    out += "'\\''";
+                } else {
+                    out.push_back(c);
+                }
+            }
+            out.push_back('\'');
+            return out;
+        };
+
+        const auto ffmpegHasEncoder = [](const std::string& encoder) -> bool {
+            FILE* pipe = popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
+            if (!pipe) return false;
+            char line[4096];
+            bool found = false;
+            while (std::fgets(line, sizeof(line), pipe)) {
+                if (std::string_view(line).find(encoder) != std::string_view::npos) {
+                    found = true;
+                    break;
+                }
+            }
+            pclose(pipe);
+            return found;
+        };
+
+        const auto ffmpegArgsSelfTest = [](const std::string& args) -> bool {
+            // NVENC can reject very small resolutions on some systems, so self-test with a modest frame size.
+            const std::string testCmd =
+                "ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=256x256:r=1 -frames:v 1 -an " +
+                args + " -f null - >/dev/null 2>&1";
+            return std::system(testCmd.c_str()) == 0;
+        };
+
+        // Intentionally do NOT force `-pix_fmt yuv420p` here: `h264_nvenc` supports BGRA/RGBA inputs and
+        // forcing YUV420P makes ffmpeg insert a CPU colorspace conversion, which is often the bottleneck.
+        const std::string nvencArgs = "-c:v h264_nvenc -preset p1 -cq 19";
+
+        std::string codec = requestedCodec;
+        bool nvencSelfTested = false;
+        bool nvencOk = false;
+        if (codec == "auto") {
+            nvencSelfTested = true;
+            nvencOk = ffmpegHasEncoder("h264_nvenc") && ffmpegArgsSelfTest(nvencArgs);
+            codec = nvencOk ? "h264_nvenc" : "libx264";
+        }
+
+        if (!ffmpegHasEncoder(codec)) {
+            throw std::runtime_error("exportVideo: ffmpeg does not support requested encoder: " + codec);
+        }
+        if (codec == "h264_nvenc" && !(nvencSelfTested && nvencOk) && !ffmpegArgsSelfTest(nvencArgs)) {
+            throw std::runtime_error("exportVideo: ffmpeg encoder h264_nvenc is present but failed self-test (check NVIDIA drivers / permissions)");
+        }
+
+        std::string codecArgs;
+        if (codec == "libx264") {
+            codecArgs = "-c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 18";
+        } else if (codec == "h264_nvenc") {
+            codecArgs = nvencArgs;
+        } else {
+            codecArgs = "-c:v " + codec + " -pix_fmt yuv420p";
+        }
+
+        const std::string cmd =
+            "ffmpeg -y -loglevel error -f rawvideo -pix_fmt " + std::string(ffmpegPixFmt) +
+            " -s " + std::to_string(swapChainExtent.width) + "x" + std::to_string(swapChainExtent.height) +
+            " -r " + std::to_string(fps) + " -i - -an " + codecArgs + " " +
+            shellQuote(outputPath);
+
+        FILE* ffmpeg = popen(cmd.c_str(), "w");
+        if (!ffmpeg) {
+            throw std::runtime_error("exportVideo: failed to start ffmpeg");
+        }
+
+        const size_t frameBytes = static_cast<size_t>(frameCaptureBufferSize);
+        std::vector<void*> mappedSlots(MAX_FRAMES_IN_FLIGHT, nullptr);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (vkMapMemory(device, frameCaptureBufferMemories[i], 0, frameCaptureBufferSize, 0, &mappedSlots[i]) != VK_SUCCESS ||
+                !mappedSlots[i]) {
+                for (size_t j = 0; j < i; ++j) {
+                    if (mappedSlots[j]) {
+                        vkUnmapMemory(device, frameCaptureBufferMemories[j]);
+                    }
+                }
+                pclose(ffmpeg);
+                throw std::runtime_error("exportVideo: failed to map capture buffer");
+            }
+        }
+
+        // Drive the animation timeline using a fixed timestep (fps).
+        sceneStartTime = 0.0;
+        lastAnimationUpdateTime = -1.0f;
+        glfwSetTime(0.0);
+
+        const float timelineEnd = getTimelineEndTime();
+        const uint32_t totalFrames = std::max(1u, static_cast<uint32_t>(std::ceil(timelineEnd * fps)));
+
+        std::fprintf(stderr, "Exporting %u frames @ %.2f FPS (%ux%u, %s) -> %s\n",
+                     totalFrames, fps,
+                     swapChainExtent.width, swapChainExtent.height,
+                     codec.c_str(),
+                     outputPath.c_str());
+
+        std::chrono::steady_clock::time_point realtimeStart;
+        if (previewWhileExporting) {
+            realtimeStart = std::chrono::steady_clock::now();
+        }
+
+        struct ExportFrame {
+            uint32_t index = 0;
+            std::vector<std::uint8_t> bytes;
+        };
+        struct ExportQueue {
+            std::mutex mutex;
+            std::condition_variable cvReady;
+            std::condition_variable cvFree;
+            std::deque<ExportFrame> ready;
+            std::vector<std::vector<std::uint8_t>> free;
+            bool closed = false;
+            bool aborted = false;
+            std::string abortMessage;
+        } exportQueue;
+
+        exportQueue.free.reserve(queueDepth);
+        for (uint32_t i = 0; i < queueDepth; ++i) {
+            exportQueue.free.emplace_back(frameBytes);
+        }
+
+        const auto abortExport = [&](std::string message) {
+            std::lock_guard lock(exportQueue.mutex);
+            exportQueue.aborted = true;
+            exportQueue.abortMessage = std::move(message);
+            exportQueue.cvReady.notify_all();
+            exportQueue.cvFree.notify_all();
+        };
+
+        const auto wallStart = std::chrono::steady_clock::now();
+        std::thread writerThread([&] {
+            auto lastProgressAt = wallStart;
+            uint32_t writtenFrames = 0;
+
+            while (true) {
+                ExportFrame item;
+                {
+                    std::unique_lock lock(exportQueue.mutex);
+                    exportQueue.cvReady.wait(lock, [&] {
+                        return exportQueue.aborted || exportQueue.closed || !exportQueue.ready.empty();
+                    });
+                    if (exportQueue.aborted) return;
+                    if (exportQueue.ready.empty()) {
+                        if (exportQueue.closed) return;
+                        continue;
+                    }
+                    item = std::move(exportQueue.ready.front());
+                    exportQueue.ready.pop_front();
+                }
+
+                const size_t written = std::fwrite(item.bytes.data(), 1, frameBytes, ffmpeg);
+                if (written != frameBytes) {
+                    abortExport("exportVideo: failed writing raw frames to ffmpeg");
+                    return;
+                }
+
+                ++writtenFrames;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastProgressAt >= std::chrono::milliseconds(200) || writtenFrames == totalFrames) {
+                    renderProgress(writtenFrames, totalFrames, wallStart);
+                    lastProgressAt = now;
+                }
+
+                {
+                    std::lock_guard lock(exportQueue.mutex);
+                    exportQueue.free.push_back(std::move(item.bytes));
+                }
+                exportQueue.cvFree.notify_one();
+            }
+        });
+
+        auto enqueueCapturedFrame = [&](uint32_t frameIndex, uint32_t slotIndex) -> bool {
+            std::vector<std::uint8_t> buffer;
+            {
+                std::unique_lock lock(exportQueue.mutex);
+                exportQueue.cvFree.wait(lock, [&] {
+                    return exportQueue.aborted || !exportQueue.free.empty();
+                });
+                if (exportQueue.aborted) return false;
+                buffer = std::move(exportQueue.free.back());
+                exportQueue.free.pop_back();
+            }
+
+            if (buffer.size() != frameBytes) buffer.resize(frameBytes);
+            std::memcpy(buffer.data(), mappedSlots[slotIndex], frameBytes);
+
+            {
+                std::lock_guard lock(exportQueue.mutex);
+                if (exportQueue.aborted) {
+                    exportQueue.free.push_back(std::move(buffer));
+                    exportQueue.cvFree.notify_one();
+                    return false;
+                }
+                exportQueue.ready.push_back(ExportFrame{frameIndex, std::move(buffer)});
+            }
+            exportQueue.cvReady.notify_one();
+            return true;
+        };
+
+        auto flushSlotIfPending = [&](uint32_t slotIndex, std::optional<uint32_t>& pendingFrameIndex) -> bool {
+            if (!pendingFrameIndex.has_value()) return true;
+            vkWaitForFences(device, 1, &inFlightFences[slotIndex], VK_TRUE, UINT64_MAX);
+            const bool ok = enqueueCapturedFrame(*pendingFrameIndex, slotIndex);
+            pendingFrameIndex.reset();
+            return ok;
+        };
+
+        std::vector<std::optional<uint32_t>> pendingFrameForSlot(MAX_FRAMES_IN_FLIGHT);
+
+        uint32_t submittedFrames = 0;
+        for (uint32_t frame = 0; frame < totalFrames; ++frame) {
+            const double t = static_cast<double>(frame) / static_cast<double>(fps);
+
+            if (previewWhileExporting) {
+                const auto target = realtimeStart + std::chrono::duration<double>(t);
+                std::this_thread::sleep_until(target);
+                glfwPollEvents();
+                if (glfwWindowShouldClose(window)) {
+                    break;
+                }
+            }
+
+            {
+                std::lock_guard lock(exportQueue.mutex);
+                if (exportQueue.aborted) break;
+            }
+
+            const uint32_t slotIndex = currentFrame;
+            if (!flushSlotIfPending(slotIndex, pendingFrameForSlot[slotIndex])) {
+                break;
+            }
+
+            glfwSetTime(t);
+
+            drawFrame();
+            pendingFrameForSlot[slotIndex] = frame;
+            submittedFrames = frame + 1;
+        }
+
+        // Flush any remaining captured frames in order.
+        struct PendingSlot {
+            uint32_t frameIndex = 0;
+            uint32_t slotIndex = 0;
+        };
+        std::vector<PendingSlot> remaining;
+        remaining.reserve(MAX_FRAMES_IN_FLIGHT);
+        for (uint32_t slotIndex = 0; slotIndex < MAX_FRAMES_IN_FLIGHT; ++slotIndex) {
+            if (pendingFrameForSlot[slotIndex].has_value()) {
+                remaining.push_back(PendingSlot{*pendingFrameForSlot[slotIndex], slotIndex});
+            }
+        }
+        std::sort(remaining.begin(), remaining.end(), [](const PendingSlot& a, const PendingSlot& b) {
+            return a.frameIndex < b.frameIndex;
+        });
+        for (const PendingSlot& slot : remaining) {
+            {
+                std::lock_guard lock(exportQueue.mutex);
+                if (exportQueue.aborted) break;
+            }
+            vkWaitForFences(device, 1, &inFlightFences[slot.slotIndex], VK_TRUE, UINT64_MAX);
+            if (!enqueueCapturedFrame(slot.frameIndex, slot.slotIndex)) {
+                break;
+            }
+        }
+
+        {
+            std::lock_guard lock(exportQueue.mutex);
+            exportQueue.closed = true;
+        }
+        exportQueue.cvReady.notify_all();
+        writerThread.join();
+
+        {
+            std::lock_guard lock(exportQueue.mutex);
+            if (exportQueue.aborted) {
+                for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+                    if (mappedSlots[i]) {
+                        vkUnmapMemory(device, frameCaptureBufferMemories[i]);
+                    }
+                }
+                pclose(ffmpeg);
+                throw std::runtime_error(exportQueue.abortMessage.empty() ? "exportVideo: export aborted" : exportQueue.abortMessage);
+            }
+        }
+
+        vkDeviceWaitIdle(device);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (mappedSlots[i]) {
+                vkUnmapMemory(device, frameCaptureBufferMemories[i]);
+            }
+        }
+        const int rc = pclose(ffmpeg);
+        if (rc != 0) {
+            throw std::runtime_error("exportVideo: ffmpeg exited with error");
+        }
+
+        std::fprintf(stderr, "\n");
         cleanup();
     }
 
@@ -7577,12 +8759,22 @@ private:
         static constexpr uint32_t OVERLOAD_FRAMES_THRESHOLD = 10;  // Need 10 consecutive overloaded frames
     } hybridContext;
 
-    VkSwapchainKHR swapChain = VK_NULL_HANDLE;
-    std::vector<VkImage> swapChainImages;
-    VkFormat swapChainImageFormat = VK_FORMAT_UNDEFINED;
-    VkExtent2D swapChainExtent = {0, 0};
-    std::vector<VkImageView> swapChainImageViews;
-    std::vector<VkFramebuffer> swapChainFramebuffers;
+	VkSwapchainKHR swapChain = VK_NULL_HANDLE;
+	std::vector<VkImage> swapChainImages;
+	VkFormat swapChainImageFormat = VK_FORMAT_UNDEFINED;
+	VkExtent2D swapChainExtent = {0, 0};
+	std::vector<VkImageView> swapChainImageViews;
+	std::vector<VkFramebuffer> swapChainFramebuffers;
+	bool enableSwapchainCapture = false;  // Enables VK_IMAGE_USAGE_TRANSFER_SRC_BIT on swapchain images
+	bool enableExternalMemoryFd = false;  // Enables VK_KHR_external_memory_fd for export paths
+	bool enableTimelineSemaphores = false;  // Enables Vulkan timeline semaphore feature for export paths
+	std::vector<VkBuffer> frameCaptureBuffers;
+	std::vector<VkDeviceMemory> frameCaptureBufferMemories;
+	std::vector<uint32_t> frameCaptureBufferIndices;  // Per in-flight frame -> capture buffer index
+	VkDeviceSize frameCaptureBufferSize = 0;
+	VkSemaphore exportTimelineSemaphore = VK_NULL_HANDLE;
+	uint64_t exportTimelineValue = 0;
+	std::array<uint64_t, MAX_FRAMES_IN_FLIGHT> exportTimelineValueForFrame{};
 
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
@@ -7662,11 +8854,72 @@ private:
     std::vector<VkFence> inFlightFences;
     uint32_t currentFrame = 0;
 
-    void initWindow() {
-        glfwInit();
+    float getTimelineEndTime() const {
+        float endTime = currentTimeCursor;
+
+        const auto considerEntry = [&](const AnimationQueueEntry& entry) {
+            if (entry.loopCount < 0) {
+                throw std::runtime_error("exportVideo: repeatForever() is not supported for exports");
+            }
+            const float iterations = static_cast<float>(entry.loopCount + 1);
+            endTime = std::max(endTime, entry.startTime + entry.duration * iterations);
+        };
+
+        const auto considerElementQueue = [&](const auto& objects) {
+            for (const auto& obj : objects) {
+                for (const auto& entry : obj.animationQueue) {
+                    considerEntry(entry);
+                }
+            }
+        };
+
+        considerElementQueue(textObjects);
+        considerElementQueue(mathObjects);
+        considerElementQueue(shapeObjects);
+        considerElementQueue(imageObjects);
+        considerElementQueue(graphObjects);
+        considerElementQueue(vectorObjects);
+        considerElementQueue(axes3DObjects);
+        considerElementQueue(surface3DObjects);
+        considerElementQueue(shape3DObjects);
+
+        for (const auto& tracker : valueTrackers) {
+            for (const auto& anim : tracker.animationQueue) {
+                endTime = std::max(endTime, anim.startTime + anim.duration);
+            }
+        }
+
+        for (const auto& ev : pendingCameraEvents) {
+            endTime = std::max(endTime, ev.startTime + ev.duration);
+        }
+        for (const auto& ev : pending3DModeEvents) {
+            endTime = std::max(endTime, ev.startTime);
+        }
+        for (const auto& ev : pendingCamera3DEvents) {
+            endTime = std::max(endTime, ev.startTime + ev.duration);
+        }
+        for (const auto& clear : pendingClears) {
+            endTime = std::max(endTime, clear.time + clear.fadeDuration);
+        }
+
+        return endTime;
+    }
+
+    void initWindow(bool visible = true) {
+        if (!glfwInit()) {
+            const char* description = nullptr;
+            glfwGetError(&description);
+            throw std::runtime_error(std::string("glfwInit failed: ") + (description ? description : "unknown error"));
+        }
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
         window = glfwCreateWindow(width, height, "Catalyst - Vulkan", nullptr, nullptr);
+        if (!window) {
+            const char* description = nullptr;
+            glfwGetError(&description);
+            throw std::runtime_error(std::string("glfwCreateWindow failed: ") + (description ? description : "unknown error"));
+        }
     }
 
     void initVulkan() {
@@ -7701,11 +8954,30 @@ private:
     }
 
     void mainLoop() {
+        mainLoop(0.0f);
+    }
+
+    void mainLoop(float targetFps) {
         std::cout << ">>> mainLoop() starting with " << textObjects.size() << " texts" << std::endl;
         sceneStartTime = glfwGetTime();  // Initialize scene timeline
-        while (!glfwWindowShouldClose(window)) {
-            glfwPollEvents();
-            drawFrame();
+
+        if (targetFps > 0.0f) {
+            using clock = std::chrono::steady_clock;
+            const auto dt = std::chrono::duration_cast<clock::duration>(
+                std::chrono::duration<double>(1.0 / static_cast<double>(targetFps)));
+            auto nextFrameTime = clock::now();
+
+            while (!glfwWindowShouldClose(window)) {
+                glfwPollEvents();
+                drawFrame();
+                nextFrameTime += dt;
+                std::this_thread::sleep_until(nextFrameTime);
+            }
+        } else {
+            while (!glfwWindowShouldClose(window)) {
+                glfwPollEvents();
+                drawFrame();
+            }
         }
 
         vkDeviceWaitIdle(device);
@@ -7729,6 +9001,13 @@ private:
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
 
+        if (exportTimelineSemaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device, exportTimelineSemaphore, nullptr);
+            exportTimelineSemaphore = VK_NULL_HANDLE;
+        }
+        exportTimelineValue = 0;
+        exportTimelineValueForFrame.fill(0);
+
         if (timestampQueryPool != VK_NULL_HANDLE) {
             vkDestroyQueryPool(device, timestampQueryPool, nullptr);
         }
@@ -7740,6 +9019,19 @@ private:
 
         vkDestroyBuffer(device, vertexBuffer, nullptr);
         vkFreeMemory(device, vertexBufferMemory, nullptr);
+
+        for (VkBuffer buffer : frameCaptureBuffers) {
+            if (buffer == VK_NULL_HANDLE) continue;
+            vkDestroyBuffer(device, buffer, nullptr);
+        }
+        for (VkDeviceMemory memory : frameCaptureBufferMemories) {
+            if (memory == VK_NULL_HANDLE) continue;
+            vkFreeMemory(device, memory, nullptr);
+        }
+        frameCaptureBuffers.clear();
+        frameCaptureBufferMemories.clear();
+        frameCaptureBufferIndices.clear();
+        frameCaptureBufferSize = 0;
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
@@ -8138,13 +9430,77 @@ private:
 
         VkPhysicalDeviceFeatures deviceFeatures{};
 
+        // Build device extension list dynamically (export paths may request extra extensions).
+        auto supportsDeviceExtension = [&](const char* name) -> bool {
+            uint32_t extensionCount = 0;
+            vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
+            std::vector<VkExtensionProperties> available(extensionCount);
+            vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, available.data());
+            for (const auto& ext : available) {
+                if (std::strcmp(ext.extensionName, name) == 0) return true;
+            }
+            return false;
+        };
+
+        std::vector<const char*> enabledDeviceExtensions = deviceExtensions;
+
+        // `enableExternalMemoryFd` is treated as a request flag prior to device creation.
+        if (enableExternalMemoryFd) {
+            if (supportsDeviceExtension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+                enabledDeviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+            } else {
+                std::fprintf(stderr,
+                             "[export] VK_KHR_external_memory_fd not supported; disabling zero-copy export path.\n");
+                enableExternalMemoryFd = false;
+            }
+        }
+
+        VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures{};
+        timelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+
+        if (enableTimelineSemaphores) {
+            VkPhysicalDeviceTimelineSemaphoreFeatures supportedTimeline{};
+            supportedTimeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &supportedTimeline;
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(physicalDevice, &props);
+            const uint32_t apiVersion = props.apiVersion;
+            const bool timelineCore =
+                (VK_VERSION_MAJOR(apiVersion) > 1) ||
+                (VK_VERSION_MAJOR(apiVersion) == 1 && VK_VERSION_MINOR(apiVersion) >= 2);
+
+            if (!supportedTimeline.timelineSemaphore) {
+                std::fprintf(stderr,
+                             "[export] timeline semaphores not supported; disabling zero-copy export path.\n");
+                enableTimelineSemaphores = false;
+            } else if (!timelineCore && !supportsDeviceExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
+                std::fprintf(stderr,
+                             "[export] VK_KHR_timeline_semaphore not supported; disabling zero-copy export path.\n");
+                enableTimelineSemaphores = false;
+            } else {
+                if (!timelineCore) {
+                    enabledDeviceExtensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+                }
+                timelineFeatures.timelineSemaphore = VK_TRUE;
+            }
+        }
+
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.pEnabledFeatures = &deviceFeatures;
-        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-        createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
+        createInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
+
+        if (enableTimelineSemaphores) {
+            createInfo.pNext = &timelineFeatures;
+        }
 
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -8203,7 +9559,17 @@ private:
         createInfo.imageColorSpace = surfaceFormat.colorSpace;
         createInfo.imageExtent = extent;
         createInfo.imageArrayLayers = 1;
-        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        VkImageUsageFlags desiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (enableSwapchainCapture) {
+            desiredUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        }
+        if ((swapChainSupport.capabilities.supportedUsageFlags & desiredUsage) != desiredUsage) {
+            if (enableSwapchainCapture) {
+                throw std::runtime_error("Swapchain does not support VK_IMAGE_USAGE_TRANSFER_SRC_BIT (required for exportVideo)");
+            }
+            desiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        }
+        createInfo.imageUsage = desiredUsage;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
@@ -12088,7 +13454,9 @@ private:
     }
 
     void rebuildVertexBuffer() {
-        std::cout << ">>> rebuildVertexBuffer() called with " << textObjects.size() << " texts" << std::endl;
+        if (std::getenv("CATALYST_VERBOSE")) {
+            std::cout << ">>> rebuildVertexBuffer() called with " << textObjects.size() << " texts" << std::endl;
+        }
         // Combine all text vertices into one buffer
         std::vector<Vertex> allVertices;
         uint32_t currentOffset = 0;
@@ -13057,6 +14425,74 @@ private:
 
         vkCmdEndRenderPass(commandBuffer);
 
+        // Optional frame capture (swapchain -> host-visible buffer) for video export.
+        uint32_t captureIndex = currentFrame;
+        if (!frameCaptureBufferIndices.empty() && currentFrame < frameCaptureBufferIndices.size()) {
+            captureIndex = frameCaptureBufferIndices[currentFrame];
+        }
+        if (captureIndex != std::numeric_limits<uint32_t>::max() &&
+            !frameCaptureBuffers.empty() && captureIndex < frameCaptureBuffers.size() &&
+            frameCaptureBuffers[captureIndex] != VK_NULL_HANDLE) {
+            VkBuffer captureBuffer = frameCaptureBuffers[captureIndex];
+            VkImageMemoryBarrier toTransfer{};
+            toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toTransfer.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.image = swapChainImages[imageIndex];
+            toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            toTransfer.subresourceRange.baseMipLevel = 0;
+            toTransfer.subresourceRange.levelCount = 1;
+            toTransfer.subresourceRange.baseArrayLayer = 0;
+            toTransfer.subresourceRange.layerCount = 1;
+            toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                1, &toTransfer);
+
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {swapChainExtent.width, swapChainExtent.height, 1};
+
+            vkCmdCopyImageToBuffer(
+                commandBuffer,
+                swapChainImages[imageIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                captureBuffer,
+                1,
+                &region);
+
+            VkImageMemoryBarrier toPresent = toTransfer;
+            toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            toPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            toPresent.dstAccessMask = 0;
+
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                1, &toPresent);
+        }
+
         // Write end timestamp
         if (timestampQueryPool != VK_NULL_HANDLE) {
             vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -13087,6 +14523,27 @@ private:
                 throw std::runtime_error("Failed to create synchronization objects!");
             }
         }
+    }
+
+    void createExportTimelineSemaphore() {
+        if (!enableTimelineSemaphores) return;
+        if (exportTimelineSemaphore != VK_NULL_HANDLE) return;
+
+        VkSemaphoreTypeCreateInfo typeInfo{};
+        typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        typeInfo.initialValue = 0;
+
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphoreInfo.pNext = &typeInfo;
+
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &exportTimelineSemaphore) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create export timeline semaphore!");
+        }
+
+        exportTimelineValue = 0;
+        exportTimelineValueForFrame.fill(0);
     }
 
     void createTimestampQueryPool() {
@@ -15890,9 +17347,35 @@ private:
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = signalSemaphores;
+        std::array<VkSemaphore, 2> signalSemaphores{};
+        std::array<uint64_t, 2> signalSemaphoreValues{};
+        uint32_t signalSemaphoreCount = 0;
+
+        signalSemaphores[signalSemaphoreCount] = renderFinishedSemaphores[currentFrame];
+        signalSemaphoreValues[signalSemaphoreCount] = 0;
+        ++signalSemaphoreCount;
+
+        VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
+        if (exportTimelineSemaphore != VK_NULL_HANDLE) {
+            const uint64_t signalValue = ++exportTimelineValue;
+            exportTimelineValueForFrame[currentFrame] = signalValue;
+
+            signalSemaphores[signalSemaphoreCount] = exportTimelineSemaphore;
+            signalSemaphoreValues[signalSemaphoreCount] = signalValue;
+            ++signalSemaphoreCount;
+
+            timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            timelineSubmitInfo.waitSemaphoreValueCount = submitInfo.waitSemaphoreCount;
+            // All wait semaphores are binary in this engine loop, so value 0 is fine.
+            static constexpr uint64_t kBinaryWaitValue = 0;
+            timelineSubmitInfo.pWaitSemaphoreValues = &kBinaryWaitValue;
+            timelineSubmitInfo.signalSemaphoreValueCount = signalSemaphoreCount;
+            timelineSubmitInfo.pSignalSemaphoreValues = signalSemaphoreValues.data();
+            submitInfo.pNext = &timelineSubmitInfo;
+        }
+
+        submitInfo.signalSemaphoreCount = signalSemaphoreCount;
+        submitInfo.pSignalSemaphores = signalSemaphores.data();
 
         if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to submit draw command buffer!");
@@ -15900,8 +17383,9 @@ private:
 
         VkPresentInfoKHR presentInfo{};
         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        VkSemaphore presentWaitSemaphores[] = {renderFinishedSemaphores[currentFrame]};
         presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = signalSemaphores;
+        presentInfo.pWaitSemaphores = presentWaitSemaphores;
 
         VkSwapchainKHR swapChains[] = {swapChain};
         presentInfo.swapchainCount = 1;
@@ -15946,6 +17430,13 @@ private:
     }
 
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+        if (enableSwapchainCapture) {
+            for (const auto& availablePresentMode : availablePresentModes) {
+                if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                    return availablePresentMode;
+                }
+            }
+        }
         for (const auto& availablePresentMode : availablePresentModes) {
             if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
                 return availablePresentMode;
@@ -22587,6 +24078,138 @@ void Catalyst::run() {
     pImpl->run();
 }
 
+void Catalyst::run(float fps) {
+    pImpl->run(fps);
+}
+
+Catalyst::OutputOptions Catalyst::parseOutputArgs(int argc, char** argv,
+                                                  uint32_t defaultWidth,
+                                                  uint32_t defaultHeight,
+                                                  float defaultFps) {
+    OutputOptions opts;
+    opts.width = defaultWidth;
+    opts.height = defaultHeight;
+    opts.fps = defaultFps;
+
+    int firstFlagIndex = 1;
+    // Subcommand form: `... export out.mp4 [--fps ...] [-r ...] [--preview]`
+    if (argc >= 2 && argv[1] && std::strcmp(argv[1], "export") == 0) {
+        opts.exportVideo = true;
+        if (argc >= 3 && argv[2] && *argv[2]) {
+            opts.outputPath = argv[2];
+        }
+        firstFlagIndex = 3;
+    }
+
+    const auto parseUInt = [](const char* s, uint32_t& out) -> bool {
+        if (!s || *s == '\0') return false;
+        char* end = nullptr;
+        unsigned long v = std::strtoul(s, &end, 10);
+        if (!end || *end != '\0') return false;
+        if (v == 0 || v > std::numeric_limits<uint32_t>::max()) return false;
+        out = static_cast<uint32_t>(v);
+        return true;
+    };
+
+    const auto parseFloat = [](const char* s, float& out) -> bool {
+        if (!s || *s == '\0') return false;
+        char* end = nullptr;
+        float v = std::strtof(s, &end);
+        if (!end || *end != '\0') return false;
+        out = v;
+        return true;
+    };
+
+    const auto parseResolution = [&](const char* s, uint32_t& w, uint32_t& h) -> bool {
+        if (!s) return false;
+        std::string str(s);
+        size_t sep = str.find('x');
+        if (sep == std::string::npos) sep = str.find('X');
+        if (sep == std::string::npos) sep = str.find(',');
+        if (sep == std::string::npos) sep = str.find(':');
+        if (sep == std::string::npos) return false;
+        std::string left = str.substr(0, sep);
+        std::string right = str.substr(sep + 1);
+        uint32_t tw = 0, th = 0;
+        if (!parseUInt(left.c_str(), tw)) return false;
+        if (!parseUInt(right.c_str(), th)) return false;
+        w = tw;
+        h = th;
+        return true;
+    };
+
+    for (int i = firstFlagIndex; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (!arg || arg[0] == '\0') continue;
+
+        auto needsValue = [&](int idx) -> const char* {
+            if (idx + 1 < argc) return argv[idx + 1];
+            return nullptr;
+        };
+
+        if (std::strcmp(arg, "--fps") == 0) {
+            const char* v = needsValue(i);
+            float fps = opts.fps;
+            if (v && parseFloat(v, fps) && fps > 0.0f) {
+                opts.fps = fps;
+            }
+            ++i;
+            continue;
+        }
+        if (std::strcmp(arg, "-r") == 0 || std::strcmp(arg, "--resolution") == 0 || std::strcmp(arg, "--res") == 0) {
+            const char* v = needsValue(i);
+            uint32_t w = opts.width, h = opts.height;
+            if (v && parseResolution(v, w, h)) {
+                opts.width = w;
+                opts.height = h;
+            }
+            ++i;
+            continue;
+        }
+        if (std::strcmp(arg, "--width") == 0) {
+            const char* v = needsValue(i);
+            uint32_t w = opts.width;
+            if (v && parseUInt(v, w)) {
+                opts.width = w;
+            }
+            ++i;
+            continue;
+        }
+        if (std::strcmp(arg, "--height") == 0) {
+            const char* v = needsValue(i);
+            uint32_t h = opts.height;
+            if (v && parseUInt(v, h)) {
+                opts.height = h;
+            }
+            ++i;
+            continue;
+        }
+        if (std::strcmp(arg, "--export") == 0 || std::strcmp(arg, "--output") == 0 || std::strcmp(arg, "-o") == 0) {
+            const char* v = needsValue(i);
+            if (v && *v) {
+                opts.exportVideo = true;
+                opts.outputPath = v;
+            }
+            ++i;
+            continue;
+        }
+        if (std::strcmp(arg, "--preview") == 0) {
+            opts.previewWhileExporting = true;
+            continue;
+        }
+    }
+
+    if (opts.exportVideo && opts.fps <= 0.0f) {
+        opts.fps = 60.0f;
+    }
+
+    return opts;
+}
+
+void Catalyst::exportVideo(const std::string& outputPath, float fps, bool previewWhileExporting) {
+    pImpl->exportVideo(outputPath, fps, previewWhileExporting);
+}
+
 // Scene class implementation
 TextElement Scene::setText(const std::string& text) {
     auto element = parent->setText(text);
@@ -22954,8 +24577,9 @@ void AnimationGroup::play() {
 
 // Only compile demo main() when not building as library for animations
 #ifndef CATALYST_LIBRARY_BUILD
-int main() {
-    Catalyst window(1920, 1080);
+int main(int argc, char** argv) {
+    const auto opts = Catalyst::parseOutputArgs(argc, argv, 1920, 1080, 0.0f);
+    Catalyst window(opts.width, opts.height);
     window.setBackground("#1a1a2e");
 
     // ============================================================================
@@ -24544,7 +26168,13 @@ int main() {
     subText.show(0.5f, Direction::UP);
 
     try {
-        window.run();
+        if (opts.exportVideo) {
+            window.exportVideo(opts.outputPath, opts.fps, opts.previewWhileExporting);
+        } else if (opts.fps > 0.0f) {
+            window.run(opts.fps);
+        } else {
+            window.run();
+        }
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;

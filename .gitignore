@@ -34,3 +34,10 @@ lib/MicroTeX/.git/
 
 # Claude config
 .claude/
+
+# Local files (not for GitHub)
+CLAUDE.md
+AGENTS.md
+TODO.md
+TODO_EXPORT.md
+out.mp4

@@ -23,6 +23,18 @@ pkg_check_modules(PangoMM REQUIRED IMPORTED_TARGET pangomm-1.4)
 # Eigen (header-only) for VID-style math utilities
 find_package(Eigen3 REQUIRED)
 
+# Optional: FFmpeg libraries (libavcodec/libavformat/libavutil) for faster exports.
+option(CATALYST_ENABLE_FFMPEG "Enable FFmpeg libav* integration" OFF)
+if(CATALYST_ENABLE_FFMPEG)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil)
+endif()
+
+# Optional: CUDA driver API for Vulkan -> CUDA zero-copy export.
+option(CATALYST_ENABLE_CUDA "Enable CUDA driver API for zero-copy export" OFF)
+if(CATALYST_ENABLE_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
+
 # ============================================
 # Shader compilation (must be before targets)
 # ============================================
@@ -79,6 +91,15 @@ target_link_libraries(CatalystLib
         ${CMAKE_DL_LIBS}
 )
 
+if(CATALYST_ENABLE_FFMPEG)
+    target_link_libraries(CatalystLib PRIVATE PkgConfig::FFMPEG)
+    target_compile_definitions(CatalystLib PRIVATE CATALYST_ENABLE_FFMPEG)
+endif()
+if(CATALYST_ENABLE_CUDA)
+    target_link_libraries(CatalystLib PRIVATE CUDA::cuda_driver)
+    target_compile_definitions(CatalystLib PRIVATE CATALYST_ENABLE_CUDA)
+endif()
+
 target_include_directories(CatalystLib PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -105,6 +126,15 @@ target_link_libraries(Catalyst PRIVATE
     PkgConfig::PangoMM
     ${CMAKE_DL_LIBS}
 )
+
+if(CATALYST_ENABLE_FFMPEG)
+    target_link_libraries(Catalyst PRIVATE PkgConfig::FFMPEG)
+    target_compile_definitions(Catalyst PRIVATE CATALYST_ENABLE_FFMPEG)
+endif()
+if(CATALYST_ENABLE_CUDA)
+    target_link_libraries(Catalyst PRIVATE CUDA::cuda_driver)
+    target_compile_definitions(Catalyst PRIVATE CATALYST_ENABLE_CUDA)
+endif()
 
 target_include_directories(Catalyst PRIVATE
     ${Vulkan_INCLUDE_DIRS}

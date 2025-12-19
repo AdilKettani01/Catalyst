@@ -1265,6 +1265,31 @@ public:
     void wait(float seconds);   // Delay subsequent operations by X seconds
     void clear();               // Remove all elements and reset timeline
     void run();
+    void run(float fps);        // Run with a target FPS cap (real-time preview)
+
+    // Export & Output
+    struct OutputOptions {
+        uint32_t width = 1920;
+        uint32_t height = 1080;
+        float fps = 60.0f;
+        bool exportVideo = false;
+        bool previewWhileExporting = false;
+        std::string outputPath = "output.mp4";
+    };
+
+    // Minimal CLI parser for output-related flags (keeps non-flag args untouched):
+    // - Resolution: `-r 1920x1080`, `--resolution 1920x1080`, `--width 1920 --height 1080`
+    // - FPS: `--fps 60`
+    // - Video export: `--export out.mp4` / `--output out.mp4`
+    // - Export preview window: `--preview`
+    static OutputOptions parseOutputArgs(int argc, char** argv,
+                                         uint32_t defaultWidth = 1920,
+                                         uint32_t defaultHeight = 1080,
+                                         float defaultFps = 60.0f);
+
+    // Export the current timeline to an H.264 MP4 via ffmpeg (Catalyst resolution).
+    // `previewWhileExporting=true` keeps the Vulkan window visible during capture.
+    void exportVideo(const std::string& outputPath, float fps = 60.0f, bool previewWhileExporting = false);
 
 private:
     friend class TextElement;

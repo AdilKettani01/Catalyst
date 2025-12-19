@@ -58,7 +58,7 @@ Catalyst is a high-performance GPU-first Vulkan renderer designed for creating m
 
 - **Operating System**: Linux (Ubuntu 20.04+ / Debian 11+ recommended)
 - **GPU**: Vulkan 1.3 compatible graphics card
-- **Compiler**: GCC 11+ or Clang 14+ with C++17 support
+- **Compiler**: GCC 11+ or Clang 14+ with C++20 support
 - **CMake**: Version 3.20 or higher
 
 ### Dependencies Installation
@@ -75,8 +75,11 @@ sudo apt install vulkan-tools libvulkan-dev vulkan-validationlayers-dev spirv-to
 # Install GLFW3
 sudo apt install libglfw3-dev
 
-# Install Cairo and Pango (for LaTeX rendering)
-sudo apt install libcairo2-dev libpango1.0-dev
+# Install Cairo/Pango C++ bindings (for LaTeX rendering)
+sudo apt install libcairomm-1.0-dev libpangomm-1.4-dev
+
+# Install Eigen (header-only, used by VID utilities and vector helpers)
+sudo apt install libeigen3-dev
 
 # Install shader compiler
 sudo apt install glslang-tools
@@ -126,7 +129,7 @@ git submodule update --init --recursive
 Create a file called `hello.cpp`:
 
 ```cpp
-#include "catalyst.h"
+#include <Catalyst>
 
 int main() {
     // Create a 1920x1080 window
@@ -160,19 +163,19 @@ Place your `.cpp` file in the `animations/` directory. The build system automati
 ```bash
 cp hello.cpp animations/
 ./build.sh
-./build/hello
+./build/anim_hello
 ```
 
-#### Option 2: Link against CatalystLib
+#### Option 2: Link against Catalyst (CMake package)
 
 ```cmake
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 project(MyAnimation)
 
-find_package(CatalystLib REQUIRED)
+find_package(Catalyst CONFIG REQUIRED)
 add_executable(my_animation main.cpp)
-target_link_libraries(my_animation CatalystLib::CatalystLib)
+target_link_libraries(my_animation PRIVATE Catalyst::Catalyst)
 ```
 
 ### Project Structure
@@ -281,6 +284,31 @@ text.setPosition(Position::BRIGHT);   // Bottom-right corner
 | `BRIGHT` | Bottom-right corner |
 
 ---
+
+### VID Utilities (NumPy/SciPy-Style)
+
+For VID (Manim) ports, Catalyst ships a small set of header-only utilities in `vid_utils.h` (included automatically by `#include <Catalyst>`):
+
+- Interpolation helpers: `vid::interpolate`, `vid::inverse_interpolate`, `vid::match_interpolate`
+- NumPy-like sequences: `vid::linspace`, `vid::arange`, `vid::cumsum`
+- Color gradients: `vid::color_gradient_hex`
+- ODE integration (RK4): `vid::solve_ivp_rk4`
+- 1D interpolation: `vid::LinearInterpolator`
+
+Example:
+
+```cpp
+#include <Catalyst>
+
+auto ts = vid::linspace(0.0, 1.0, 60);
+auto colors = vid::color_gradient_hex({"#FF0000", "#0000FF"}, 10);
+
+vid::Vec2f y0(1.0f, 0.0f);
+auto sol = vid::solve_ivp_rk4<vid::Vec2f>(
+    [](double /*t*/, const vid::Vec2f& y) { return vid::Vec2f(-y.y(), y.x()); },
+    0.0, 5.0, y0, 1.0 / 60.0
+);
+```
 
 ## 5. Text & Typography
 
@@ -786,6 +814,53 @@ Convert between data coordinates and pixel coordinates:
 float pixelX = axes.toPixelX(2.5f);   // Data X → Pixel X
 float pixelY = axes.toPixelY(1.0f);   // Data Y → Pixel Y
 ```
+
+### Drawing Vectors (Arrows in Axes Coordinates)
+
+Use `setVector(...)` to draw a mathematical vector (an arrow from the axes origin to the given components).
+
+```cpp
+auto axes = window.setAxes(-5.0f, 5.0f, -3.0f, 3.0f);
+axes.show(0.5f);
+
+// From std::vector<float>
+auto v1 = window.setVector(axes, std::vector<float>{2.0f, 1.0f});
+v1.setColor("#FFFFFF");
+v1.setThickness(4.0f);
+v1.show(0.6f);
+
+// From Eigen (Vector2f / VectorXd / MatrixBase)
+Eigen::Vector2f v2(1.0f, -2.0f);
+auto v2Arrow = window.setVector(axes, v2);
+v2Arrow.setColor("#58C4DD");
+v2Arrow.show(0.6f);
+```
+
+You can also pass a `GraphElement` instead of an `AxesElement` if you already have a graph and want to reuse its axes:
+
+```cpp
+auto g = window.setGraph(axes, [](float x) { return std::sin(x); }, 200);
+g.show(0.5f);
+
+auto v = window.setVector(g, Eigen::Vector2f(2.0f, 1.0f));
+v.show(0.5f);
+```
+
+### Batch Vectors (Matrices / Tensors)
+
+`setVectors(...)` creates a `Group` of vectors from 2×N / N×2 (2D) or 3×N / N×3 (3D) inputs.
+
+```cpp
+// 2D: columns are vectors (2 x N)
+Eigen::Matrix<float, 2, 3> cols;
+cols << 1, 2, 3,
+        1, 0, -1;
+
+auto vectors = window.setVectors(axes, cols);
+vectors.show(0.5f);
+```
+
+If you use xtensor, any 2D tensor-like type with `shape()` and `operator()(i,j)` works (no Catalyst-specific wrapper required).
 
 ### Complete Graphing Example
 
@@ -1328,6 +1403,10 @@ svg.Rotate(1.0f, 360.0f);    // Full rotation
 | `setAxes(xMin, xMax, yMin, yMax)` | Create 2D AxesElement |
 | `setGraph(axes, func, points)` | Create function GraphElement |
 | `setGraph(axes, xData, yData)` | Create data GraphElement |
+| `setVector(axes, vx, vy)` | Create 2D vector (arrow) in axes coordinates |
+| `setVector(axes, components)` | Create 2D vector from std::vector / Eigen / xtensor-like input |
+| `setVector(graph, ...)` | Create 2D vector using a graph's axes |
+| `setVectors(axes, matrix/tensor)` | Batch-create vectors as a Group |
 | `createGroup()` | Create empty Group |
 | `createAnimationGroup()` | Create parallel AnimationGroup |
 | `createSequence()` | Create sequential AnimationGroup |
@@ -1336,6 +1415,9 @@ svg.Rotate(1.0f, 360.0f);    // Full rotation
 | `wait(seconds)` | Delay timeline |
 | `clear()` | Clear all elements |
 | `run()` | Start render loop |
+| `run(fps)` | Start render loop with FPS cap |
+| `exportVideo(path, fps, preview)` | Export timeline to MP4 via ffmpeg |
+| `parseOutputArgs(argc, argv, w, h, fps)` | Parse `--fps`, `-r`, `--export`, `--preview` |
 | `setBackground(hex)` | Set background color |
 | `setBackground(r, g, b)` | Set background color RGB |
 | `setCameraZoom(zoom)` | Set 2D camera zoom |
@@ -1352,8 +1434,19 @@ svg.Rotate(1.0f, 360.0f);    // Full rotation
 | `setCylinder(r, h)` | Create 3D cylinder |
 | `setCone(r, h)` | Create 3D cone |
 | `setArrow3D(...)` | Create 3D arrow |
+| `setVector(axes3D, vx, vy, vz)` | Create 3D vector (arrow) from origin |
+| `setVectors(axes3D, matrix/tensor)` | Batch-create 3D vectors as a Group |
 | `setCamera3D(...)` | Set 3D camera |
 | `orbitCamera(...)` | Spherical camera position |
+
+### Video Export
+
+`exportVideo(path, fps, preview)` renders the current timeline and streams raw frames into `ffmpeg` to produce an MP4.
+
+- Encoder selection: uses `h264_nvenc` when available (and passes a quick self-test), otherwise falls back to `libx264`.
+- Overrides:
+  - `CATALYST_VIDEO_CODEC`: `auto` (default), `libx264`, `h264_nvenc`, or any encoder from `ffmpeg -encoders`.
+  - `CATALYST_EXPORT_QUEUE`: number of frames buffered in RAM while encoding (default `8`).
 
 ### TextElement Methods
 

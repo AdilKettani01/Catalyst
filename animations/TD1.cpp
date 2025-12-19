@@ -1,10 +1,13 @@
 // Comprehensive Feature Demo - All Catalyst features demonstrated
 #include "../catalyst.h"
+#include <cstdlib>
+#include <iostream>
 #include <vector>
 #include <cmath>
 
-int main() {
-    Catalyst window(1280 , 720);
+int main(int argc, char** argv) {
+    const auto opts = Catalyst::parseOutputArgs(argc, argv, 1280, 720, 0.0f);
+    Catalyst window(opts.width, opts.height);
 
     // ============================================================================
     // SECTION 1: TEXT & TYPOGRAPHY
@@ -1592,6 +1595,17 @@ int main() {
     subText.setColor("#AAAAAA");
     subText.show(0.5f, Direction::UP);
 
-    window.run();
-    return 0;
+    try {
+        if (opts.exportVideo) {
+            window.exportVideo(opts.outputPath, opts.fps, opts.previewWhileExporting);
+        } else if (opts.fps > 0.0f) {
+            window.run(opts.fps);
+        } else {
+            window.run();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
